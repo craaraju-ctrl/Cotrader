@@ -17,6 +17,8 @@
 
 use chrono::{DateTime, Utc};
 use tokio::sync::RwLock;
+use crate::episode_store::EpisodeStore;
+use std::sync::Arc;
 
 // ── Circuit Breaker States ────────────────────────────────────────────────────
 
@@ -118,6 +120,7 @@ pub struct CircuitBreaker {
     daily_peak_equity: RwLock<Option<f64>>,
     connection_drop_count: RwLock<u32>,
     recent_events: RwLock<Vec<TimeStampedEvent>>,
+    episode_store: Option<Arc<EpisodeStore>>,
 }
 
 impl std::fmt::Debug for CircuitBreaker {
@@ -140,6 +143,22 @@ impl CircuitBreaker {
             daily_peak_equity: RwLock::new(None),
             connection_drop_count: RwLock::new(0),
             recent_events: RwLock::new(Vec::new()),
+            episode_store: None,
+        }
+    }
+
+    /// Create with episode store for audit logging.
+    pub fn with_episode_store(config: CircuitBreakerConfig, episode_store: Arc<EpisodeStore>) -> Self {
+        Self {
+            config,
+            state: RwLock::new(BreakerState::Armed),
+            halt_reason: RwLock::new(None),
+            halted_at: RwLock::new(None),
+            last_halt_at: RwLock::new(None),
+            daily_peak_equity: RwLock::new(None),
+            connection_drop_count: RwLock::new(0),
+            recent_events: RwLock::new(Vec::new()),
+            episode_store: Some(episode_store),
         }
     }
 
@@ -391,6 +410,16 @@ impl CircuitBreaker {
         // State transitions are handled lazily by is_trading_allowed().
         // When the cool-down expires, the next call to is_trading_allowed()
         // will transition Halted → Recovery → Armed and auto-resume.
+
+        // Audit trail: log halt event for post-mortem analysis
+        let audit_entry = serde_json::json!({
+            "event_type": "CIRCUIT_BREAKER_HALT",
+            "reason": format!("{}", reason),
+            "timestamp": now.to_rfc3339(),
+            "cool_down_secs": self.config.cool_down_secs,
+            "allocation_state": "ISOLATION_RECOVERY_MODE",
+        });
+        eprintln!("[CircuitBreaker] Audit: {}", audit_entry);
     }
 
     /// Check rapid failure rate within the last 60 seconds
