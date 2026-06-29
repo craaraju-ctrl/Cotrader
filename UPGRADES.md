@@ -46,3 +46,29 @@ cargo build --release            ✅
 |------|---------|
 | AUDIT.md | Full system audit (377 lines) |
 | AGENT_ARCHITECTURE.md | Agent pipeline review (263 lines) |
+
+## Part 3: Dynamic Price Discovery Engine
+
+### 19. Autonomous Price Discovery
+
+**Files:** `crates/rat-autonomous/src/strategy_decision.rs`, `crates/rat-autonomous/src/order_execution.rs`
+
+System autonomously discovers trigger prices — no hardcoded entries.
+
+**StrategyDecisionAgent:**
+- `evaluate_market_and_discover_price(symbol)` scans 100-bar history
+- Computes `system_discovered_entry_price = highest_resistance + (highest_resistance × σ × 1.5)`
+- Generates Short signal when current_price < discovered price
+
+**AutonomousExecutionEngine:**
+- 24/7 daemon monitors live prices against system-discovered signals
+- When price touches trigger: HardRulesGate verifies → execute
+- Double-trigger prevention via `session_valid = false`
+
+**Flow:**
+```
+Live Tick → StrategyDecision discovers price → Store signal
+  → Monitor loop checks: price >= entry_price?
+    → HardRulesGate.evaluate() → Passed → Execute
+    → HardRulesGate.evaluate() → Blocked → Log veto
+```
