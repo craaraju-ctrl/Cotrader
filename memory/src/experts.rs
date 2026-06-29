@@ -3,7 +3,7 @@
 //! Provides expert modules for retrieval, reasoning, consolidation, and evolution.
 
 use crate::store::MemoryStore;
-use crate::types::{MemoryRecord, SearchResult};
+use crate::types::{MemoryRecord, SearchResult, TradingRelation};
 use crate::vector::cosine_similarity;
 
 /// Expert specialized in hybrid memory retrieval (vector + graph + staleness).
@@ -72,7 +72,8 @@ impl RetrievalExpert {
             .collect()
     }
 
-    /// Boost search results based on graph connectivity and relationship strength.
+    /// Boost search results using domain-specific trading relationship weights.
+    /// Uses TradingRelation enum for precise, financial-aware scoring.
     fn boost_with_graph_reasoning(
         &self,
         results: &mut [SearchResult],
@@ -86,23 +87,35 @@ impl RetrievalExpert {
 
             let mut score = 0.0;
             for edge in &edges {
-                let type_weight = match edge.relation_type.as_str() {
-                    "causes" | "depends_on" | "leads_to" => 1.7,
-                    "part_of" | "requires" => 1.4,
-                    _ => 1.0,
+                // Parse relation type into TradingRelation enum
+                let type_weight = if let Some(relation) = TradingRelation::from_str(&edge.relation_type) {
+                    // Use domain-specific weight from TradingRelation
+                    1.0 + relation.boost_weight()
+                } else {
+                    // Fallback for unrecognized relation types
+                    1.0
                 };
                 score += edge.weight * type_weight;
             }
 
+            // Two-hop traversal for indirect relationships
             let mut two_hop = 0.0;
             for edge in &edges {
                 if let Ok(neighbors) = self.store.get_edges(&edge.target_id) {
-                    two_hop += neighbors.len() as f64 * 0.3;
+                    for neighbor in &neighbors {
+                        let neighbor_weight = if let Some(rel) = TradingRelation::from_str(&neighbor.relation_type) {
+                            1.0 + rel.boost_weight()
+                        } else {
+                            1.0
+                        };
+                        two_hop += neighbor.weight * neighbor_weight * 0.3;
+                    }
                 }
             }
 
-            let combined = (score + two_hop).min(35.0);
-            let boost = (combined / 35.0) * boost_weight;
+            // Combine scores with boost weight
+            let combined = (score + two_hop).clamp(-10.0, 10.0);
+            let boost = combined * boost_weight;
             result.score = (result.score + boost).clamp(0.0, 1.0);
         }
         Ok(())

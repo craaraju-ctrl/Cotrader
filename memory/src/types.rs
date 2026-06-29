@@ -268,7 +268,129 @@ pub struct MemoryStats {
 
 // ── Knowledge Graph Types ──────────────────────────────────────────────────
 
-/// A directed edge in the knowledge graph.
+/// Trading-specific graph relationship types.
+/// Each variant has a domain-specific weight for retrieval boosting.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum TradingRelation {
+    // Price relationships
+    /// Positive correlation (e.g., BTC → ETH)
+    CorrelatedWith,
+    /// Negative correlation (e.g., BTC → Gold)
+    InverselyCorrelated,
+    /// One asset leads another by N minutes
+    Leads,
+
+    // Regime relationships
+    /// Market regime transition
+    RegimeChangeTo,
+    /// Setup confirmed by evidence
+    ValidatedBy,
+    /// Setup broken by event
+    InvalidatedBy,
+
+    // Signal relationships
+    /// Contradictory signals
+    ConflictsWith,
+    /// Multiple indicators align
+    Strengthens,
+    /// Contradictory indicators
+    Weakens,
+
+    // Risk relationships
+    /// Position hedged by another
+    HedgedBy,
+    /// Portfolio exposure to factor
+    ExposedTo,
+    /// Position liquidation trigger
+    LiquidatedAt,
+
+    // Memory relationships
+    /// Lesson derived from trade
+    DerivedFrom,
+    /// New rule overrides old
+    Supersedes,
+    /// Pattern match to historical
+    SimilarTo,
+}
+
+impl TradingRelation {
+    /// Domain-specific weight multiplier for graph boosting.
+    /// Positive values boost retrieval, negative values suppress it.
+    pub fn boost_weight(&self) -> f64 {
+        match self {
+            // Strong negative relationships (evict unsafe params)
+            Self::InvalidatedBy => -0.50,
+            Self::ConflictsWith => -0.30,
+            Self::Weakens => -0.10,
+
+            // Strong positive relationships
+            Self::ValidatedBy => 0.40,
+            Self::Strengthens => 0.30,
+            Self::Supersedes => 0.20,
+
+            // Risk-related (always important)
+            Self::LiquidatedAt => 0.30,
+            Self::ExposedTo => 0.25,
+            Self::HedgedBy => 0.20,
+
+            // Regime
+            Self::RegimeChangeTo => 0.20,
+
+            // Correlation
+            Self::CorrelatedWith => 0.15,
+            Self::InverselyCorrelated => 0.10,
+            Self::Leads => 0.10,
+
+            // Memory
+            Self::DerivedFrom => 0.10,
+            Self::SimilarTo => 0.10,
+        }
+    }
+
+    /// Convert to string for storage.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::CorrelatedWith => "correlated_with",
+            Self::InverselyCorrelated => "inversely_correlated",
+            Self::Leads => "leads",
+            Self::RegimeChangeTo => "regime_change_to",
+            Self::ValidatedBy => "validated_by",
+            Self::InvalidatedBy => "invalidated_by",
+            Self::ConflictsWith => "conflicts_with",
+            Self::Strengthens => "strengthens",
+            Self::Weakens => "weakens",
+            Self::HedgedBy => "hedged_by",
+            Self::ExposedTo => "exposed_to",
+            Self::LiquidatedAt => "liquidated_at",
+            Self::DerivedFrom => "derived_from",
+            Self::Supersedes => "supersedes",
+            Self::SimilarTo => "similar_to",
+        }
+    }
+
+    /// Parse from string.
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "correlated_with" => Some(Self::CorrelatedWith),
+            "inversely_correlated" => Some(Self::InverselyCorrelated),
+            "leads" => Some(Self::Leads),
+            "regime_change_to" => Some(Self::RegimeChangeTo),
+            "validated_by" => Some(Self::ValidatedBy),
+            "invalidated_by" => Some(Self::InvalidatedBy),
+            "conflicts_with" => Some(Self::ConflictsWith),
+            "strengthens" => Some(Self::Strengthens),
+            "weakens" => Some(Self::Weakens),
+            "hedged_by" => Some(Self::HedgedBy),
+            "exposed_to" => Some(Self::ExposedTo),
+            "liquidated_at" => Some(Self::LiquidatedAt),
+            "derived_from" => Some(Self::DerivedFrom),
+            "supersedes" => Some(Self::Supersedes),
+            "similar_to" => Some(Self::SimilarTo),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphEdge {
     pub edge_id: String,

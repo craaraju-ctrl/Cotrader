@@ -33,6 +33,106 @@ pub fn hamming_similarity(a: &[bool], b: &[bool]) -> f64 {
     1.0 - hamming_distance(a, b)
 }
 
+// ── SIMD-Accelerated Hamming Distance ──────────────────────────────────────
+
+/// Pack boolean vector into u64 array for SIMD processing.
+/// Each u64 holds 64 bits (bools).
+pub fn pack_bools_to_u64(bools: &[bool]) -> Vec<u64> {
+    let num_words = (bools.len() + 63) / 64;
+    let mut words = vec![0u64; num_words];
+    for (i, &b) in bools.iter().enumerate() {
+        if b {
+            words[i / 64] |= 1u64 << (i % 64);
+        }
+    }
+    words
+}
+
+/// Scalar fallback for Hamming distance on u64 arrays.
+/// Counts differing bits using popcount.
+fn hamming_distance_scalar(a: &[u64], b: &[u64]) -> f64 {
+    if a.len() != b.len() || a.is_empty() {
+        return 1.0;
+    }
+    let mut count = 0u32;
+    for i in 0..a.len() {
+        count += (a[i] ^ b[i]).count_ones();
+    }
+    count as f64 / (a.len() * 64) as f64
+}
+
+/// AVX2-accelerated Hamming distance for binary vectors packed as u64.
+/// Processes 256 bits (4 x u64) per iteration using SIMD intrinsics.
+///
+/// # Safety
+/// This function uses unsafe AVX2 intrinsics. It is only compiled on x86_64
+/// targets with AVX2 support. The caller must ensure:
+/// - Both slices have the same length
+/// - The CPU supports AVX2 (checked at runtime via `is_x86_feature_detected!`)
+#[cfg(target_arch = "x86_64")]
+unsafe fn hamming_distance_simd_avx2(a: &[u64], b: &[u64]) -> f64 {
+    use std::arch::x86_64::*;
+
+    if a.len() != b.len() || a.is_empty() {
+        return 1.0;
+    }
+
+    let mut count = 0u32;
+    let chunks = a.len() / 4;
+
+    // Process 4 x u64 = 256 bits per iteration
+    for i in 0..chunks {
+        let va = _mm256_loadu_si256(a.as_ptr().add(i * 4) as *const __m256i);
+        let vb = _mm256_loadu_si256(b.as_ptr().add(i * 4) as *const __m256i);
+        let xor = _mm256_xor_si256(va, vb);
+        // Use scalar popcount on each u64 lane (AVX2 doesn't have native popcnt)
+        let mut tmp = [0u64; 4];
+        _mm256_storeu_si256(tmp.as_mut_ptr() as *mut __m256i, xor);
+        for &v in &tmp {
+            count += v.count_ones();
+        }
+    }
+
+    // Handle remaining elements with scalar
+    let remaining = a.len() % 4;
+    for i in (chunks * 4)..a.len() {
+        count += (a[i] ^ b[i]).count_ones();
+    }
+
+    count as f64 / (a.len() * 64) as f64
+}
+
+/// SIMD-accelerated Hamming distance with runtime feature detection.
+/// Falls back to scalar if AVX2 is not available.
+pub fn hamming_distance_simd(a: &[u64], b: &[u64]) -> f64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            // SAFETY: AVX2 is detected at runtime, slices have same length
+            unsafe { hamming_distance_simd_avx2(a, b) }
+        } else {
+            hamming_distance_scalar(a, b)
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        hamming_distance_scalar(a, b)
+    }
+}
+
+/// SIMD-accelerated Hamming similarity (1.0 - distance).
+pub fn hamming_similarity_simd(a: &[u64], b: &[u64]) -> f64 {
+    1.0 - hamming_distance_simd(a, b)
+}
+
+/// Quantize binary vector to u64 packed format for SIMD processing.
+pub fn quantize_to_packed(vector: &[f64]) -> Vec<u64> {
+    let bools = quantize_binary(vector);
+    pack_bools_to_u64(&bools)
+}
+
+
+
 // ── Vector Record ───────────────────────────────────────────────────────────
 
 /// A stored vector with optional binary signature and metadata.
