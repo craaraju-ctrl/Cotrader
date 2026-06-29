@@ -1,162 +1,126 @@
-# Agentic Memory — Engineering Upgrades
+# Agentic Memory — Implementation Log
 *Last updated: 2026-06-29*
 
 ---
 
-## Implementation Status
+## Implemented Changes
 
-| Component | File | Status |
-|-----------|------|--------|
-| ConcurrentPolicyCache | `memory/src/performance.rs` | ✅ Implemented |
-| ConcurrentStore wrapper | `memory/src/performance.rs` | ✅ Implemented |
-| SQLite connection pool | `memory/src/store.rs` | ⏳ Deferred |
-| FinancialRegretScorer | — | 📋 Planned |
-| TradingRelation enum | — | 📋 Planned |
-| SIMD Hamming distance | — | 📋 Planned |
+### 1. SQLite Connection Pool (P0)
+
+**Files modified:**
+- `memory/Cargo.toml` — Added `r2d2 = "0.8"`, `r2d2_sqlite = "0.24"`
+- `memory/src/store.rs` — Replaced `Arc<Mutex<Connection>>` with `Arc<Pool<SqliteConnectionManager>>`
+
+**What changed:**
+```rust
+// Before
+pub(crate) conn: Arc<Mutex<Connection>>
+
+// After
+pub(crate) pool: Arc<Pool<SqliteConnectionManager>>
+```
+
+**Pool configuration:**
+- Max connections: 8
+- Min idle: 2
+- Pragmas: WAL mode, busy_timeout=5000, synchronous=NORMAL, foreign_keys=ON, temp_store=MEMORY
+
+**Impact:** 8 concurrent background operations can now run in parallel without blocking the main trading thread.
 
 ---
 
-## 1. ConcurrentPolicyCache (Implemented)
+### 2. FinancialRegretScorer (P1)
 
-**File:** `memory/src/performance.rs`
+**Files modified:**
+- `memory/src/consolidation.rs` — Added `FinancialRegretScorer` struct
+- `memory/src/lib.rs` — Exported `FinancialRegretScorer`
 
-Replaces single-threaded `HashMap` with lock-free `DashMap`.
+**What it does:**
+Extracts trading-specific metadata from `MemoryRecord` and computes importance based on actual portfolio impact.
+
+**Formula:**
+```
+Importance = Access_Factor + Recency_Factor + (w1 × regret_score) + (w2 × log10(|balance_delta|))
+```
+
+**Weights:**
+- regret_weight: 0.35
+- balance_delta_weight: 0.25
+- position_weight: 0.20
+- regime_weight: 0.20
+
+**Metadata fields read:**
+- `regret_score` (0.0-1.0)
+- `balance_delta` (absolute change)
+- `position_size`
+- `regime` (Volatile, Trending, Ranging)
+- `is_win` (true/false)
+- `leverage` (multiplier)
+
+**Modifiers:**
+- Leverage >10x: importance × (1 + leverage/100)
+- Losing trades: importance × 1.2
+
+---
+
+### 3. ConcurrentPolicyCache (P0)
+
+**File:** `memory/src/performance.rs` (created)
+
+**What it does:**
+DashMap-based lock-free cache for concurrent access.
 
 ```rust
-use dashmap::DashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-
 pub struct ConcurrentPolicyCache<T: Clone + Send + Sync> {
     entries: Arc<DashMap<String, CacheEntry<T>>>,
-    max_size: usize,
-    default_ttl: Duration,
     total_hits: Arc<AtomicU64>,
     total_misses: Arc<AtomicU64>,
 }
 ```
 
 **Key methods:**
-- `get(&self, key) -> Option<T>` — Lock-free read, clones value
-- `insert(&self, key, value)` — Lock-free write with auto-eviction
-- `remove(&self, key) -> Option<T>` — Atomic removal
+- `get(&self)` — Lock-free read
+- `insert(&self)` — Lock-free write with auto-eviction
 - `purge_expired(&self)` — Background-safe cleanup
-- `hit_rate(&self) -> f64` — Atomic counter math
-
-**Why DashMap:** Concurrent reads without blocking. Market data thread never waits on policy lookups.
 
 ---
 
-## 2. ConcurrentStore Wrapper (Implemented)
+### 4. ConcurrentStore Wrapper (P0)
 
 **File:** `memory/src/performance.rs`
 
-Generic async-friendly wrapper for any store type.
-
-```rust
-pub struct ConcurrentStore<S> {
-    inner: Arc<RwLock<S>>,
-}
-
-impl<S: Clone + Send + Sync> ConcurrentStore<S> {
-    pub async fn read<F, R>(&self, f: F) -> R
-    where F: FnOnce(&S) -> R { ... }
-
-    pub async fn write<F, R>(&self, f: F) -> R
-    where F: FnOnce(&mut S) -> R { ... }
-}
-```
-
-**Why RwLock:** Multiple concurrent readers, exclusive writers. Background consolidation runs alongside live trading reads.
+Generic async-friendly wrapper using `tokio::sync::RwLock`.
 
 ---
 
-## 3. SQLite Connection Pool (Deferred)
-
-**Blocker:** Version conflict between `rusqlite 0.31` and `r2d2_sqlite 0.28` (requires `rusqlite 0.35`). Also conflicts with `sqlx` in exchange crate.
-
-**Fix required:** Upgrade all rusqlite dependencies to 0.35 across workspace:
-- `memory/Cargo.toml`
-- `crates/rat-autonomous/Cargo.toml`
-- `crates/rat-compliance/Cargo.toml`
-- `crates/rat-metrics/Cargo.toml`
-
-Then replace `Arc<Mutex<Connection>>` with `Arc<Pool<SqliteConnectionManager>>`.
-
----
-
-## 4. FinancialRegretScorer (Planned)
-
-**Purpose:** Replace generic text-length scoring with portfolio-impact scoring.
-
-```rust
-pub fn score(&self, ctx: &FinancialContext) -> f64 {
-    let mut score = 0.0;
-    score += ctx.regret_score * 0.35;
-    score += log10(ctx.balance_delta.abs()) / 5.0 * 0.25;
-    score += (ctx.position_size / 100000.0).clamp(0.0, 1.0) * 0.20;
-    score += regime_weight * 0.20;
-    if ctx.leverage > 10 { score *= 1.0 + ctx.leverage as f64 / 100.0; }
-    if !ctx.is_win { score *= 1.2; }
-    score.clamp(0.0, 1.0)
-}
-```
-
----
-
-## 5. TradingRelation Enum (Planned)
-
-**Purpose:** Replace generic string edges with domain-aware trading relationships.
-
-```rust
-pub enum TradingRelation {
-    CorrelatedWith,      // +0.15 boost
-    InverselyCorrelated, // +0.10 boost
-    ValidatedBy,         // +0.40 boost
-    InvalidatedBy,       // -0.50 penalty (evicts unsafe params)
-    ConflictsWith,       // -0.30 penalty
-    HedgedBy,            // +0.20 boost
-    LiquidatedAt,        // +0.30 boost
-    // ... 15 total relations
-}
-```
-
-Each relation has a domain-specific weight that `RetrievalExpert::boost_with_graph_reasoning` applies.
-
----
-
-## 6. SIMD Hamming Distance (Planned)
-
-**Purpose:** Hardware-accelerated binary vector search.
-
-```rust
-#[cfg(target_arch = "x86_64")]
-unsafe fn hamming_distance_simd(a: &[u64], b: &[u64]) -> f64 {
-    let mut count = 0u32;
-    for i in 0..(a.len() / 4) {
-        let va = _mm256_loadu_si256(a.as_ptr().add(i * 4) as *const __m256i);
-        let vb = _mm256_loadu_si256(b.as_ptr().add(i * 4) as *const __m256i);
-        let xor = _mm256_xor_si256(va, vb);
-        count += _mm256_popcnt_epi64(xor) as u32;
-    }
-    count as f64 / (a.len() * 64) as f64
-}
-```
-
-10-30x faster than iterative comparison.
-
----
-
-## Build Verification
+## Build Status
 
 ```bash
 cargo check -p agentic-memory     # ✅ passes
-cargo build --release -p agentic-memory  # ✅ passes
+cargo build --release -p agentic-memory  # ✅ passes (14.6s)
 ```
 
 **Dependencies added:**
-- `dashmap = "5"` in `memory/Cargo.toml`
+- `r2d2 = "0.8"` in memory/Cargo.toml
+- `r2d2_sqlite = "0.24"` in memory/Cargo.toml
+- `dashmap = "5"` in memory/Cargo.toml
 
 **Files created:**
 - `memory/src/performance.rs` (219 lines)
 
-**No breaking changes** to existing API or storage layer.
+**Files modified:**
+- `memory/src/store.rs` (pool refactor)
+- `memory/src/consolidation.rs` (FinancialRegretScorer)
+- `memory/src/lib.rs` (export)
+
+---
+
+## Not Implemented (Future Work)
+
+| Item | Reason |
+|------|--------|
+| SIMD Hamming distance | Requires nightly Rust or `packed_simd` |
+| TradingRelation enum | Graph taxonomy upgrade |
+| Adaptive Ebbinghaus | Requires volatility feed integration |
+| Backtest validation loop | Requires NATS bus + backtest runner |
+| Conflict arbitrator | Game-theoretic namespace resolution |
