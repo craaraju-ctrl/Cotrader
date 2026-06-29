@@ -79,3 +79,60 @@ cargo build --release            ✅
 | Scripts | 5 | ~400 |
 | Docs | 3 | ~900 |
 | **Total** | **116+** | **~64,000+** |
+
+---
+
+## Agent Orchestration & Rule Gaps
+
+### What's Implemented (9 working features)
+
+| # | Feature | File:Line |
+|---|---------|-----------|
+| 1 | Sigma read from memory_int | strategy_decision.rs:51 |
+| 2 | evaluate_market_and_discover_price() | strategy_decision.rs:58-88 |
+| 3 | Volatility modulation on SL/TP | strategy_decision.rs:679 |
+| 4 | Policy cache for trading_enabled | hard_rules_gate.rs:105 |
+| 5 | Volatility-adjusted heat limit | hard_rules_gate.rs:334-336 |
+| 6 | effective_max_leverage(sigma) | risk_guardian.rs:63-72 |
+| 7 | effective_slippage_tolerance(base, sigma) | risk_guardian.rs:71-73 |
+| 8 | Sigma read for slippage | execution_coordinator.rs:386 |
+| 9 | AutonomousExecutionEngine signal tracking | order_execution.rs |
+
+### Orchestration Gaps (18 missing)
+
+| # | Gap | File | Severity |
+|---|-----|------|----------|
+| 1 | HardRulesGate::new() called WITHOUT memory_int | order_execution.rs:75 | Critical |
+| 2 | 17 direct RwLock reads bypass ConcurrentPolicyCache | hard_rules_gate.rs (11 spots) | High |
+| 3 | Static position_size: 1.0 in price discovery | strategy_decision.rs:82 | High |
+| 4 | Direct portfolio.cash_balance mutation (no settlement) | order_execution.rs:81 | High |
+| 5 | No FinancialRegretScorer in outcome_processor | outcome_processor.rs | High |
+| 6 | No volatility in portfolio_manager sizing | portfolio_manager.rs | Medium |
+| 7 | No ConcurrentPolicyCache invalidation on rule changes | meta_control.rs | Medium |
+| 8 | No TradingRelation tags on episodes | episode_store.rs | Medium |
+| 9 | No memory_int for volatility-adjusted halts | circuit_breaker.rs | Medium |
+| 10 | No volatility scaling in risk_psychology | risk_psychology.rs | Medium |
+| 11 | No TradingRelation-based filtering in scanner | scanner.rs | Low |
+| 12 | No memory integration in drawdown_monitor | drawdown_monitor.rs | Low |
+| 13 | No memory scorer for regret in reflector | reflector.rs | Low |
+| 14 | No trust weight persistence to SQLite | tri_level_validator.rs | Low |
+| 15 | No volatility adjustment in behavioral_psychology | behavioral_psychology.rs | Low |
+| 16 | No sleep cycle integration | walk_forward_runner.rs | Low |
+| 17 | No TradingRelation enum parsing in market_intelligence | market_intelligence.rs | Low |
+| 18 | No SIMD hamming distance in pattern_retriever | pattern_retriever.rs | Low |
+
+### Priority Fix Order
+
+**P0 (Blocks autonomous trading):**
+1. Pass memory_int to HardRulesGate in order_execution.rs
+2. Wire policy cache to all 17 rule checks in hard_rules_gate.rs
+3. Replace static position_size with Kelly + volatility scaling
+
+**P1 (Reduces risk):**
+4. Wire FinancialRegretScorer to outcome_processor
+5. Add volatility to portfolio_manager sizing
+6. Add cache invalidation to meta_control on rule changes
+7. Tag episodes with TradingRelation enum
+
+**P2 (Improves quality):**
+8-18. All medium/low severity gaps listed above
