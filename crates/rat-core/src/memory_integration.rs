@@ -15,7 +15,7 @@ use agentic_memory::FinancialRegretScorer;
 use crate::episode::TradingEpisode;
 
 /// Shared state for memory integration.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct MemoryIntegration {
     /// Lock-free policy cache for hot-path risk checks
     pub policy_cache: Arc<ConcurrentPolicyCache<PolicyEntry>>,

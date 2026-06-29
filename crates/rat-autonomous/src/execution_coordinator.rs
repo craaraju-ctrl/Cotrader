@@ -381,7 +381,10 @@ impl ExecutionCoordinatorAgent {
         }
 
         // ── PAPER MODE (existing logic) ────────────────────────────────────
-        let slippage_pct = 0.05;
+        // Volatility-adaptive slippage: wider tolerance in fast markets
+        let base_slippage = 0.05;
+        let sigma = self.state.memory_integration.get_volatility();
+        let slippage_pct = base_slippage * (1.0 + sigma);
         let effective_entry = match signal.direction {
             rat_core::TradeDirection::Long => signal.entry_price * (1.0 + slippage_pct / 100.0),
             rat_core::TradeDirection::Short => signal.entry_price * (1.0 - slippage_pct / 100.0),

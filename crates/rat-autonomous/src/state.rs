@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use rat_core::paper_engine::{BrokerRegistry, PaperEngineConfig};
+use rat_core::memory_integration::MemoryIntegration;
 use rat_core::{
     AdvancedPattern, CalendarEvent, Config, DisciplineRules, KnowledgeGraph, LlmExecutor,
     MemoryStore, NewsContext, OhlcvBar, PivotLevels, ServiceManager, SkillVote, TradingGoals,
@@ -201,6 +202,12 @@ pub struct SharedState {
     /// when thresholds are breached.
     pub circuit_breaker: Arc<CircuitBreaker>,
 
+    /// Memory Integration — bridges trading with agentic-memory.
+    /// Provides ConcurrentPolicyCache for sub-ms risk lookups,
+    /// FinancialRegretScorer for post-trade analytics, and
+    /// volatility sync to TemporalEngine.
+    pub memory_integration: Arc<MemoryIntegration>,
+
     /// Live Order Manager — SQLite-backed order lifecycle tracker. Persists every
     /// live order placed through the broker for crash recovery, fill confirmation,
     /// and rejection tracking.
@@ -371,6 +378,7 @@ impl SharedState {
             latest_metrics: Arc::new(RwLock::new(HashMap::new())),
             update_tx: Arc::new(update_tx),
             circuit_breaker: Arc::new(CircuitBreaker::new(CircuitBreakerConfig::default())),
+            memory_integration: Arc::new(MemoryIntegration::new()),
             live_order_manager: Arc::new(
                 LiveOrderManager::open(Some("rat_orders.db")).unwrap_or_else(|e| {
                     eprintln!("[LiveOrderManager] ⚠ Failed to open order DB: {}", e);

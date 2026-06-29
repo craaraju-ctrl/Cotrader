@@ -10,6 +10,7 @@ use tokio::sync::RwLock;
 
 /// Thread-safe policy cache using DashMap for lock-free concurrent access.
 /// Wraps the existing PolicyCache with concurrent-safe operations.
+#[derive(Debug)]
 pub struct ConcurrentPolicyCache<T: Clone + std::fmt::Debug + Send + Sync> {
     entries: Arc<DashMap<String, CacheEntry<T>>>,
     max_size: usize,

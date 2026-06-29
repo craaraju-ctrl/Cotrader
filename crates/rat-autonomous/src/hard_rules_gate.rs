@@ -37,6 +37,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 use crate::state::SharedState;
+use rat_core::memory_integration::MemoryIntegration;
 use crate::types::{
     AgentDecision, ChainOfReasoning, DecisionVerdict, HardRulesGateResult, OhlcvSnapshot,
     ReasoningStep, RuleCheck, RulePriority, RuleTrace,
@@ -45,11 +46,17 @@ use chrono::Utc;
 
 pub struct HardRulesGate {
     state: SharedState,
+    memory: Option<MemoryIntegration>,
 }
 
 impl HardRulesGate {
     pub fn new(state: SharedState) -> Self {
-        Self { state }
+        Self { state, memory: None }
+    }
+
+    /// Create with memory integration for policy cache lookups.
+    pub fn with_memory(state: SharedState, memory: MemoryIntegration) -> Self {
+        Self { state, memory: Some(memory) }
     }
 
     /// Run ALL hard rules in priority order using the default SharedState.
@@ -75,19 +82,32 @@ impl HardRulesGate {
         symbol: &str,
         snapshot: &OhlcvSnapshot,
     ) -> HardRulesGateResult {
+        self.evaluate_with_volatility(symbol, snapshot, 0.0).await
+    }
+
+    /// Volatility-aware rule evaluation.
+    /// sigma: market volatility (0.0 calm, 1.0 extreme)
+    pub async fn evaluate_with_volatility(
+        &self,
+        symbol: &str,
+        snapshot: &OhlcvSnapshot,
+        sigma: f64,
+    ) -> HardRulesGateResult {
         let mut failed_rules = Vec::new();
         let mut traces: Vec<RuleTrace> = Vec::new();
-        let mut highest_blocking_priority = None; // Track highest priority that should block
+        let mut highest_blocking_priority = None;
         let mut total_checked = 0;
 
         // ── CRITICAL PRIORITY (Never overridden) ────────────────────────────
-        // These rules stop trading immediately, regardless of any agent's opinion.
 
-        // 1. Trading enabled check
+        // 1. Trading enabled check (policy cache first)
         total_checked += 1;
+        let enabled = if let Some(ref mem) = self.memory {
+            mem.check_policy("trading_enabled")
+        } else {
+            self.state.portfolio.read().await.trading_enabled
+        };
         {
-            let portfolio = self.state.portfolio.read().await;
-            let enabled = portfolio.trading_enabled;
             let passed = enabled;
             traces.push(RuleTrace {
                 rule_name: "trading_enabled".to_string(),

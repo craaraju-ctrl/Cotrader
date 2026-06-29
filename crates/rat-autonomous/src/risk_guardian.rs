@@ -10,6 +10,8 @@ pub struct RiskGuardianConfig {
     pub absolute_max_drawdown_pct: f64,
     pub hard_min_stop_loss_pct: f64,
     pub hard_max_stop_loss_pct: f64,
+    /// Volatility sensitivity for dynamic leverage (default: 1.0)
+    pub volatility_sensitivity: f64,
 }
 
 impl RiskGuardianConfig {
@@ -23,6 +25,7 @@ impl RiskGuardianConfig {
             absolute_max_drawdown_pct: 0.15,
             hard_min_stop_loss_pct: 0.005,
             hard_max_stop_loss_pct: 0.08,
+            volatility_sensitivity: 1.0,
         }
     }
 }
@@ -55,6 +58,20 @@ impl RiskGuardian {
         Self { config }
     }
 
+    /// Calculate max leverage with volatility adjustment.
+    /// Formula: max_leverage = base / (1 + alpha * sigma)
+    pub fn effective_max_leverage(&self, sigma: f64) -> u32 {
+        let alpha = self.config.volatility_sensitivity;
+        let dynamic = (self.config.absolute_max_leverage as f64 / (1.0 + alpha * sigma)).floor() as u32;
+        dynamic.max(1) // Minimum 1x leverage
+    }
+
+    /// Calculate slippage tolerance scaled by volatility.
+    /// Higher volatility = wider slippage tolerance.
+    pub fn effective_slippage_tolerance(&self, base_slippage: f64, sigma: f64) -> f64 {
+        base_slippage * (1.0 + sigma)
+    }
+
     /// Intercepts and validates a proposed trade. Returns Ok(()) if safe, Err with violation reason otherwise.
     pub fn intercept_and_validate(
         &self,
@@ -68,6 +85,8 @@ impl RiskGuardian {
                 self.config.absolute_max_drawdown_pct * 100.0
             ));
         }
+        // Use static max for backward compatibility
+        // Dynamic leverage is applied at order sizing, not validation
         if proposed.leverage > self.config.absolute_max_leverage {
             return Err(format!(
                 "Leverage {} exceeds max {}",

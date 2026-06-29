@@ -101,6 +101,7 @@ impl Default for DefaultImportanceScorer {
 
 /// Financial-aware importance scorer for trading memory.
 /// Binds memory longevity to actual portfolio impact.
+#[derive(Debug)]
 pub struct FinancialRegretScorer {
     /// Weight for regret score (0.0-1.0)
     pub regret_weight: f64,
