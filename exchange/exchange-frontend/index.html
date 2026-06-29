@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nova Exchange — Trade Crypto & Global Stocks</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<link rel="stylesheet" href="style.css">
+<script src="https://unpkg.com/lightweight-charts@4.1/dist/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+<div class="exchange-app" id="app">
+
+  <!-- ── Top Navigation ────────────────────────────────────────────────── -->
+  <nav class="top-nav">
+    <div class="top-nav-brand">
+      <div class="top-nav-logo">⚡</div>
+      <span class="top-nav-wordmark">NOVA</span>
+    </div>
+    <div class="top-nav-menu">
+      <div class="top-nav-item active" data-page="markets" onclick="switchPage('markets')">
+        <i class="fas fa-chart-line"></i> <span>Markets</span>
+      </div>
+      <div class="top-nav-item" data-page="trade" onclick="switchPage('trade')">
+        <i class="fas fa-exchange-alt"></i> <span>Trade</span>
+      </div>
+      <div class="top-nav-item" data-page="options" onclick="switchPage('options')">
+        <i class="fas fa-random"></i> <span>Options</span>
+      </div>
+      <div class="top-nav-item" data-page="wallet" onclick="switchPage('wallet')">
+        <i class="fas fa-wallet"></i> <span>Wallet</span>
+      </div>
+      <div class="top-nav-item" data-page="whitelist" onclick="switchPage('whitelist')">
+        <i class="fas fa-shield-alt"></i> <span>Whitelist</span>
+      </div>
+    </div>
+    <div class="top-nav-right">
+      <div class="top-nav-btn" onclick="showConnectionStatus()">
+        <i class="fas fa-circle" style="font-size:8px;color:var(--trading-up)" id="statusDot"></i>
+      </div>
+      <div class="top-nav-btn" id="sessionDisplay">
+        <i class="far fa-clock"></i> <span id="sessionLabel">--:--</span>
+      </div>
+      <button class="top-nav-btn-secondary" onclick="showWalletModal()">
+        <i class="fas fa-wallet"></i> <span id="navBalance">$100,000</span>
+      </button>
+      <button class="top-nav-btn-primary" onclick="toast('Sign up flow coming soon!','info')">
+        Sign Up
+      </button>
+    </div>
+  </nav>
+
+  <!-- ── Toast Container ───────────────────────────────────────────────── -->
+  <div class="toast-container" id="toastContainer"></div>
+
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <!--  PAGE: MARKETS                                                       -->
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <div class="exchange-page active" id="page-markets">
+    <div class="markets-page">
+      <div class="markets-header" id="marketsTabs">
+        <button class="markets-tab active" data-market="crypto" onclick="switchMarket('crypto',this)">
+          <i class="fas fa-coins"></i> Crypto
+        </button>
+        <button class="markets-tab" data-market="us-stocks" onclick="switchMarket('us-stocks',this)">
+          <i class="fas fa-flag-usa"></i> US Stocks
+        </button>
+        <button class="markets-tab" data-market="in-stocks" onclick="switchMarket('in-stocks',this)">
+          <i class="fas fa-flag"></i> India
+        </button>
+        <button class="markets-tab" data-market="uk-stocks" onclick="switchMarket('uk-stocks',this)">
+          <i class="fas fa-flag"></i> UK
+        </button>
+        <button class="markets-tab" data-market="eu-stocks" onclick="switchMarket('eu-stocks',this)">
+          <i class="fas fa-flag-eu"></i> Europe
+        </button>
+        <button class="markets-tab" data-market="jp-stocks" onclick="switchMarket('jp-stocks',this)">
+          <i class="fas fa-flag"></i> Japan
+        </button>
+        <button class="markets-tab" data-market="hk-stocks" onclick="switchMarket('hk-stocks',this)">
+          <i class="fas fa-flag"></i> Hong Kong
+        </button>
+      </div>
+
+      <div class="markets-toolbar">
+        <i class="fas fa-search" style="color:var(--muted)"></i>
+        <input class="markets-search" id="marketSearch" placeholder="Search symbols, name, or market..." oninput="filterMarkets()">
+        <span class="markets-count" id="marketCount">0 assets</span>
+      </div>
+
+      <div class="markets-table-header">
+        <span style="width:80px">Symbol</span>
+        <span style="flex:1">Name</span>
+        <span style="width:50px;text-align:center">Market</span>
+        <span style="width:120px;text-align:right">Last Price</span>
+        <span style="width:90px;text-align:right">24h Change</span>
+        <span style="width:100px;text-align:right">Volume</span>
+      </div>
+      <div class="markets-table-body" id="marketBody"></div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <!--  PAGE: TRADE (Spot)                                                  -->
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <div class="exchange-page" id="page-trade">
+    <div class="trading-grid">
+
+      <!-- ── Chart Panel ──────────────────────────────────────────────── -->
+      <div class="trading-chart-panel">
+        <div class="trading-chart-header">
+          <div>
+            <span class="trading-pair-name" id="tradePair">BTC/USDT</span>
+            <div style="display:flex;align-items:baseline;gap:8px;margin-top:2px">
+              <span class="trading-pair-price" id="tradePrice">68,742.50</span>
+              <span class="trading-pair-change" id="tradeChange">+1.84%</span>
+            </div>
+          </div>
+          <div class="chart-toolbar" id="chartTimeframes">
+            <button class="chart-timeframe" data-tf="15m" onclick="switchTimeframe('15m',this)">15m</button>
+            <button class="chart-timeframe" data-tf="1h" onclick="switchTimeframe('1h',this)">1H</button>
+            <button class="chart-timeframe active" data-tf="4h" onclick="switchTimeframe('4h',this)">4H</button>
+            <button class="chart-timeframe" data-tf="1d" onclick="switchTimeframe('1d',this)">1D</button>
+            <button class="chart-timeframe" data-tf="1w" onclick="switchTimeframe('1w',this)">1W</button>
+          </div>
+        </div>
+        <div class="chart-container" id="chartContainer">
+          <div class="empty-state" style="height:100%">
+            <i class="fas fa-chart-line"></i>
+            <div class="empty-state-text">Loading chart...</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Order Book Panel ─────────────────────────────────────────── -->
+      <div class="orderbook-panel">
+        <div class="orderbook-header">
+          <span>Price (USDT)</span>
+          <span>Amount</span>
+          <span>Total</span>
+        </div>
+        <div class="orderbook-body">
+          <div class="orderbook-asks" id="orderbookAsks"></div>
+          <div class="orderbook-spread" id="orderbookSpread">Spread: 0.01 (0.00%)</div>
+          <div class="orderbook-bids" id="orderbookBids"></div>
+        </div>
+      </div>
+
+      <!-- ── Trade Panel ──────────────────────────────────────────────── -->
+      <div class="trade-panel">
+        <div class="trade-panel-tabs">
+          <button class="trade-panel-tab active" id="tradeTabBuy" onclick="switchTradeTab('buy')">Buy</button>
+          <button class="trade-panel-tab" id="tradeTabSell" onclick="switchTradeTab('sell')">Sell</button>
+        </div>
+        <div class="trade-form" id="tradeForm">
+          <div class="available-info">
+            <span class="av-label">Available</span>
+            <span class="av-value" id="tradeAvailable">0.0000 USDT</span>
+          </div>
+
+          <div class="trade-form-group">
+            <span class="trade-form-label">Symbol</span>
+            <select class="trade-select" id="tradeSymbolSelect" onchange="switchTradeSymbol()"></select>
+          </div>
+
+          <div class="trade-form-group">
+            <span class="trade-form-label">Order Type</span>
+            <select class="trade-select" id="tradeOrderType">
+              <option value="market">Market</option>
+              <option value="limit">Limit</option>
+              <option value="stop">Stop-Limit</option>
+            </select>
+          </div>
+
+          <div class="trade-form-group" id="tradePriceGroup">
+            <span class="trade-form-label">Price</span>
+            <input class="trade-input" id="tradePriceInput" type="text" placeholder="0.00" value="68742.50">
+          </div>
+
+          <div class="trade-form-group">
+            <span class="trade-form-label">Amount</span>
+            <input class="trade-input" id="tradeAmount" type="text" placeholder="0.00" value="0.01" oninput="updateTradeTotal()">
+          </div>
+
+          <div class="trade-percentages">
+            <button class="trade-pct-btn" onclick="setTradePercent(25)">25%</button>
+            <button class="trade-pct-btn" onclick="setTradePercent(50)">50%</button>
+            <button class="trade-pct-btn" onclick="setTradePercent(75)">75%</button>
+            <button class="trade-pct-btn" onclick="setTradePercent(100)">100%</button>
+          </div>
+
+          <div class="trade-total">
+            <span class="trade-total-label">Total</span>
+            <span class="trade-total-value" id="tradeTotal">$687.43</span>
+          </div>
+
+          <button class="trade-submit-btn buy" id="tradeSubmitBtn" onclick="submitTrade()">
+            Buy BTC
+          </button>
+
+          <!-- Balance Info -->
+          <div style="font-size:11px;color:var(--muted);padding-top:6px;border-top:1px solid var(--hairline-dark)">
+            <div class="flex items-center justify-between"><span>Balance</span><span class="mono" id="tradeUsdtBalance">$100,000.00</span></div>
+            <div class="flex items-center justify-between" style="margin-top:2px"><span>In Order</span><span class="mono">$0.00</span></div>
+          </div>
+        </div>
+
+        <!-- ── Open Orders ────────────────────────────────────────────── -->
+        <div class="orders-section">
+          <div class="orders-header">
+            <button class="orders-tab active" onclick="switchOrdersTab('open',this)">Open Orders</button>
+            <button class="orders-tab" onclick="switchOrdersTab('history',this)">Order History</button>
+            <button class="orders-tab" onclick="switchOrdersTab('positions',this)">Positions</button>
+          </div>
+          <div class="orders-body" id="ordersBody">
+            <div class="empty-state" style="padding:16px">
+              <div class="empty-state-text">No open orders</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <!--  PAGE: OPTIONS                                                        -->
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <div class="exchange-page" id="page-options">
+    <div class="options-page">
+
+      <div class="options-toolbar">
+        <select class="exchange-select" id="optSymbol" style="width:160px" onchange="renderOptionsChain()"></select>
+        <select class="exchange-select" id="optExpiry" style="width:140px" onchange="renderOptionsChain()">
+          <option value="7">Weekly (7d)</option>
+          <option value="30" selected>Monthly (30d)</option>
+          <option value="90">Quarterly (90d)</option>
+        </select>
+        <span class="caption" style="margin-left:auto">Underlying: <strong id="optUnderlyingPrice" class="mono">$68,742</strong></span>
+      </div>
+
+      <div class="options-chain-grid">
+        <div class="options-calls" id="optionsCalls">
+          <div style="padding:8px 16px;font-size:10px;font-weight:700;color:var(--trading-up);text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid var(--hairline-dark);display:flex">
+            <span class="oc-strike">Strike</span>
+            <span class="oc-premium" style="width:80px;text-align:right">Premium</span>
+            <span class="oc-iv" style="width:60px;text-align:right">IV</span>
+            <span class="oc-delta" style="width:60px;text-align:right">Δ</span>
+            <span class="oc-gamma" style="width:60px;text-align:right">Γ</span>
+            <span class="oc-oi" style="width:70px;text-align:right">OI</span>
+            <span class="oc-volume" style="width:70px;text-align:right">Vol</span>
+          </div>
+          <div id="optionsCallsBody"></div>
+        </div>
+        <div class="options-puts" id="optionsPuts">
+          <div style="padding:8px 16px;font-size:10px;font-weight:700;color:var(--trading-down);text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid var(--hairline-dark);display:flex">
+            <span class="oc-strike">Strike</span>
+            <span class="oc-premium" style="width:80px;text-align:right">Premium</span>
+            <span class="oc-iv" style="width:60px;text-align:right">IV</span>
+            <span class="oc-delta" style="width:60px;text-align:right">Δ</span>
+            <span class="oc-gamma" style="width:60px;text-align:right">Γ</span>
+            <span class="oc-oi" style="width:70px;text-align:right">OI</span>
+            <span class="oc-volume" style="width:70px;text-align:right">Vol</span>
+          </div>
+          <div id="optionsPutsBody"></div>
+        </div>
+      </div>
+
+      <!-- ── Greeks Bar ──────────────────────────────────────────────── -->
+      <div style="padding:8px 16px;border-top:1px solid var(--hairline-dark);flex-shrink:0">
+        <div class="greeks-bar" id="greeksBar">
+          <div class="greek-item"><span class="greek-label">Δ</span><span class="greek-value" id="gDelta">0.52</span></div>
+          <div class="greek-item"><span class="greek-label">Γ</span><span class="greek-value" id="gGamma">0.08</span></div>
+          <div class="greek-item"><span class="greek-label">Θ</span><span class="greek-value" id="gTheta">-0.03</span></div>
+          <div class="greek-item"><span class="greek-label">Ⅴ</span><span class="greek-value" id="gVega">0.15</span></div>
+          <div class="greek-item"><span class="greek-label">ρ</span><span class="greek-value" id="gRho">0.01</span></div>
+          <div class="greek-item" style="margin-left:auto"><span class="greek-label">IV</span><span class="greek-value" id="gIV">25.4%</span></div>
+        </div>
+      </div>
+
+      <!-- ── Strategy Cards ──────────────────────────────────────────── -->
+      <div style="padding:12px 16px;flex-shrink:0;border-top:1px solid var(--hairline-dark)">
+        <div class="caption" style="color:var(--muted);margin-bottom:8px">Options Strategies</div>
+        <div class="strategy-grid" id="strategiesGrid"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <!--  PAGE: WALLET / ACCOUNT                                              -->
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <div class="exchange-page" id="page-wallet">
+    <div class="wallet-page">
+      <div class="wallet-balance-card">
+        <div class="wallet-balance-main">
+          <div class="wb-label">Total Account Value</div>
+          <div class="wb-amount" id="walletTotal">$100,000.00</div>
+          <div class="wb-change text-up" id="walletChange">+$1,245.30 (+1.26%) today</div>
+        </div>
+        <div class="wallet-balance-actions">
+          <button class="wallet-action-btn secondary" onclick="toast('Deposit feature coming soon','info')"><i class="fas fa-arrow-down"></i> Deposit</button>
+          <button class="wallet-action-btn secondary" onclick="toast('Withdraw feature coming soon','info')"><i class="fas fa-arrow-up"></i> Withdraw</button>
+          <button class="wallet-action-btn primary" onclick="toast('Trade History feature coming soon','info')"><i class="fas fa-history"></i> History</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Asset Balances</span>
+          <span class="caption" style="color:var(--muted)">Hide small balances <i class="fas fa-toggle-off" style="margin-left:6px;cursor:pointer"></i></span>
+        </div>
+        <table class="wallet-assets-table">
+          <thead>
+            <tr>
+              <th style="text-align:left">Asset</th>
+              <th>Total Balance</th>
+              <th>Available</th>
+              <th>In Order</th>
+              <th>Value (USD)</th>
+              <th>24h Change</th>
+            </tr>
+          </thead>
+          <tbody id="walletAssetsBody"></tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">Recent Transactions</span>
+        </div>
+        <table class="exchange-table">
+          <thead>
+            <tr><th>Date</th><th>Type</th><th>Symbol</th><th>Side</th><th>Price</th><th>Amount</th><th>Total</th></tr>
+          </thead>
+          <tbody id="walletTradesBody">
+            <tr><td colspan="7"><div class="empty-state"><div class="empty-state-text">No transactions yet</div></div></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <!--  PAGE: WHITELIST                                                      -->
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <div class="exchange-page" id="page-whitelist">
+    <div class="whitelist-page">
+      <div class="whitelist-header">
+        <div>
+          <h2 class="title-md">Whitelist Manager</h2>
+          <p class="body-sm" style="color:var(--muted);margin-top:4px">Control which users and assets are allowed to trade on the exchange</p>
+        </div>
+        <div class="whitelist-stats">
+          <div class="wl-stat">
+            <div class="wl-stat-value" id="wlUsers">0</div>
+            <div class="wl-stat-label">Whitelisted Users</div>
+          </div>
+          <div class="wl-stat">
+            <div class="wl-stat-value" id="wlAssets">0</div>
+            <div class="wl-stat-label">Whitelisted Assets</div>
+          </div>
+          <div class="wl-stat">
+            <div class="wl-stat-value" id="wlCountries">0</div>
+            <div class="wl-stat-label">Countries</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── User Whitelist ───────────────────────────────────────────── -->
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title"><i class="fas fa-users" style="color:var(--primary)"></i> User Access Control</span>
+          <div class="whitelist-controls">
+            <input class="whitelist-input" id="wlUserInput" placeholder="Enter email or user ID to whitelist..." onkeydown="if(event.key==='Enter')addWhitelistUser()">
+            <button class="exchange-btn exchange-btn-primary exchange-btn-sm" onclick="addWhitelistUser()">
+              <i class="fas fa-plus"></i> Add User
+            </button>
+          </div>
+        </div>
+        <table class="exchange-table">
+          <thead>
+            <tr><th style="text-align:left">User ID / Email</th><th>Role</th><th>Markets Access</th><th>Daily Limit</th><th>Status</th><th style="text-align:center">Action</th></tr>
+          </thead>
+          <tbody id="wlUsersBody">
+            <tr><td colspan="6"><div class="empty-state"><div class="empty-state-text">No whitelisted users. Add users above to grant exchange access.</div></div></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- ── Asset Whitelist ───────────────────────────────────────────── -->
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title"><i class="fas fa-coins" style="color:var(--primary)"></i> Asset Tradability</span>
+          <div class="whitelist-controls">
+            <select class="exchange-select" id="wlAssetMarket" style="width:140px">
+              <option value="all">All Markets</option>
+              <option value="crypto">Crypto</option>
+              <option value="us-stocks">US Stocks</option>
+              <option value="in-stocks">India</option>
+              <option value="uk-stocks">UK</option>
+              <option value="eu-stocks">Europe</option>
+              <option value="jp-stocks">Japan</option>
+              <option value="hk-stocks">Hong Kong</option>
+            </select>
+            <select class="exchange-select" id="wlAssetStatus" style="width:120px" onchange="filterWhitelistAssets()">
+              <option value="all">All Assets</option>
+              <option value="tradable">Tradable</option>
+              <option value="restricted">Restricted</option>
+              <option value="halted">Halted</option>
+            </select>
+            <input class="whitelist-input" id="wlAssetSearch" placeholder="Search assets..." oninput="filterWhitelistAssets()" style="min-width:180px">
+          </div>
+        </div>
+        <table class="exchange-table">
+          <thead>
+            <tr>
+              <th style="text-align:left;width:80px">Symbol</th>
+              <th style="text-align:left">Name</th>
+              <th style="width:80px">Market</th>
+              <th style="width:90px">Status</th>
+              <th style="width:140px">Trading Rules</th>
+              <th style="width:80px;text-align:center">Toggle</th>
+            </tr>
+          </thead>
+          <tbody id="wlAssetsBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Footer ────────────────────────────────────────────────────────── -->
+  <div class="exchange-footer dark-footer">
+    <span>© 2026 Nova Exchange. All rights reserved. | Powered by Tredo Engine</span>
+  </div>
+</div>
+
+<!-- ── Scripts ────────────────────────────────────────────────────────── -->
+<script src="app.js"></script>
+</body>
+</html>

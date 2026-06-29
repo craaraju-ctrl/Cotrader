@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tredo Exchange</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="app" id="app">
+    <!-- Header -->
+    <header class="header">
+      <div class="logo" onclick="switchPage('trade')">Tredo <span>Exchange</span></div>
+      <nav class="nav">
+        <a class="active" data-page="trade" onclick="switchPage('trade')">Trade</a>
+        <a data-page="futures" onclick="switchPage('futures')">Futures <span class="badge">×125</span></a>
+        <a data-page="portfolio" onclick="switchPage('portfolio')">Portfolio</a>
+        <a data-page="apikeys" onclick="switchPage('apikeys')">API Keys</a>
+      </nav>
+      <div class="header-right">
+        <select class="user-select" id="user-select" onchange="onUserChange(this.value)">
+          <option value="alice">alice</option>
+          <option value="bob">bob</option>
+          <option value="charlie">charlie</option>
+        </select>
+      </div>
+    </header>
+
+    <!-- Market Ticker Bar -->
+    <div class="ticker-bar" id="ticker-bar"></div>
+
+    <!-- Toast Container -->
+    <div class="toast-container" id="toast-container"></div>
+
+    <!-- ── TRADING PAGE ── -->
+    <div class="page active" id="page-trade">
+      <div class="trading-view" id="trading-view">
+        <!-- Chart -->
+        <div class="chart-panel">
+          <div class="chart-header">
+            <div class="chart-symbol-info">
+              <span class="chart-symbol" id="chart-symbol">BTC/USD</span>
+              <span class="chart-last-price" id="chart-last-price">—</span>
+              <span class="chart-change" id="chart-change">—</span>
+            </div>
+            <div class="chart-stats">
+              <span>24h High <strong id="stat-high">—</strong></span>
+              <span>24h Low <strong id="stat-low">—</strong></span>
+              <span>24h Vol <strong id="stat-vol">—</strong></span>
+            </div>
+            <div class="chart-intervals">
+              <button class="active" data-int="1m" onclick="switchInterval('1m')">1m</button>
+              <button data-int="5m" onclick="switchInterval('5m')">5m</button>
+              <button data-int="15m" onclick="switchInterval('15m')">15m</button>
+              <button data-int="1h" onclick="switchInterval('1h')">1h</button>
+              <button data-int="4h" onclick="switchInterval('4h')">4h</button>
+              <button data-int="1d" onclick="switchInterval('1d')">1d</button>
+            </div>
+          </div>
+          <div class="chart-canvas-wrap">
+            <canvas id="chart-canvas"></canvas>
+          </div>
+        </div>
+
+        <!-- Order Book -->
+        <div class="orderbook-panel">
+          <div class="panel-header">
+            <span>Order Book</span>
+            <div class="tabs">
+              <button class="active" onclick="setObGrouping(this,'0.01')">0.01</button>
+              <button onclick="setObGrouping(this,'0.1')">0.1</button>
+              <button onclick="setObGrouping(this,'1')">1</button>
+            </div>
+          </div>
+          <div class="ob-header"><span>Price</span><span>Qty</span><span>Total</span></div>
+          <div class="ob-asks" id="ob-asks"></div>
+          <div class="ob-spread">
+            <span class="spread-price" id="spread-price">—</span>
+            <span class="spread-pct" id="spread-pct">—</span>
+          </div>
+          <div class="ob-bids" id="ob-bids"></div>
+        </div>
+
+        <!-- Recent Trades -->
+        <div class="trades-panel">
+          <div class="panel-header"><span>Market Trades</span></div>
+          <div class="ob-header"><span>Price</span><span>Qty</span><span>Time</span></div>
+          <div class="trades-list" id="trades-list"></div>
+        </div>
+
+        <!-- Bottom: Form + Positions -->
+        <div class="trading-bottom" id="trading-bottom">
+          <div class="tab-bar">
+            <button class="active" data-tab="spot" onclick="switchTradeTab('spot')">Spot</button>
+            <button data-tab="oco" onclick="switchTradeTab('oco')">OCO</button>
+            <button data-tab="orders" onclick="switchTradeTab('orders')">Open Orders</button>
+            <button data-tab="history" onclick="switchTradeTab('history')">Order History</button>
+          </div>
+
+          <!-- Spot Order Form -->
+          <div class="tab-content" id="tab-spot">
+            <div class="order-form">
+              <div class="order-type-tabs">
+                <button class="active" data-otype="limit" onclick="setOrderType('limit')">Limit</button>
+                <button data-otype="market" onclick="setOrderType('market')">Market</button>
+                <button data-otype="stop" onclick="setOrderType('stop')">Stop-Loss</button>
+                <button data-otype="stoplimit" onclick="setOrderType('stoplimit')">Stop-Limit</button>
+                <button data-otype="takeprofit" onclick="setOrderType('takeprofit')">Take Profit</button>
+                <button data-otype="trailing" onclick="setOrderType('trailing')">Trailing Stop</button>
+              </div>
+              <div class="side-tabs">
+                <button class="buy active" id="side-buy" onclick="setSide('Buy')">Buy</button>
+                <button class="sell" id="side-sell" onclick="setSide('Sell')">Sell</button>
+              </div>
+              <div class="form-row">
+                <label>Price</label>
+                <input type="text" id="order-price" placeholder="0.00" />
+                <span class="balance-hint" onclick="fillBestPrice()">Best</span>
+              </div>
+              <div class="form-row" id="trigger-row">
+                <label>Trigger</label>
+                <input type="text" id="order-trigger" placeholder="0.00" />
+              </div>
+              <div class="form-row" id="trailing-row" style="display:none">
+                <label>Trail Δ</label>
+                <input type="text" id="order-trail" placeholder="100.00" />
+              </div>
+              <div class="form-row">
+                <label>Quantity</label>
+                <input type="text" id="order-qty" placeholder="0.00" />
+                <span class="balance-hint" onclick="fillMaxQty()">Max</span>
+              </div>
+              <div class="form-row" id="iceberg-row" style="display:none">
+                <label>Iceberg</label>
+                <input type="text" id="order-iceberg" placeholder="Visible qty" />
+              </div>
+              <div class="order-total" id="order-total">Total: —</div>
+
+              <!-- Leverage Control (always visible) -->
+              <div class="leverage-control">
+                <label>Leverage</label>
+                <input type="range" id="leverage-slider" min="1" max="125" value="1"
+                  oninput="onLeverageChange(this.value)" />
+                <span class="leverage-val" id="leverage-val">1x</span>
+              </div>
+
+              <button class="submit-btn buy" id="submit-order" onclick="submitOrder()">Buy BTC/USD</button>
+            </div>
+          </div>
+
+          <!-- OCO Form -->
+          <div class="tab-content hidden" id="tab-oco">
+            <div class="order-form">
+              <div class="form-row">
+                <label>Side</label>
+                <select id="oco-side"><option value="Buy">Buy (Long)</option><option value="Sell">Sell (Short)</option></select>
+              </div>
+              <div class="form-row"><label>Qty</label><input type="text" id="oco-qty" placeholder="0.00" /></div>
+              <div class="oco-fields">
+                <h4>Take Profit Leg (Limit)</h4>
+                <div class="form-row"><label>Price</label><input type="text" id="oco-tp-price" placeholder="0.00" /></div>
+                <h4 style="margin-top:8px">Stop Loss Leg (Stop-Limit)</h4>
+                <div class="form-row"><label>Stop</label><input type="text" id="oco-sl-stop" placeholder="0.00" /></div>
+                <div class="form-row"><label>Limit</label><input type="text" id="oco-sl-limit" placeholder="0.00" /></div>
+              </div>
+              <button class="submit-btn buy" onclick="submitOco()">Place OCO Order</button>
+            </div>
+          </div>
+
+          <!-- Open Orders -->
+          <div class="tab-content hidden" id="tab-orders">
+            <div id="open-orders-content"><div class="loading">Loading...</div></div>
+          </div>
+
+          <!-- Order History -->
+          <div class="tab-content hidden" id="tab-history">
+            <div id="order-history-content"><div class="loading">Loading...</div></div>
+          </div>
+        </div>
+
+        <!-- Positions Panel -->
+        <div class="positions-panel">
+          <div class="tab-bar">
+            <button class="active" data-tab="positions" onclick="switchPosTab('positions')">Positions</button>
+            <button data-tab="funding" onclick="switchPosTab('funding')">Funding Rate</button>
+          </div>
+          <div class="tab-content" id="tab-positions">
+            <div id="positions-content"><div class="loading">No positions</div></div>
+          </div>
+          <div class="tab-content hidden" id="tab-funding">
+            <div id="funding-content"><div class="loading">Loading funding rates...</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── FUTURES PAGE ── -->
+    <div class="page" id="page-futures">
+      <div class="dashboard">
+        <div class="dashboard-card">
+          <h3>Futures Settings</h3>
+          <div class="futures-settings" style="border:none;padding:0;margin:0">
+            <label>Margin Mode:
+              <select id="fut-margin-mode" onchange="setMarginMode(this.value)">
+                <option value="Cross">Cross</option>
+                <option value="Isolated">Isolated</option>
+              </select>
+            </label>
+            <label>Position Mode:
+              <select id="fut-position-mode" onchange="setPositionMode(this.value)">
+                <option value="OneWay">One-Way</option>
+                <option value="Hedge">Hedge</option>
+              </select>
+            </label>
+          </div>
+        </div>
+        <div class="dashboard-card">
+          <h3>Funding Rates</h3>
+          <div id="fut-funding-list"></div>
+        </div>
+        <div class="dashboard-card card-full">
+          <h3>Futures Positions</h3>
+          <div id="fut-positions-table"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── PORTFOLIO PAGE ── -->
+    <div class="page" id="page-portfolio">
+      <div class="dashboard">
+        <div class="dashboard-card card-full">
+          <h3>Balances</h3>
+          <div class="action-panel" style="margin-bottom:12px">
+            <div class="action-group">
+              <h4>Deposit</h4>
+              <div class="deposit-form">
+                <select id="deposit-asset"><option value="USD">USD</option><option value="BTC">BTC</option><option value="ETH">ETH</option><option value="SOL">SOL</option><option value="ADA">ADA</option></select>
+                <input type="text" id="deposit-amount" placeholder="Amount" />
+                <button class="btn btn-primary btn-sm" onclick="deposit()">Deposit</button>
+              </div>
+            </div>
+            <div class="action-group">
+              <h4>Withdraw</h4>
+              <div class="withdraw-form">
+                <select id="withdraw-asset"><option value="USD">USD</option><option value="BTC">BTC</option><option value="ETH">ETH</option><option value="SOL">SOL</option><option value="ADA">ADA</option></select>
+                <input type="text" id="withdraw-amount" placeholder="Amount" />
+                <button class="btn btn-danger btn-sm" onclick="withdraw()">Withdraw</button>
+              </div>
+            </div>
+          </div>
+          <div id="portfolio-balances"></div>
+          <h3 style="margin-top:16px">Open Orders</h3>
+          <div id="portfolio-orders"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── API KEYS PAGE ── -->
+    <div class="page" id="page-apikeys">
+      <div class="dashboard">
+        <div class="dashboard-card card-full">
+          <h3>API Key Management</h3>
+          <p style="color:var(--text-secondary);margin-bottom:12px;font-size:12px">
+            HMAC-SHA256 authenticated API keys for programmatic trading.
+          </p>
+          <button class="btn btn-primary" onclick="generateApiKey()">Generate New API Key</button>
+          <div id="api-key-result"></div>
+          <h3 style="margin-top:20px">How to Use</h3>
+          <div class="api-key-display" style="margin-top:8px;line-height:1.8">
+            <strong>Headers:</strong><br />
+            <code style="color:var(--yellow)">X-API-Key</code>: Your API key<br />
+            <code style="color:var(--yellow)">X-Nonce</code>: Current millisecond timestamp<br />
+            <code style="color:var(--yellow)">X-Signature</code>: HMAC-SHA256(METHOD + PATH + NONCE, secret_key)<br /><br />
+            <strong>Example (cURL):</strong><br />
+            <code style="color:var(--text-secondary);font-size:11px">
+            NONCE=$(date +%s%3N)<br />
+            SIG=$(echo -n "GET/api/v1/balances/alice$NONCE" | openssl dgst -sha256 -hmac "YOUR_SECRET" | cut -d' ' -f2)<br />
+            curl -H "X-API-Key: YOUR_KEY" -H "X-Nonce: $NONCE" -H "X-Signature: $SIG" http://localhost:8080/api/v1/balances/alice
+            </code>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+  <script src="/trading.js"></script>
+  <script src="/futures.js"></script>
+  <script src="/portfolio.js"></script>
+</body>
+</html>

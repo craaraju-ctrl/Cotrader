@@ -1,0 +1,45 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# Environment and secrets
+.env
+.env.local
+config/rat.env
+
+# Database files
+*.db
+*.db-shm
+*.db-wal
+
+# Log files
+logs/
+
+# Data directory
+data/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Redb files
+*.redb
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Node
+node_modules/
+dist/
+
+# Kronos model cache
+kronos/models/

@@ -1,0 +1,41 @@
+[workspace]
+resolver = "2"
+
+members = [
+    # Exchange
+    "exchange",
+    # Memory
+    "memory",
+    # RAT crates
+    "crates/rat-core",
+    "crates/rat-autonomous",
+    "crates/rat-orchestrator",
+    "crates/rat-runtime",
+    "crates/rat-tui",
+    "crates/rat-server",
+    "crates/rat-exchange-client",
+    "crates/rat-memory-client",
+    "crates/rat-broker-alpaca",
+    "crates/rat-broker-zerodha",
+    "crates/rat-broker-binance",
+    "crates/rat-broker-5paisa",
+    "crates/rat-broker-angelone",
+    "crates/rat-broker-upstox",
+    "crates/rat-compliance",
+    "crates/rat-eventbus",
+    "crates/rat-market-data",
+    "crates/rat-metrics",
+    "crates/rat-watchdog",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["RAT Agent Contributors"]
+repository = "https://github.com/varma/rat-agent"
+homepage = "https://github.com/varma/rat-agent"
+readme = "README.md"
+
+[workspace.dependencies]
+chrono = { version = ">=0.4.35, <0.4.40", features = ["serde"] }
