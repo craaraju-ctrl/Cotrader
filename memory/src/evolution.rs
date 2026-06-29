@@ -78,59 +78,66 @@ impl BacktestValidator {
     }
 
     /// Validate a proposed procedural rule against historical patterns.
-    /// Returns (is_valid, metrics).
-    pub fn validate_rule(&self, _rule_content: &str, historical_records: &[crate::types::TieredRecord]) -> (bool, RuleMetrics) {
-        // Extract key metrics from historical records
-        let mut wins = 0u64;
-        let mut losses = 0u64;
-        let mut total_pnl = 0.0;
-        let mut max_dd = 0.0;
-        let mut peak = 0.0;
-        let mut equity = 10000.0; // Starting equity
+    /// Uses spawn_blocking to avoid stalling the async runtime.
+    pub async fn validate_rule(&self, _rule_content: &str, historical_records: Vec<crate::types::TieredRecord>) -> (bool, RuleMetrics) {
+        let min_pf = self.min_profit_factor;
+        let min_sharpe = self.min_sharpe;
+        let max_dd = self.max_drawdown;
 
-        for record in historical_records {
-            if let Some(pnl_str) = record.record.metadata.get("pnl") {
-                if let Ok(pnl) = pnl_str.parse::<f64>() {
-                    total_pnl += pnl;
-                    equity += pnl;
-                    if equity > peak { peak = equity; }
-                    let dd = (peak - equity) / peak;
-                    if dd > max_dd { max_dd = dd; }
+        // Run CPU-bound work on blocking thread pool
+        tokio::task::spawn_blocking(move || {
+            let mut wins = 0u64;
+            let mut losses = 0u64;
+            let mut total_pnl = 0.0;
+            let mut max_drawdown = 0.0;
+            let mut peak = 0.0;
+            let mut equity = 10000.0;
 
-                    if pnl > 0.0 { wins += 1; } else { losses += 1; }
+            for record in &historical_records {
+                if let Some(pnl_str) = record.record.metadata.get("pnl") {
+                    if let Ok(pnl) = pnl_str.parse::<f64>() {
+                        total_pnl += pnl;
+                        equity += pnl;
+                        if equity > peak { peak = equity; }
+                        let dd = if peak > 0.0 { (peak - equity) / peak } else { 0.0 };
+                        if dd > max_drawdown { max_drawdown = dd; }
+                        if pnl > 0.0 { wins += 1; } else { losses += 1; }
+                    }
                 }
             }
-        }
 
-        let total_trades = wins + losses;
-        let win_rate = if total_trades > 0 { wins as f64 / total_trades as f64 } else { 0.0 };
-        let avg_win = if wins > 0 { total_pnl / wins as f64 } else { 0.0 };
-        let avg_loss = if losses > 0 { (total_pnl / losses as f64).abs() } else { 1.0 };
-        let profit_factor = if avg_loss > 0.0 { avg_win / avg_loss } else { 0.0 };
+            let total_trades = wins + losses;
+            let win_rate = if total_trades > 0 { wins as f64 / total_trades as f64 } else { 0.0 };
+            let avg_win = if wins > 0 { total_pnl / wins as f64 } else { 0.0 };
+            let avg_loss = if losses > 0 { (total_pnl / losses as f64).abs() } else { 1.0 };
+            let profit_factor = if avg_loss > 0.0 { avg_win / avg_loss } else { 0.0 };
 
-        // Simple Sharpe approximation
-        let returns = if total_trades > 0 { total_pnl / total_trades as f64 } else { 0.0 };
-        let sharpe = if returns > 0.0 { returns / (max_dd + 0.01) } else { 0.0 };
+            let returns = if total_trades > 0 { total_pnl / total_trades as f64 } else { 0.0 };
+            let sharpe = if returns > 0.0 { returns / (max_drawdown + 0.01) } else { 0.0 };
 
-        let metrics = RuleMetrics {
-            total_trades,
-            win_rate,
-            profit_factor,
-            sharpe_ratio: sharpe,
-            max_drawdown: max_dd,
-            total_pnl,
-        };
+            let metrics = RuleMetrics {
+                total_trades,
+                win_rate,
+                profit_factor,
+                sharpe_ratio: sharpe,
+                max_drawdown,
+                total_pnl,
+            };
 
-        let is_valid = profit_factor >= self.min_profit_factor
-            && sharpe >= self.min_sharpe
-            && max_dd <= self.max_drawdown;
+            let is_valid = profit_factor >= min_pf
+                && sharpe >= min_sharpe
+                && max_drawdown <= max_dd;
 
-        (is_valid, metrics)
+            (is_valid, metrics)
+        })
+        .await
+        .unwrap_or((false, RuleMetrics::default()))
     }
 }
 
 /// Metrics from a backtest validation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct RuleMetrics {
     pub total_trades: u64,
     pub win_rate: f64,

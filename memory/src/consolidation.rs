@@ -170,7 +170,7 @@ impl FinancialRegretScorer {
 
         // Balance delta: log-scale impact
         let delta_impact = if balance_delta.abs() > 0.0 {
-            balance_delta.abs().log10().clamp(0.0, 5.0) / 5.0
+            (balance_delta.abs() + 1.0).log10().clamp(0.0, 5.0) / 5.0
         } else {
             0.0
         };
@@ -596,8 +596,8 @@ impl NamespaceArbitrator {
     pub fn resolve_conflict(&self, ns_a: &str, ns_b: &str) -> ArbitrationResult {
         let acc_a = self.namespace_accuracy.get(ns_a).copied().unwrap_or(0.5);
         let acc_b = self.namespace_accuracy.get(ns_b).copied().unwrap_or(0.5);
-        let var_a = self.namespace_variance.get(ns_a).copied().unwrap_or(0.1);
-        let var_b = self.namespace_variance.get(ns_b).copied().unwrap_or(0.1);
+        let var_a = self.namespace_variance.get(ns_a).copied().unwrap_or(0.1).max(0.05);
+        let var_b = self.namespace_variance.get(ns_b).copied().unwrap_or(0.1).max(0.05);
 
         // Sharpe-like scoring: accuracy / variance (lower variance = more reliable)
         let score_a = acc_a / (1.0 + var_a);
