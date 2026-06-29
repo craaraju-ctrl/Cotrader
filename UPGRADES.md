@@ -16,7 +16,19 @@ Replaced `Arc<Mutex<Connection>>` with `Arc<Pool<SqliteConnectionManager>>`.
 
 ---
 
-### 2. FinancialRegretScorer
+### 2. Embedded Schema Migrations
+
+**File:** `memory/src/migrations.rs`
+
+Versioned migration system replacing raw SQL injection.
+
+- 3 migrations: initial schema, add tags_json, add namespace_id
+- `run_migrations()` tracks versions in `schema_migrations` table
+- `initialize_tables()` now calls migrations instead of inline SQL
+
+---
+
+### 3. FinancialRegretScorer
 
 **File:** `memory/src/consolidation.rs`
 
@@ -26,7 +38,7 @@ Fix: `log10(|delta| + 1.0)` prevents -inf at breakeven.
 
 ---
 
-### 3. ConcurrentPolicyCache
+### 4. ConcurrentPolicyCache
 
 **File:** `memory/src/performance.rs`
 
@@ -34,7 +46,7 @@ DashMap-based lock-free cache with atomic counters.
 
 ---
 
-### 4. TradingRelation Enum
+### 5. TradingRelation Enum
 
 **Files:** `memory/src/types.rs`, `memory/src/experts.rs`
 
@@ -42,7 +54,7 @@ DashMap-based lock-free cache with atomic counters.
 
 ---
 
-### 5. SIMD Hamming Distance
+### 6. SIMD Hamming Distance
 
 **File:** `memory/src/vector.rs`
 
@@ -50,7 +62,7 @@ AVX2 intrinsics with scalar fallback. 10-30x faster on x86_64.
 
 ---
 
-### 6. Volatility-Aware Temporal Decay
+### 7. Volatility-Aware Temporal Decay
 
 **Files:** `memory/src/types.rs`, `memory/src/temporal.rs`, `memory/src/staleness.rs`
 
@@ -60,15 +72,15 @@ Structural rules maintain permanent floor.
 
 ---
 
-### 7. Core Trading Loop Integration
+### 8. Core Trading Loop Integration
 
 **File:** `crates/rat-core/src/memory_integration.rs`
 
-`MemoryIntegration` bridges rat-core with agentic-memory (policy cache + scorer + volatility).
+`MemoryIntegration` bridges rat-core with agentic-memory.
 
 ---
 
-### 8. API Volatility Endpoints
+### 9. API Volatility Endpoints
 
 **File:** `memory/src/api.rs`
 
@@ -78,7 +90,7 @@ Structural rules maintain permanent floor.
 
 ---
 
-### 9. Namespace Arbitrator
+### 10. Namespace Arbitrator
 
 **File:** `memory/src/consolidation.rs`
 
@@ -88,7 +100,7 @@ Variance floor prevents cold-start gaming.
 
 ---
 
-### 10. Backtest Validation
+### 11. Backtest Validation
 
 **File:** `memory/src/evolution.rs`
 
@@ -98,7 +110,15 @@ Uses `spawn_blocking` for non-blocking async execution.
 
 ---
 
-### 11. Numerical Stability Fixes
+### 12. Backpressure Semaphore
+
+**File:** `memory/src/evolution.rs`
+
+`Arc<Semaphore>` with max 3 concurrent validations prevents thread pool exhaustion.
+
+---
+
+### 13. Numerical Stability Fixes
 
 | Fix | Location | Change |
 |-----|----------|--------|
@@ -112,7 +132,7 @@ Uses `spawn_blocking` for non-blocking async execution.
 
 ```bash
 cargo check -p agentic-memory     # ✅
-cargo build --release -p agentic-memory  # ✅ 11.4s
+cargo build --release -p agentic-memory  # ✅ 10.9s
 cargo test -p agentic-memory      # ✅ 112/112 pass
 ```
 
@@ -120,21 +140,21 @@ cargo test -p agentic-memory      # ✅ 112/112 pass
 
 ## File Changes Summary
 
-| File | Lines Added | Lines Removed |
-|------|-------------|---------------|
-| memory/src/store.rs | +45 | -22 |
-| memory/src/consolidation.rs | +120 | -15 |
-| memory/src/evolution.rs | +85 | -30 |
-| memory/src/api.rs | +35 | -12 |
-| memory/src/types.rs | +95 | -5 |
-| memory/src/experts.rs | +25 | -15 |
-| memory/src/vector.rs | +80 | -5 |
-| memory/src/temporal.rs | +50 | -10 |
-| memory/src/staleness.rs | +30 | -15 |
-| memory/src/performance.rs | +219 | 0 |
-| memory/src/lib.rs | +4 | 0 |
-| memory/Cargo.toml | +3 | 0 |
-| crates/rat-core/src/memory_integration.rs | +250 | 0 |
-| crates/rat-core/Cargo.toml | +1 | 0 |
-| crates/rat-core/src/lib.rs | +2 | 0 |
-| **Total** | **~1040** | **~130** |
+| File | Purpose |
+|------|---------|
+| memory/src/migrations.rs | New — versioned schema migrations |
+| memory/src/store.rs | Pool + migration integration |
+| memory/src/consolidation.rs | FinancialRegretScorer + NamespaceArbitrator |
+| memory/src/evolution.rs | BacktestValidator + semaphore backpressure |
+| memory/src/api.rs | Volatility endpoints |
+| memory/src/types.rs | DecayConfig + TradingRelation enum |
+| memory/src/experts.rs | TradingRelation graph boosting |
+| memory/src/vector.rs | SIMD Hamming distance |
+| memory/src/temporal.rs | Volatility-aware decay |
+| memory/src/staleness.rs | Volatility-adjusted staleness |
+| memory/src/performance.rs | ConcurrentPolicyCache |
+| memory/src/lib.rs | Module exports |
+| memory/Cargo.toml | Dependencies |
+| crates/rat-core/src/memory_integration.rs | Trading loop bridge |
+| crates/rat-core/Cargo.toml | agentic-memory dep |
+| crates/rat-core/src/lib.rs | Module export |
