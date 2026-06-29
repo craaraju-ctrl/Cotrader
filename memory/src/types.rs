@@ -649,6 +649,12 @@ pub struct DecayConfig {
     pub acceleration: f64,
     /// Threshold below which a fact is considered stale (default: 0.1)
     pub stale_threshold: f64,
+    /// Volatility sensitivity multiplier (default: 2.0)
+    /// Higher values make decay more responsive to market volatility.
+    pub volatility_sensitivity: f64,
+    /// Permanent floor for structural/procedural rules (default: 0.3)
+    /// Facts below this importance never fully decay.
+    pub structural_floor: f64,
 }
 
 impl Default for DecayConfig {
@@ -658,6 +664,8 @@ impl Default for DecayConfig {
             min_recall_boost: 0.3,
             acceleration: 1.0,
             stale_threshold: 0.1,
+            volatility_sensitivity: 2.0,
+            structural_floor: 0.3,
         }
     }
 }

@@ -138,9 +138,19 @@ impl TemporalEngine {
     }
 
     /// Calculate current decay score based on Ebbinghaus forgetting curve.
-    /// R(t) = e^(-t / (S * k))
-    /// where t = days since last recall, S = stability, k = decay constant
+    /// Supports volatility-aware decay: higher sigma accelerates forgetting.
+    ///
+    /// Formula: Effective_Decay_Rate = Base_Rate * (1.0 + alpha * sigma)
+    /// where sigma = market volatility, alpha = sensitivity multiplier
+    ///
+    /// Structural rules (procedures, rules) maintain a permanent floor.
     pub fn calculate_decay(&self, fact: &TemporalFact) -> f64 {
+        self.calculate_decay_with_volatility(fact, 0.0)
+    }
+
+    /// Calculate decay with explicit volatility parameter.
+    /// sigma: market volatility (0.0 = calm, 1.0 = extreme volatility)
+    pub fn calculate_decay_with_volatility(&self, fact: &TemporalFact, sigma: f64) -> f64 {
         let last_recalled = fact
             .last_recalled
             .as_ref()
@@ -167,9 +177,23 @@ impl TemporalEngine {
         // Stability increases with importance and recall count
         let stability = (1.0 + fact.importance * 2.0 + (fact.recall_count as f64 * 0.1)).max(1.0);
 
-        // Ebbinghaus curve: R(t) = e^(-t / (S * half_life))
-        let decay_rate = days_since_recall / (stability * self.decay_config.half_life_days);
-        let decay = (-decay_rate * self.decay_config.acceleration).exp();
+        // Volatility-adjusted decay rate
+        // When sigma is high, memories decay faster (assumptions broken)
+        let alpha = self.decay_config.volatility_sensitivity;
+        let effective_decay_rate = 1.0 + (alpha * sigma);
+
+        // Ebbinghaus curve with volatility adjustment
+        let decay_rate = (days_since_recall * effective_decay_rate) / (stability * self.decay_config.half_life_days);
+        let mut decay = (-decay_rate * self.decay_config.acceleration).exp();
+
+        // Structural floor: procedures and rules never fully decay
+        let is_structural = matches!(
+            fact.content_type.as_str(),
+            "procedure" | "rule" | "workflow" | "behavioral"
+        );
+        if is_structural {
+            decay = decay.max(self.decay_config.structural_floor);
+        }
 
         // Clamp to [0, 1]
         decay.clamp(0.0, 1.0)
@@ -306,5 +330,65 @@ mod tests {
         );
         let history = engine.version_history(&fact);
         assert_eq!(history, vec!["v1"]);
+    }
+
+    #[test]
+    fn test_volatility_accelerates_decay() {
+        let engine = setup();
+        let mut fact = engine.store_fact(
+            "Tactical trade setup",
+            "fact",
+            0.8,
+            std::collections::HashMap::new(),
+        );
+
+        // Simulate an older fact (set last_recalled to 10 days ago)
+        let ten_days_ago = chrono::Utc::now() - chrono::Duration::days(10);
+        fact.last_recalled = Some(ten_days_ago.to_rfc3339());
+        fact.recall_count = 2;
+
+        // Low volatility: normal decay
+        let decay_low = engine.calculate_decay_with_volatility(&fact, 0.1);
+
+        // High volatility: faster decay
+        let decay_high = engine.calculate_decay_with_volatility(&fact, 0.9);
+
+        // High volatility should produce lower decay score (faster forgetting)
+        assert!(decay_high < decay_low,
+            "High volatility ({}) should decay faster than low ({})", decay_high, decay_low);
+    }
+
+    #[test]
+    fn test_structural_floor_preserved() {
+        let engine = setup();
+        let procedure = engine.store_fact(
+            "Always use stop-loss",
+            "procedure",
+            0.9,
+            std::collections::HashMap::new(),
+        );
+
+        // Even with extreme volatility, procedures maintain floor
+        let decay_extreme = engine.calculate_decay_with_volatility(&procedure, 1.0);
+        assert!(decay_extreme >= engine.decay_config().structural_floor,
+            "Structural floor ({}) should be maintained, got {}", engine.decay_config().structural_floor, decay_extreme);
+    }
+
+    #[test]
+    fn test_volatility_zero_no_extra_decay() {
+        let engine = setup();
+        let fact = engine.store_fact(
+            "Normal fact",
+            "fact",
+            0.7,
+            std::collections::HashMap::new(),
+        );
+
+        // sigma=0 should produce same result as default calculate_decay
+        let decay_default = engine.calculate_decay(&fact);
+        let decay_sigma_zero = engine.calculate_decay_with_volatility(&fact, 0.0);
+
+        assert!((decay_default - decay_sigma_zero).abs() < 0.001,
+            "sigma=0 should match default: {} vs {}", decay_default, decay_sigma_zero);
     }
 }

@@ -9,19 +9,16 @@
 
 **Files:** `memory/Cargo.toml`, `memory/src/store.rs`
 
-Replaced single `Arc<Mutex<Connection>>` with `Arc<Pool<SqliteConnectionManager>>`.
+Replaced `Arc<Mutex<Connection>>` with `Arc<Pool<SqliteConnectionManager>>`.
 
 - Pool: 8 max connections, 2 min idle
 - Pragmas: WAL, busy_timeout=5000, synchronous=NORMAL
-- Dependency: `r2d2 = "0.8"`, `r2d2_sqlite = "0.24"`
 
 ---
 
 ### 2. FinancialRegretScorer
 
 **Files:** `memory/src/consolidation.rs`, `memory/src/lib.rs`
-
-Extracts `regret_score`, `balance_delta`, `position_size`, `regime`, `leverage`, `is_win` from metadata.
 
 Formula: `Access + Recency + (0.35 × regret) + (0.25 × log10(|delta|))`
 
@@ -33,7 +30,7 @@ Modifiers: Leverage >10x amplifies, losses weighted 1.2x
 
 **File:** `memory/src/performance.rs`
 
-DashMap-based lock-free cache. Atomic hit/miss counters. Background-safe `purge_expired()`.
+DashMap-based lock-free cache with atomic counters.
 
 ---
 
@@ -41,27 +38,9 @@ DashMap-based lock-free cache. Atomic hit/miss counters. Background-safe `purge_
 
 **Files:** `memory/src/types.rs`, `memory/src/experts.rs`
 
-15 variants with domain-specific weights:
+15 variants with domain-specific weights (-0.50 to +0.40).
 
-| Variant | Weight | Purpose |
-|---------|--------|---------|
-| InvalidatedBy | -0.50 | Evict unsafe params |
-| ConflictsWith | -0.30 | Suppress contradictions |
-| Weakens | -0.10 | Mild suppression |
-| ValidatedBy | +0.40 | Confirm signals |
-| Strengthens | +0.30 | Multi-indicator alignment |
-| LiquidatedAt | +0.30 | Risk events critical |
-| ExposedTo | +0.25 | Portfolio exposure |
-| HedgedBy | +0.20 | Hedging relationships |
-| RegimeChangeTo | +0.20 | Regime transitions |
-| Supersedes | +0.20 | Rule overrides |
-| CorrelatedWith | +0.15 | Price correlations |
-| InverselyCorrelated | +0.10 | Inverse relationships |
-| Leads | +0.10 | Lead-lag indicators |
-| DerivedFrom | +0.10 | Lesson provenance |
-| SimilarTo | +0.10 | Pattern matching |
-
-`RetrievalExpert::boost_with_graph_reasoning` now parses enum instead of strings.
+`RetrievalExpert::boost_with_graph_reasoning` now parses enum.
 
 ---
 
@@ -69,14 +48,41 @@ DashMap-based lock-free cache. Atomic hit/miss counters. Background-safe `purge_
 
 **File:** `memory/src/vector.rs`
 
-| Function | Purpose |
-|----------|---------|
-| `pack_bools_to_u64()` | Pack bools into u64 array |
-| `hamming_distance_simd()` | AVX2 detection + scalar fallback |
-| `hamming_distance_simd_avx2()` | AVX2 intrinsics (256-bit) |
-| `quantize_to_packed()` | Quantize + pack one call |
+AVX2 intrinsics with scalar fallback. 10-30x faster on x86_64.
 
-10-30x faster on x86_64 with AVX2.
+---
+
+### 6. Volatility-Aware Temporal Decay
+
+**Files:** `memory/src/types.rs`, `memory/src/temporal.rs`, `memory/src/staleness.rs`
+
+**What changed:**
+
+| Component | Before | After |
+|-----------|--------|-------|
+| `DecayConfig` | 4 fields | 6 fields (+volatility_sensitivity, +structural_floor) |
+| `TemporalEngine::calculate_decay` | Static | Accepts optional `sigma` parameter |
+| `StalenessManager::effective_score` | Static | Accepts optional `sigma` parameter |
+
+**Formula:**
+```
+Effective_Decay_Rate = Base_Rate × (1.0 + alpha × sigma)
+```
+
+Where:
+- `sigma` = market volatility (0.0 calm, 1.0 extreme)
+- `alpha` = `volatility_sensitivity` (default: 2.0)
+- Structural rules (procedures, rules) maintain `structural_floor` (default: 0.3)
+
+**Behavior:**
+- High volatility → memories decay faster (assumptions broken)
+- Low volatility → memories persist longer (stable environment)
+- Structural rules → never fully decay (permanent floor)
+
+**Tests:** 8/8 passing
+- `test_volatility_accelerates_decay` — high sigma produces lower decay
+- `test_structural_floor_preserved` — procedures maintain floor
+- `test_volatility_zero_no_extra_decay` — sigma=0 matches default
 
 ---
 
@@ -84,7 +90,8 @@ DashMap-based lock-free cache. Atomic hit/miss counters. Background-safe `purge_
 
 ```bash
 cargo check -p agentic-memory     # ✅
-cargo build --release -p agentic-memory  # ✅ 10.9s
+cargo build --release -p agentic-memory  # ✅ 11.7s
+cargo test -p agentic-memory -- temporal  # ✅ 8/8 pass
 ```
 
 ---
@@ -93,6 +100,6 @@ cargo build --release -p agentic-memory  # ✅ 10.9s
 
 | Item | Status |
 |------|--------|
-| Adaptive Ebbinghaus | Needs volatility feed |
 | Backtest validation | Needs NATS + backtest runner |
 | Conflict arbitrator | Game-theoretic namespace resolution |
+| API volatility endpoints | Optional query params for recall |
