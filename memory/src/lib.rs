@@ -54,6 +54,7 @@ pub mod reflection;
 pub mod resilience;
 pub mod staleness;
 pub mod store;
+pub mod migrations;
 pub mod performance;
 pub mod temporal;
 pub mod tiers;

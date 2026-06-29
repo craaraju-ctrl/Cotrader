@@ -13,6 +13,7 @@ use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 use std::time::Duration;
 
 use crate::consolidation::ConsolidationEngine;
@@ -158,6 +159,8 @@ pub struct EvolutionEngine {
     usage_stats: HashMap<String, UsageStats>,
     /// Whether the engine is currently in a sleep cycle
     sleeping: Arc<AtomicBool>,
+    /// Semaphore for bounding concurrent backtest validations
+    backtest_semaphore: Arc<Semaphore>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -180,6 +183,7 @@ impl EvolutionEngine {
             config,
             usage_stats: HashMap::new(),
             sleeping: Arc::new(AtomicBool::new(false)),
+            backtest_semaphore: Arc::new(Semaphore::new(3)),
         }
     }
 
@@ -196,6 +200,7 @@ impl EvolutionEngine {
             config,
             usage_stats: HashMap::new(),
             sleeping: Arc::new(AtomicBool::new(false)),
+            backtest_semaphore: Arc::new(Semaphore::new(3)),
         }
     }
 

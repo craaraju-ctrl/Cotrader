@@ -11,6 +11,7 @@ use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{params, Connection};
 
+use crate::migrations;
 use crate::types::{
     ContextBlock, ContextSummary, GraphEdge, GraphTraversalResult, MemoryRecord,
     MemoryStats, MemoryTier, Namespace, ReasoningChain, ReasoningStep, Reflection,
@@ -97,197 +98,14 @@ impl MemoryStore {
     }
 
     fn initialize_tables(&self) -> rusqlite::Result<()> {
-        // Use a block scope to drop the MutexGuard before calling run_migrations,
-        // which also needs to acquire the same lock.
+        // Run versioned migrations (creates all tables and indexes)
+        self.run_migrations()?;
+        
+        // Initialize vector tables
         {
             let conn = self.lock_db()?;
-            conn.execute_batch(
-                "
-                CREATE TABLE IF NOT EXISTS records (
-                    id            TEXT PRIMARY KEY,
-                    content       TEXT NOT NULL,
-                    content_type  TEXT NOT NULL,
-                    metadata_json TEXT NOT NULL DEFAULT '{}',
-                    embedding     BLOB,
-                    timestamp     TEXT NOT NULL,
-
-                    tier          TEXT NOT NULL DEFAULT 'working',
-                    importance    REAL NOT NULL DEFAULT 0.5,
-                    access_count  INTEGER NOT NULL DEFAULT 0,
-                    last_accessed TEXT,
-                    ttl_seconds   INTEGER,
-                    parent_id     TEXT,
-
-                    valid_from    TEXT,
-                    valid_to      TEXT,
-                    sys_start     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-                    sys_end       TEXT,
-                    tags_json     TEXT NOT NULL DEFAULT '[]'
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_records_tier     ON records(tier);
-                CREATE INDEX IF NOT EXISTS idx_records_type     ON records(content_type);
-                CREATE INDEX IF NOT EXISTS idx_records_ts       ON records(timestamp);
-                CREATE INDEX IF NOT EXISTS idx_records_parent   ON records(parent_id);
-                CREATE INDEX IF NOT EXISTS idx_records_importance ON records(importance);
-
-                CREATE VIRTUAL TABLE IF NOT EXISTS records_fts USING fts5(
-                    id UNINDEXED, content, content_type UNINDEXED, metadata_json UNINDEXED
-                );
-
-                CREATE TABLE IF NOT EXISTS tier_config (
-                    tier              TEXT PRIMARY KEY,
-                    max_records       INTEGER NOT NULL DEFAULT 1000,
-                    default_ttl_secs  INTEGER,
-                    promotion_threshold REAL NOT NULL DEFAULT 0.7,
-                    demotion_threshold  REAL NOT NULL DEFAULT 0.2,
-                    auto_promote      INTEGER NOT NULL DEFAULT 1
-                );
-
-                INSERT OR IGNORE INTO tier_config VALUES ('working',    100,   3600,        0.5, 0.1, 1);
-                INSERT OR IGNORE INTO tier_config VALUES ('episodic',   10000, 2592000,     0.7, 0.2, 1);
-                INSERT OR IGNORE INTO tier_config VALUES ('semantic',   100000,NULL,        0.85,0.15,0);
-                INSERT OR IGNORE INTO tier_config VALUES ('procedural', 10000, NULL,        0.95,0.1, 0);
-
-                CREATE TABLE IF NOT EXISTS graph_edges (
-                    edge_id       TEXT PRIMARY KEY,
-                    source_id     TEXT NOT NULL,
-                    target_id     TEXT NOT NULL,
-                    relation_type TEXT NOT NULL,
-                    weight        REAL NOT NULL DEFAULT 1.0,
-                    metadata_json TEXT NOT NULL DEFAULT '{}',
-                    created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-                    FOREIGN KEY (source_id) REFERENCES records(id) ON DELETE CASCADE,
-                    FOREIGN KEY (target_id) REFERENCES records(id) ON DELETE CASCADE
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_edges_source ON graph_edges(source_id);
-                CREATE INDEX IF NOT EXISTS idx_edges_target ON graph_edges(target_id);
-                CREATE INDEX IF NOT EXISTS idx_edges_relation ON graph_edges(relation_type);
-
-                CREATE TABLE IF NOT EXISTS reasoning_chains (
-                    chain_id          TEXT PRIMARY KEY,
-                    goal              TEXT NOT NULL,
-                    steps_json        TEXT NOT NULL DEFAULT '[]',
-                    final_conclusion  TEXT,
-                    overall_confidence REAL NOT NULL DEFAULT 0.0,
-                    success           INTEGER NOT NULL DEFAULT 0,
-                    consulted_records TEXT NOT NULL DEFAULT '[]',
-                    tags_json         TEXT NOT NULL DEFAULT '[]',
-                    created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-                    duration_ms       INTEGER NOT NULL DEFAULT 0
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_chains_goal ON reasoning_chains(goal);
-
-                CREATE TABLE IF NOT EXISTS expert_opinions (
-                    opinion_id        TEXT PRIMARY KEY,
-                    expert_type       TEXT NOT NULL,
-                    target_record_id  TEXT,
-                    recommendation    TEXT NOT NULL,
-                    reasoning         TEXT NOT NULL,
-                    confidence        REAL NOT NULL DEFAULT 0.0,
-                    action_taken      TEXT,
-                    created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-                    FOREIGN KEY (target_record_id) REFERENCES records(id) ON DELETE SET NULL
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_opinions_expert ON expert_opinions(expert_type);
-                CREATE INDEX IF NOT EXISTS idx_opinions_target ON expert_opinions(target_record_id);
-
-                CREATE TABLE IF NOT EXISTS evolution_events (
-                    event_id       TEXT PRIMARY KEY,
-                    event_type     TEXT NOT NULL,
-                    description    TEXT NOT NULL,
-                    previous_value TEXT,
-                    new_value      TEXT,
-                    confidence     REAL NOT NULL DEFAULT 0.0,
-                    timestamp      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_evolution_type ON evolution_events(event_type);
-
-                CREATE TABLE IF NOT EXISTS reflections (
-                    reflection_id    TEXT PRIMARY KEY,
-                    topic            TEXT NOT NULL,
-                    monologue        TEXT NOT NULL,
-                    conclusion       TEXT NOT NULL,
-                    planned_actions  TEXT NOT NULL DEFAULT '[]',
-                    outcome          TEXT,
-                    confidence       REAL NOT NULL DEFAULT 0.0,
-                    tags_json        TEXT NOT NULL DEFAULT '[]',
-                    created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_reflections_topic ON reflections(topic);
-                CREATE INDEX IF NOT EXISTS idx_reflections_created ON reflections(created_at);
-
-                CREATE TABLE IF NOT EXISTS self_assessments (
-                    assessment_id          TEXT PRIMARY KEY,
-                    memory_quality_score   REAL NOT NULL DEFAULT 0.0,
-                    coherence_score        REAL NOT NULL DEFAULT 0.0,
-                    staleness_score        REAL NOT NULL DEFAULT 0.0,
-                    diversity_score        REAL NOT NULL DEFAULT 0.0,
-                    overall_health         REAL NOT NULL DEFAULT 0.0,
-                    issues_detected        TEXT NOT NULL DEFAULT '[]',
-                    recommendations        TEXT NOT NULL DEFAULT '[]',
-                    created_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_assessments_created ON self_assessments(created_at);
-
-                CREATE TABLE IF NOT EXISTS temporal_facts (
-                    fact_id              TEXT PRIMARY KEY,
-                    content              TEXT NOT NULL,
-                    content_type         TEXT NOT NULL,
-                    valid_from           TEXT NOT NULL,
-                    valid_to             TEXT,
-                    sys_start            TEXT NOT NULL,
-                    sys_end              TEXT,
-                    version              INTEGER NOT NULL DEFAULT 1,
-                    previous_version_id  TEXT,
-                    decay_score          REAL NOT NULL DEFAULT 1.0,
-                    recall_count         INTEGER NOT NULL DEFAULT 0,
-                    last_recalled        TEXT,
-                    importance           REAL NOT NULL DEFAULT 0.5,
-                    metadata_json        TEXT NOT NULL DEFAULT '{}'
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_temporal_type ON temporal_facts(content_type);
-                CREATE INDEX IF NOT EXISTS idx_temporal_valid ON temporal_facts(valid_from);
-                CREATE INDEX IF NOT EXISTS idx_temporal_version ON temporal_facts(previous_version_id);
-
-                CREATE TABLE IF NOT EXISTS context_blocks (
-                    block_id        TEXT PRIMARY KEY,
-                    label           TEXT NOT NULL,
-                    content         TEXT NOT NULL,
-                    pinned          INTEGER NOT NULL DEFAULT 0,
-                    priority        INTEGER NOT NULL DEFAULT 0,
-                    max_tokens      INTEGER NOT NULL DEFAULT 1024,
-                    current_tokens  INTEGER NOT NULL DEFAULT 0,
-                    last_updated    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-                    metadata_json   TEXT NOT NULL DEFAULT '{}'
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_blocks_label ON context_blocks(label);
-
-                CREATE TABLE IF NOT EXISTS context_summaries (
-                    summary_id        TEXT PRIMARY KEY,
-                    topic             TEXT NOT NULL,
-                    summary           TEXT NOT NULL,
-                    source_block_ids  TEXT NOT NULL DEFAULT '[]',
-                    created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_summaries_topic ON context_summaries(topic);
-                ",
-            )?;
-
             let _ = self.init_vector_tables(&conn);
-        } // MutexGuard dropped here
-
-        // Run schema migrations — acquires its own lock
-        self.run_migrations()?;
+        }
 
         Ok(())
     }
@@ -296,91 +114,7 @@ impl MemoryStore {
     /// This ensures the database schema is always up-to-date when the application starts.
     fn run_migrations(&self) -> rusqlite::Result<()> {
         let conn = self.lock_db()?;
-
-        // Create migration tracking table if it doesn't exist
-        conn.execute_batch(
-            "
-            CREATE TABLE IF NOT EXISTS schema_migrations (
-                version     INTEGER PRIMARY KEY,
-                applied_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-            );
-            ",
-        )?;
-
-        // Get current migration version
-        let current_version: i64 = conn
-            .query_row(
-                "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-
-        // Migration v1: Add tags_json column to records table (for future tag support)
-        if current_version < 1 {
-            // Check if column already exists (defensive)
-            let has_tags: bool = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM pragma_table_info('records') WHERE name = 'tags_json'",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap_or(0)
-                > 0;
-
-            if !has_tags {
-                conn.execute_batch(
-                    "ALTER TABLE records ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]';",
-                )?;
-            }
-
-            conn.execute(
-                "INSERT OR IGNORE INTO schema_migrations (version) VALUES (1)",
-                [],
-            )?;
-        }
-
-        // Migration v2: Add namespaces table and namespace_id column to records
-        if current_version < 2 {
-            conn.execute_batch(
-                "
-                CREATE TABLE IF NOT EXISTS namespaces (
-                    namespace_id   TEXT PRIMARY KEY,
-                    name           TEXT NOT NULL UNIQUE,
-                    description    TEXT NOT NULL DEFAULT '',
-                    owner          TEXT NOT NULL,
-                    read_parents   TEXT NOT NULL DEFAULT '[]',
-                    write_children TEXT NOT NULL DEFAULT '[]',
-                    created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-                );
-                CREATE INDEX IF NOT EXISTS idx_namespaces_name ON namespaces(name);
-                CREATE INDEX IF NOT EXISTS idx_namespaces_owner ON namespaces(owner);
-                ",
-            )?;
-
-            // Add namespace_id column to records if not present
-            let has_ns: bool = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM pragma_table_info('records') WHERE name = 'namespace_id'",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap_or(0)
-                > 0;
-
-            if !has_ns {
-                conn.execute_batch(
-                    "ALTER TABLE records ADD COLUMN namespace_id TEXT NOT NULL DEFAULT 'default';
-                     CREATE INDEX IF NOT EXISTS idx_records_namespace ON records(namespace_id);",
-                )?;
-            }
-
-            conn.execute(
-                "INSERT OR IGNORE INTO schema_migrations (version) VALUES (2)",
-                [],
-            )?;
-        }
-
+        migrations::run_migrations(&conn)?;
         Ok(())
     }
 
