@@ -3098,6 +3098,7 @@ dependencies = [
 name = "rat-core"
 version = "0.1.0"
 dependencies = [
+ "agentic-memory",
  "async-trait",
  "chrono",
  "log",

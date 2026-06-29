@@ -26,5 +26,7 @@ ureq = { version = "2.9", features = ["json"] }
 urlencoding = "2.1"
 quick-xml = "0.31"
 
+agentic-memory = { path = "../../memory" }
+
 [dev-dependencies]
 rand = "0.8"

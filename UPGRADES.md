@@ -9,11 +9,10 @@
 
 **Files:** `memory/Cargo.toml`, `memory/src/store.rs`
 
-Replaced single `Arc<Mutex<Connection>>` with `Arc<Pool<SqliteConnectionManager>>`.
+Replaced `Arc<Mutex<Connection>>` with `Arc<Pool<SqliteConnectionManager>>`.
 
 - Pool: 8 max connections, 2 min idle
 - Pragmas: WAL, busy_timeout=5000, synchronous=NORMAL
-- Dependencies: `r2d2 = "0.8"`, `r2d2_sqlite = "0.24"`
 
 ---
 
@@ -21,11 +20,7 @@ Replaced single `Arc<Mutex<Connection>>` with `Arc<Pool<SqliteConnectionManager>
 
 **Files:** `memory/src/consolidation.rs`, `memory/src/lib.rs`
 
-Extracts `regret_score`, `balance_delta`, `position_size`, `regime`, `leverage`, `is_win` from metadata.
-
 Formula: `Access + Recency + (0.35 × regret) + (0.25 × log10(|delta|))`
-
-Modifiers: Leverage >10x amplifies, losses weighted 1.2x
 
 ---
 
@@ -33,7 +28,7 @@ Modifiers: Leverage >10x amplifies, losses weighted 1.2x
 
 **File:** `memory/src/performance.rs`
 
-DashMap-based lock-free cache with atomic hit/miss counters.
+DashMap-based lock-free cache with atomic counters.
 
 ---
 
@@ -43,15 +38,13 @@ DashMap-based lock-free cache with atomic hit/miss counters.
 
 15 variants with domain-specific weights (-0.50 to +0.40).
 
-`RetrievalExpert::boost_with_graph_reasoning` parses enum instead of generic strings.
-
 ---
 
 ### 5. SIMD Hamming Distance
 
 **File:** `memory/src/vector.rs`
 
-AVX2 intrinsics (`_mm256_xor_si256` + popcount) with scalar fallback. 10-30x faster on x86_64.
+AVX2 intrinsics with scalar fallback. 10-30x faster on x86_64.
 
 ---
 
@@ -59,18 +52,31 @@ AVX2 intrinsics (`_mm256_xor_si256` + popcount) with scalar fallback. 10-30x fas
 
 **Files:** `memory/src/types.rs`, `memory/src/temporal.rs`, `memory/src/staleness.rs`
 
-**DecayConfig additions:**
-- `volatility_sensitivity: f64` (default: 2.0)
-- `structural_floor: f64` (default: 0.3)
+Formula: `Effective_Rate = Base_Rate × (1.0 + α × σ)`
 
-**Formula:**
-```
-Effective_Rate = Base_Rate × (1.0 + α × σ)
-```
+---
 
-- High volatility → memories decay faster
-- Low volatility → memories persist longer
-- Structural rules → maintain permanent floor
+### 7. Core Trading Loop Integration
+
+**Files:** `crates/rat-core/Cargo.toml`, `crates/rat-core/src/memory_integration.rs`, `crates/rat-core/src/lib.rs`
+
+New `MemoryIntegration` struct bridges rat-core with agentic-memory:
+
+| Component | Purpose |
+|-----------|---------|
+| `policy_cache: ConcurrentPolicyCache` | Sub-millisecond risk lookups |
+| `scorer: FinancialRegretScorer` | Post-trade analytics |
+| `volatility: AtomicU64` | Real-time market volatility |
+
+**Key methods:**
+- `check_policy(rule_id)` — Lock-free policy lookup
+- `score_episode(episode)` — Extract regret/balance/regime from TradingEpisode
+- `episode_to_metadata(episode)` — Convert to memory storage format
+
+**Tests:** 3/3 passing
+- `test_policy_cache_sub_ms` — 10k lookups in <50ms (debug)
+- `test_volatility_atomic` — Atomic f64 read/write
+- `test_episode_scoring` — Full episode → metadata extraction
 
 ---
 
@@ -78,8 +84,9 @@ Effective_Rate = Base_Rate × (1.0 + α × σ)
 
 ```bash
 cargo check -p agentic-memory     # ✅
-cargo build --release -p agentic-memory  # ✅ 11.7s
-cargo test -p agentic-memory -- temporal  # ✅ 8/8 pass
+cargo check -p rat-core           # ✅
+cargo build --release -p rat-core # ✅ 22.7s
+cargo test -p rat-core -- memory_integration  # ✅ 3/3 pass
 ```
 
 ---
@@ -88,6 +95,6 @@ cargo test -p agentic-memory -- temporal  # ✅ 8/8 pass
 
 | Item | Status |
 |------|--------|
-| Backtest validation | Needs NATS + backtest runner |
-| Conflict arbitrator | Game-theoretic namespace resolution |
-| API volatility endpoints | Optional query params for recall |
+| Volatility telemetry from rat-market-data | Needs market-data crate integration |
+| NATS EventBus routing | Needs rat-eventbus integration |
+| Tredo Exchange post-fill hooks | Needs exchange crate integration |

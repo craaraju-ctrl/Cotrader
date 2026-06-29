@@ -24,7 +24,8 @@ pub mod role;
 pub mod service_manager;
 pub mod skill_aggregator; // Weighted ensemble aggregation for structured SkillResult outputs
 pub mod skills; // New AgentSkill trait for building skills/tools (pluggable agent capabilities)
-pub mod vector_memory; // Vector Memory for similarity search across trading episodes (LanceDB ANN + JSON fallback)
+pub mod vector_memory;
+pub mod memory_integration; // Vector Memory for similarity search across trading episodes (LanceDB ANN + JSON fallback)
 
 pub use advanced_patterns::{
     detect_advanced_patterns, detect_channel, detect_double_bottom, detect_double_top,
@@ -80,4 +81,5 @@ pub use role::AgentRole;
 pub use service_manager::{ConnectionStatus, ServiceManager, ServiceStatus};
 pub use skill_aggregator::{AggregatedSignal, SkillAggregator};
 pub use vector_memory::{SimilarResult, VectorEntry, VectorMemory};
+pub use memory_integration::{MemoryIntegration, PolicyEntry};
 pub mod agentmemory;
