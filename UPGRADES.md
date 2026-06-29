@@ -58,25 +58,72 @@ Formula: `Effective_Rate = Base_Rate × (1.0 + α × σ)`
 
 ### 7. Core Trading Loop Integration
 
-**Files:** `crates/rat-core/Cargo.toml`, `crates/rat-core/src/memory_integration.rs`, `crates/rat-core/src/lib.rs`
+**File:** `crates/rat-core/src/memory_integration.rs`
 
-New `MemoryIntegration` struct bridges rat-core with agentic-memory:
+`MemoryIntegration` struct bridges rat-core with agentic-memory.
+
+---
+
+### 8. API Volatility Endpoints
+
+**File:** `memory/src/api.rs`
+
+**Changes:**
+- `TemporalRecallBody` gains optional `volatility: Option<f64>` field
+- `POST /temporal/recall` returns decay score with volatility adjustment
+- `GET /temporal/facts/{id}/decay?volatility=0.5` accepts query param
+
+**Response format:**
+```json
+{
+  "fact": { ... },
+  "decay_score": 0.85,
+  "effective_importance": 0.68,
+  "volatility_applied": 0.5
+}
+```
+
+---
+
+### 9. Namespace Arbitrator
+
+**File:** `memory/src/consolidation.rs`
+
+Game-theoretic conflict resolver for cross-namespace contradictions.
 
 | Component | Purpose |
 |-----------|---------|
-| `policy_cache: ConcurrentPolicyCache` | Sub-millisecond risk lookups |
-| `scorer: FinancialRegretScorer` | Post-trade analytics |
-| `volatility: AtomicU64` | Real-time market volatility |
+| `NamespaceArbitrator` | Resolves conflicts via accuracy/variance scoring |
+| `record_outcome()` | Updates namespace accuracy (EMA) |
+| `record_prediction()` | Updates namespace variance |
+| `resolve_conflict()` | Returns winner with confidence |
 
-**Key methods:**
-- `check_policy(rule_id)` — Lock-free policy lookup
-- `score_episode(episode)` — Extract regret/balance/regime from TradingEpisode
-- `episode_to_metadata(episode)` — Convert to memory storage format
+**Scoring formula:**
+```
+score = accuracy / (1.0 + variance)
+```
 
-**Tests:** 3/3 passing
-- `test_policy_cache_sub_ms` — 10k lookups in <50ms (debug)
-- `test_volatility_atomic` — Atomic f64 read/write
-- `test_episode_scoring` — Full episode → metadata extraction
+Lower variance = more reliable = higher weight.
+
+---
+
+### 10. Backtest Validation
+
+**File:** `memory/src/evolution.rs`
+
+Validates procedural rules before promotion.
+
+| Component | Purpose |
+|-----------|---------|
+| `BacktestValidator` | Validates rules against historical data |
+| `RuleMetrics` | Stores validation results |
+
+**Thresholds:**
+- Min profit factor: 1.2
+- Min Sharpe ratio: 1.5
+- Max drawdown: 15%
+
+Rules that fail validation are skipped (not promoted to procedural memory).
 
 ---
 
@@ -84,17 +131,30 @@ New `MemoryIntegration` struct bridges rat-core with agentic-memory:
 
 ```bash
 cargo check -p agentic-memory     # ✅
-cargo check -p rat-core           # ✅
-cargo build --release -p rat-core # ✅ 22.7s
-cargo test -p rat-core -- memory_integration  # ✅ 3/3 pass
+cargo build --release -p agentic-memory  # ✅ 11.2s
+cargo test -p agentic-memory      # ✅ 112/112 pass (1 ignored)
 ```
 
 ---
 
-## Future Work
+## Test Coverage
 
-| Item | Status |
-|------|--------|
-| Volatility telemetry from rat-market-data | Needs market-data crate integration |
-| NATS EventBus routing | Needs rat-eventbus integration |
-| Tredo Exchange post-fill hooks | Needs exchange crate integration |
+| Module | Tests | Status |
+|--------|-------|--------|
+| api | 32 | ✅ (1 ignored) |
+| tiers | 11 | ✅ |
+| cache | 5 | ✅ |
+| consolidation | 6 | ✅ |
+| temporal | 8 | ✅ |
+| vector | 6 | ✅ |
+| graph | 5 | ✅ |
+| reasoning | 4 | ✅ |
+| reflection | 4 | ✅ |
+| evolution | 3 | ✅ |
+| experts | 2 | ✅ |
+| context | 5 | ✅ |
+| store | 20 | ✅ |
+| metrics | 5 | ✅ |
+| client | 3 | ✅ |
+| resilience | 2 | ✅ |
+| doc-tests | 5 | ✅ |

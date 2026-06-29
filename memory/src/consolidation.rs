@@ -9,6 +9,7 @@
 //! - **Summarization** — Compress episodic records into semantic knowledge
 //! - **Promotion Pipeline** — Move important records up the tier hierarchy
 
+use serde::{Deserialize, Serialize};
 use crate::store::MemoryStore;
 use crate::temporal::TemporalEngine;
 use crate::types::{
@@ -541,9 +542,103 @@ impl ConsolidationEngine {
     pub fn temporal(&self) -> &TemporalEngine {
         &self.temporal
     }
-
-
 }
+
+/// Game-theoretic conflict resolver for cross-namespace contradictions.
+/// Maintains per-namespace accuracy and variance metrics to resolve disputes.
+pub struct NamespaceArbitrator {
+    /// Rolling accuracy per namespace (EMA)
+    namespace_accuracy: std::collections::HashMap<String, f64>,
+    /// Rolling error variance per namespace
+    namespace_variance: std::collections::HashMap<String, f64>,
+}
+
+/// Result of a conflict arbitration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArbitrationResult {
+    pub winner_namespace: String,
+    pub loser_namespace: String,
+    pub confidence: f64,
+    pub winner_score: f64,
+    pub loser_score: f64,
+    pub reasoning: String,
+}
+
+impl NamespaceArbitrator {
+    pub fn new() -> Self {
+        Self {
+            namespace_accuracy: std::collections::HashMap::new(),
+            namespace_variance: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Record an outcome for a namespace (was the prediction correct?).
+    pub fn record_outcome(&mut self, namespace: &str, was_correct: bool) {
+        let acc = self.namespace_accuracy
+            .entry(namespace.to_string())
+            .or_insert(0.5);
+        // EMA: 90% old, 10% new
+        *acc = *acc * 0.9 + (if was_correct { 1.0 } else { 0.0 }) * 0.1;
+    }
+
+    /// Record a prediction error for variance tracking.
+    pub fn record_prediction(&mut self, namespace: &str, predicted: f64, actual: f64) {
+        let error = predicted - actual;
+        let var = self.namespace_variance
+            .entry(namespace.to_string())
+            .or_insert(0.1);
+        // EMA of squared error
+        *var = *var * 0.9 + error * error * 0.1;
+    }
+
+    /// Resolve a conflict between two namespaces using game-theoretic scoring.
+    /// Returns the winning namespace and confidence.
+    pub fn resolve_conflict(&self, ns_a: &str, ns_b: &str) -> ArbitrationResult {
+        let acc_a = self.namespace_accuracy.get(ns_a).copied().unwrap_or(0.5);
+        let acc_b = self.namespace_accuracy.get(ns_b).copied().unwrap_or(0.5);
+        let var_a = self.namespace_variance.get(ns_a).copied().unwrap_or(0.1);
+        let var_b = self.namespace_variance.get(ns_b).copied().unwrap_or(0.1);
+
+        // Sharpe-like scoring: accuracy / variance (lower variance = more reliable)
+        let score_a = acc_a / (1.0 + var_a);
+        let score_b = acc_b / (1.0 + var_b);
+
+        let (winner, loser, winner_score, loser_score) = if score_a >= score_b {
+            (ns_a.to_string(), ns_b.to_string(), score_a, score_b)
+        } else {
+            (ns_b.to_string(), ns_a.to_string(), score_b, score_a)
+        };
+
+        let total = score_a + score_b;
+        let confidence = if total > 0.0 { winner_score / total } else { 0.5 };
+
+        ArbitrationResult {
+            winner_namespace: winner,
+            loser_namespace: loser,
+            confidence,
+            winner_score,
+            loser_score,
+            reasoning: format!(
+                "Resolved by variance-weighted accuracy: {} (score={:.4}) > {} (score={:.4})",
+                ns_a, score_a, ns_b, score_b
+            ),
+        }
+    }
+
+    /// Get current stats for a namespace.
+    pub fn get_stats(&self, namespace: &str) -> (f64, f64) {
+        let acc = self.namespace_accuracy.get(namespace).copied().unwrap_or(0.5);
+        let var = self.namespace_variance.get(namespace).copied().unwrap_or(0.1);
+        (acc, var)
+    }
+}
+
+impl Default for NamespaceArbitrator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 
 
 

@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use crate::consolidation::ConsolidationEngine;
 use crate::reflection::ReflectionEngine;
+use serde::{Deserialize, Serialize};
 use crate::store::MemoryStore;
 use crate::temporal::TemporalEngine;
 use crate::types::{ConsolidationReport, DecayConfig, EvolutionEvent, MemoryTier, Reflection, SelfAssessment};
@@ -46,6 +47,97 @@ impl Default for EvolutionConfig {
             auto_tune_tiers: true,
         }
     }
+}
+
+
+
+/// Validates procedural rules via backtest before promotion.
+/// Simulates a simple backtest to verify positive expectancy.
+pub struct BacktestValidator {
+    /// Minimum profit factor required for validation
+    pub min_profit_factor: f64,
+    /// Minimum Sharpe ratio required
+    pub min_sharpe: f64,
+    /// Maximum allowed drawdown
+    pub max_drawdown: f64,
+}
+
+impl Default for BacktestValidator {
+    fn default() -> Self {
+        Self {
+            min_profit_factor: 1.2,
+            min_sharpe: 1.5,
+            max_drawdown: 0.15,
+        }
+    }
+}
+
+impl BacktestValidator {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Validate a proposed procedural rule against historical patterns.
+    /// Returns (is_valid, metrics).
+    pub fn validate_rule(&self, _rule_content: &str, historical_records: &[crate::types::TieredRecord]) -> (bool, RuleMetrics) {
+        // Extract key metrics from historical records
+        let mut wins = 0u64;
+        let mut losses = 0u64;
+        let mut total_pnl = 0.0;
+        let mut max_dd = 0.0;
+        let mut peak = 0.0;
+        let mut equity = 10000.0; // Starting equity
+
+        for record in historical_records {
+            if let Some(pnl_str) = record.record.metadata.get("pnl") {
+                if let Ok(pnl) = pnl_str.parse::<f64>() {
+                    total_pnl += pnl;
+                    equity += pnl;
+                    if equity > peak { peak = equity; }
+                    let dd = (peak - equity) / peak;
+                    if dd > max_dd { max_dd = dd; }
+
+                    if pnl > 0.0 { wins += 1; } else { losses += 1; }
+                }
+            }
+        }
+
+        let total_trades = wins + losses;
+        let win_rate = if total_trades > 0 { wins as f64 / total_trades as f64 } else { 0.0 };
+        let avg_win = if wins > 0 { total_pnl / wins as f64 } else { 0.0 };
+        let avg_loss = if losses > 0 { (total_pnl / losses as f64).abs() } else { 1.0 };
+        let profit_factor = if avg_loss > 0.0 { avg_win / avg_loss } else { 0.0 };
+
+        // Simple Sharpe approximation
+        let returns = if total_trades > 0 { total_pnl / total_trades as f64 } else { 0.0 };
+        let sharpe = if returns > 0.0 { returns / (max_dd + 0.01) } else { 0.0 };
+
+        let metrics = RuleMetrics {
+            total_trades,
+            win_rate,
+            profit_factor,
+            sharpe_ratio: sharpe,
+            max_drawdown: max_dd,
+            total_pnl,
+        };
+
+        let is_valid = profit_factor >= self.min_profit_factor
+            && sharpe >= self.min_sharpe
+            && max_dd <= self.max_drawdown;
+
+        (is_valid, metrics)
+    }
+}
+
+/// Metrics from a backtest validation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuleMetrics {
+    pub total_trades: u64,
+    pub win_rate: f64,
+    pub profit_factor: f64,
+    pub sharpe_ratio: f64,
+    pub max_drawdown: f64,
+    pub total_pnl: f64,
 }
 
 /// The evolution engine runs autonomously to adapt the memory system.

@@ -3,7 +3,6 @@
 //! Drop-in replacements for hot-path operations.
 //! These wrap existing functionality with concurrent-friendly alternatives.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use dashmap::DashMap;
