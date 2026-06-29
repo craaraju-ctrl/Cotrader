@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+
 
 use agentic_memory::performance::ConcurrentPolicyCache;
 use agentic_memory::FinancialRegretScorer;
@@ -163,7 +163,7 @@ use std::time::Duration;
         });
 
         // Measure lookup time
-        let start = Instant::now();
+        let start = std::time::Instant::now();
         for _ in 0..10000 {
             let _ = integration.check_policy("max_position_size");
         }

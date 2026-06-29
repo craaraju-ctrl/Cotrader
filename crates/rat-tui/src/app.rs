@@ -1,4 +1,4 @@
-//! Application state — Central state for the entire TUI.
+#![allow(dead_code)]
 
 use std::collections::{HashMap, VecDeque};
 

@@ -160,6 +160,7 @@ pub struct EvolutionEngine {
     /// Whether the engine is currently in a sleep cycle
     sleeping: Arc<AtomicBool>,
     /// Semaphore for bounding concurrent backtest validations
+    #[allow(dead_code)]
     backtest_semaphore: Arc<Semaphore>,
 }
 

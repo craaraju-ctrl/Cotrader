@@ -13,7 +13,7 @@ use crate::theme::THEME;
 pub struct SettingsComponent;
 
 impl Component for SettingsComponent {
-    fn render(&self, frame: &mut Frame, area: Rect, app: &App) {
+    fn render(&self, frame: &mut Frame, area: Rect, _app: &App) {
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([

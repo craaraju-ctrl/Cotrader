@@ -1,4 +1,5 @@
 //! Theme system — Consistent color palette for the trading terminal.
+#![allow(dead_code)]
 
 use ratatui::style::{Color, Modifier, Style};
 

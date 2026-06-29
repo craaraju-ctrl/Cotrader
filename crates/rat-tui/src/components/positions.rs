@@ -1,7 +1,7 @@
 //! Positions component — Open positions with P&L visualization.
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Row, Table};
 use ratatui::Frame;
@@ -79,7 +79,6 @@ impl Component for PositionsComponent {
         frame.render_widget(table, chunks[0]);
 
         // ── Summary bar ────────────────────────────────────────────────────
-        let total_pnl: f64 = app.positions.iter().map(|p| p.pnl).sum();
         let total_margin: f64 = app.positions.iter().map(|p| p.size * p.entry_price / p.leverage as f64).sum();
         let total_unrealized: f64 = app.positions.iter().map(|p| p.pnl).sum();
 

@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from typing import List, Optional
+from pydantic import BaseModel, Field
+from typing import List
 import pandas as pd
 from model import KronosPredictor
 import uvicorn
@@ -8,10 +8,6 @@ import os
 import time
 
 app = FastAPI(title="Kronos Forecasting Service for rat", version="0.1.0")
-
-# === Model Loading ===
-# Set KRONOS_MODEL_PATH env var to use a local downloaded model
-# Otherwise falls back to Hugging Face (first run will download)
 
 print("[KronosService] Loading Kronos model...")
 predictor = KronosPredictor()
@@ -29,10 +25,11 @@ class OhlcvBar(BaseModel):
 class ForecastRequest(BaseModel):
     symbol: str
     ohlcv: List[OhlcvBar]
-    pred_len: int = 10
+    timeframe: str = Field(default="1min", description="Pandas freq string: '1min', '5min', '1H', '1D'")
+    pred_len: int = Field(default=10, ge=1, le=25)
     temperature: float = 0.8
     top_p: float = 0.9
-    sample_count: int = 1
+    sample_count: int = 20
 
 class ForecastResponse(BaseModel):
     symbol: str
@@ -44,31 +41,36 @@ async def health():
     uptime = int(time.time() - _start_time)
     return {
         "status": "ok",
-        "model": "chronos-bolt",
+        "model": "chronos-bolt-tiny",
         "version": app.version,
         "uptime_seconds": uptime,
-        "uptime_str": f"{uptime // 86400}d {(uptime % 86400) // 3600}h {(uptime % 3600) // 60}m",
         "predictor_ready": predictor.using_real_model,
     }
 
 @app.post("/forecast", response_model=ForecastResponse)
 async def get_forecast(request: ForecastRequest):
+    # FIX 4: Minimum array length enforcement
+    if len(request.ohlcv) < 5:
+        raise HTTPException(
+            status_code=400,
+            detail="Insufficient history. Minimum 5 bars required."
+        )
+
     try:
-        # Convert input to DataFrame — use model_dump() for Pydantic v2 compat
         data = [bar.model_dump() for bar in request.ohlcv]
         df = pd.DataFrame(data)
         df['timestamp'] = pd.to_datetime(df['timestamp'], format='ISO8601')
         df = df.set_index('timestamp')
 
-        # Generate future timestamps (simple example - adjust frequency as per your market)
+        # FIX 2: Dynamic timeframe instead of hardcoded '1min'
         last_ts = df.index[-1]
+        freq = request.timeframe
         y_timestamp = pd.date_range(
             start=last_ts + pd.Timedelta(minutes=1),
             periods=request.pred_len,
-            freq='1min'   # Change to '5min', '1H' etc. based on your data
+            freq=freq
         )
 
-        # Call Kronos predictor
         pred_df = predictor.predict(
             df,
             x_timestamp=df.index,
@@ -86,8 +88,10 @@ async def get_forecast(request: ForecastRequest):
         return ForecastResponse(
             symbol=request.symbol,
             forecasts=forecasts,
-            message="Forecast generated successfully using Kronos"
+            message="Forecast generated using true distribution median"
         )
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -95,5 +99,5 @@ async def get_forecast(request: ForecastRequest):
 
 if __name__ == "__main__":
     port = int(os.getenv("KRONOS_PORT", "8000"))
-    print(f"[KronosService] Starting on port {port} (from KRONOS_PORT env var)")
+    print(f"[KronosService] Starting on port {port}")
     uvicorn.run(app, host="0.0.0.0", port=port)

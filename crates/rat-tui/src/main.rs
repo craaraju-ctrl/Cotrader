@@ -135,7 +135,7 @@ impl AppController {
 
                 false
             }
-            Event::Mouse(mouse) => {
+            Event::Mouse(_) => {
                 // Handle mouse events
                 false
             }

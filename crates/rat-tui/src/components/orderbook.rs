@@ -125,7 +125,7 @@ impl OrderBookComponent {
     fn render_spread(&self, frame: &mut Frame, area: Rect, app: &App) {
         let mid = app.orderbook.mid_price;
         let spread = app.orderbook.spread;
-        let spread_pct = if mid > 0.0 { (spread / mid * 100.0) } else { 0.0 };
+        let spread_pct = if mid > 0.0 { spread / mid * 100.0 } else { 0.0 };
 
         let content = vec![
             Line::from(Span::styled(

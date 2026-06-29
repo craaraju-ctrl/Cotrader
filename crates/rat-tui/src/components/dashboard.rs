@@ -50,17 +50,6 @@ impl DashboardComponent {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(THEME.border));
 
-        let equity_content = vec![
-            Line::from(Span::styled(
-                format!("${:.2}", equity),
-                Style::default().fg(THEME.brand).add_modifier(Modifier::BOLD),
-            )),
-            Line::from(Span::styled(
-                format!("Cash: ${:.2}", cash),
-                Style::default().fg(THEME.text_dim),
-            )),
-        ];
-
         let equity_gauge = Gauge::default()
             .block(equity_block)
             .gauge_style(Style::default().fg(THEME.positive).bg(THEME.surface))
@@ -201,7 +190,7 @@ impl DashboardComponent {
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(THEME.border)),
         )
-        .highlight_style(
+        .row_highlight_style(
             Style::default()
                 .bg(Color::Rgb(40, 40, 60))
                 .add_modifier(Modifier::BOLD),
