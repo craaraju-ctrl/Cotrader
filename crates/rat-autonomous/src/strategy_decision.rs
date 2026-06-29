@@ -609,11 +609,32 @@ impl StrategyDecisionAgent {
                 println!("[StrategyDecisionAgent] FAST-PATH signal rejected by DisciplinedCore");
                 return Ok(None);
             }
+            // ═══ VOLATILITY-ADAPTIVE PARAMETER MODULATION ══════════════════
+            let sigma = self.state.memory_integration.get_volatility();
+            if sigma > 0.030 {
+                println!("[StrategyDecision] High-stress sigma ({:.4}) — adjusting SL/TP", sigma);
+                // Widen SL by 30% to avoid premature noise exits
+                let risk_dist = (signal.entry_price - signal.stop_loss).abs() * 1.30;
+                signal.stop_loss = match signal.direction {
+                    rat_core::TradeDirection::Long => signal.entry_price - risk_dist,
+                    rat_core::TradeDirection::Short => signal.entry_price + risk_dist,
+                };
+                // Contract TP by 15% to lock velocity moves
+                let reward_dist = (signal.take_profit - signal.entry_price).abs() * 0.85;
+                signal.take_profit = match signal.direction {
+                    rat_core::TradeDirection::Long => signal.entry_price + reward_dist,
+                    rat_core::TradeDirection::Short => signal.entry_price - reward_dist,
+                };
+                if risk_dist > 0.0 {
+                    signal.risk_reward_ratio = reward_dist / risk_dist;
+                }
+            }
+
             println!(
-                "[StrategyDecisionAgent] 🚀 FAST-PATH: {} {} @ entry={:.2} SL={:.2} TP={:.2} (RR {:.1}:1, conf {:.1}%)",
+                "[StrategyDecisionAgent] 🚀 FAST-PATH: {} {} @ entry={:.2} SL={:.2} TP={:.2} (RR {:.1}:1, conf {:.1}%, sigma={:.4})",
                 if signal.direction == rat_core::TradeDirection::Long { "BUY" } else { "SELL" },
                 symbol, signal.entry_price, signal.stop_loss, signal.take_profit,
-                signal.risk_reward_ratio, signal.confidence_score * 100.0
+                signal.risk_reward_ratio, signal.confidence_score * 100.0, sigma
             );
             return Ok(Some(signal));
         }

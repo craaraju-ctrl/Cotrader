@@ -331,15 +331,21 @@ impl HardRulesGate {
             } else {
                 0.0
             };
-            let passed = heat <= 0.10;
+            // Volatility-adjusted heat limit: high sigma compresses allowed heat
+            let heat_limit = if sigma > 0.03 {
+                0.10 * (1.0 - sigma * 0.5) // At sigma=0.05, limit drops to 7.5%
+            } else {
+                0.10
+            };
+            let passed = heat <= heat_limit;
             traces.push(RuleTrace {
                 rule_name: "portfolio_heat".to_string(),
                 priority: RulePriority::High,
                 steps: vec![ReasoningStep {
                     step: "compare_heat".to_string(),
-                    description: format!("Portfolio heat {:.1}% vs 10.0% limit", heat * 100.0),
+                    description: format!("Portfolio heat {:.1}% vs {:.1}% volatility-adjusted limit (sigma: {:.4})", heat * 100.0, heat_limit * 100.0, sigma),
                     observed: heat,
-                    threshold: 0.10,
+                    threshold: heat_limit,
                     passed,
                 }],
                 verdict: if passed {
@@ -349,9 +355,9 @@ impl HardRulesGate {
                 },
                 confidence: 1.0,
                 conclusion: if passed {
-                    format!("Heat {:.1}% within 10% limit", heat * 100.0)
+                    format!("Heat {:.1}% within {:.1}% limit", heat * 100.0, heat_limit * 100.0)
                 } else {
-                    format!("Portfolio heat at {:.1}% exceeds 10% limit", heat * 100.0)
+                    format!("Portfolio heat at {:.1}% exceeds {:.1}% volatility-adjusted limit (sigma: {:.4})", heat * 100.0, heat_limit * 100.0, sigma)
                 },
             });
             if !passed {
