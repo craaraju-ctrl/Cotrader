@@ -1,9 +1,9 @@
-# Agentic Memory — Implementation Log
+# Agentic Memory + Core Trading Brain — Implementation Log
 *Last updated: 2026-06-29*
 
 ---
 
-## Implemented Changes
+## Part 1: Agentic Memory Upgrades
 
 ### 1. SQLite Connection Pool
 
@@ -68,19 +68,9 @@ AVX2 intrinsics with scalar fallback. 10-30x faster on x86_64.
 
 Formula: `Effective_Rate = Base_Rate × (1.0 + α × σ)`
 
-Structural rules maintain permanent floor.
-
 ---
 
-### 8. Core Trading Loop Integration
-
-**File:** `crates/rat-core/src/memory_integration.rs`
-
-`MemoryIntegration` bridges rat-core with agentic-memory.
-
----
-
-### 9. API Volatility Endpoints
+### 8. API Volatility Endpoints
 
 **File:** `memory/src/api.rs`
 
@@ -90,17 +80,15 @@ Structural rules maintain permanent floor.
 
 ---
 
-### 10. Namespace Arbitrator
+### 9. Namespace Arbitrator
 
 **File:** `memory/src/consolidation.rs`
 
 Game-theoretic conflict resolver: `score = accuracy / (1 + max(variance, 0.05))`
 
-Variance floor prevents cold-start gaming.
-
 ---
 
-### 11. Backtest Validation
+### 10. Backtest Validation
 
 **File:** `memory/src/evolution.rs`
 
@@ -110,7 +98,7 @@ Uses `spawn_blocking` for non-blocking async execution.
 
 ---
 
-### 12. Backpressure Semaphore
+### 11. Backpressure Semaphore
 
 **File:** `memory/src/evolution.rs`
 
@@ -118,13 +106,58 @@ Uses `spawn_blocking` for non-blocking async execution.
 
 ---
 
-### 13. Numerical Stability Fixes
+## Part 2: Core Trading Brain Upgrades
 
-| Fix | Location | Change |
-|-----|----------|--------|
-| log10 breakeven | consolidation.rs | `log10(|delta| + 1.0)` |
-| Cold-start variance | consolidation.rs | `max(variance, 0.05)` |
-| Async backtest | evolution.rs | `spawn_blocking` wrapper |
+### 12. Core Trading Loop Integration
+
+**File:** `crates/rat-core/src/memory_integration.rs`
+
+`MemoryIntegration` bridges rat-core with agentic-memory.
+
+- `ConcurrentPolicyCache` for sub-ms risk lookups
+- `FinancialRegretScorer` for post-trade analytics
+- Atomic volatility storage
+
+---
+
+### 13. HardRulesGate + Policy Cache
+
+**File:** `crates/rat-autonomous/src/hard_rules_gate.rs`
+
+- `HardRulesGate::with_memory()` accepts `MemoryIntegration`
+- Policy cache checked first, RwLock fallback on miss
+- Portfolio heat limit dynamically adjusts with sigma
+
+---
+
+### 14. Volatility-Aware Rule Evaluation
+
+**Files:** `crates/rat-autonomous/src/hard_rules_gate.rs`, `state.rs`
+
+- `evaluate_with_volatility(symbol, snapshot, sigma)` accepts volatility
+- Heat limit: `0.10 * (1.0 - sigma * 0.5)` at sigma > 0.03
+- `SharedState` gains `memory_integration: Arc<MemoryIntegration>`
+
+---
+
+### 15. Dynamic Leverage & Slippage
+
+**Files:** `crates/rat-autonomous/src/risk_guardian.rs`, `execution_coordinator.rs`
+
+- `effective_max_leverage(sigma) = base / (1 + alpha * sigma)`
+- `effective_slippage_tolerance(base, sigma) = base * (1 + sigma)`
+- Slippage in execution: `0.05% * (1.0 + sigma)`
+
+---
+
+### 16. Volatility-Modulated Strategy Decision
+
+**File:** `crates/rat-autonomous/src/strategy_decision.rs`
+
+- SL widened by 30% during high volatility (sigma > 0.03)
+- TP contracted by 15% to lock velocity moves
+- Risk-reward ratio recalculated after adjustment
+- Signal includes sigma in reasoning trace
 
 ---
 
@@ -132,29 +165,31 @@ Uses `spawn_blocking` for non-blocking async execution.
 
 ```bash
 cargo check -p agentic-memory     # ✅
-cargo build --release -p agentic-memory  # ✅ 10.9s
+cargo check -p rat-autonomous     # ✅
+cargo build --release             # ✅
 cargo test -p agentic-memory      # ✅ 112/112 pass
+cargo test -p rat-autonomous      # ✅ 104/104 pass
 ```
 
 ---
 
-## File Changes Summary
+## File Summary
 
-| File | Purpose |
-|------|---------|
-| memory/src/migrations.rs | New — versioned schema migrations |
-| memory/src/store.rs | Pool + migration integration |
-| memory/src/consolidation.rs | FinancialRegretScorer + NamespaceArbitrator |
-| memory/src/evolution.rs | BacktestValidator + semaphore backpressure |
-| memory/src/api.rs | Volatility endpoints |
-| memory/src/types.rs | DecayConfig + TradingRelation enum |
-| memory/src/experts.rs | TradingRelation graph boosting |
-| memory/src/vector.rs | SIMD Hamming distance |
-| memory/src/temporal.rs | Volatility-aware decay |
-| memory/src/staleness.rs | Volatility-adjusted staleness |
-| memory/src/performance.rs | ConcurrentPolicyCache |
-| memory/src/lib.rs | Module exports |
-| memory/Cargo.toml | Dependencies |
-| crates/rat-core/src/memory_integration.rs | Trading loop bridge |
-| crates/rat-core/Cargo.toml | agentic-memory dep |
-| crates/rat-core/src/lib.rs | Module export |
+| Category | Files | Purpose |
+|----------|-------|---------|
+| Memory | migrations.rs, store.rs | Schema versioning |
+| Memory | consolidation.rs | RegretScorer + Arbitrator |
+| Memory | evolution.rs | BacktestValidator + semaphore |
+| Memory | api.rs | Volatility endpoints |
+| Memory | types.rs | DecayConfig + TradingRelation |
+| Memory | experts.rs | TradingRelation boosting |
+| Memory | vector.rs | SIMD Hamming |
+| Memory | temporal.rs | Volatility decay |
+| Memory | staleness.rs | Volatility staleness |
+| Memory | performance.rs | ConcurrentPolicyCache |
+| Core | memory_integration.rs | Trading bridge |
+| Autonomous | hard_rules_gate.rs | Cache-first + volatility |
+| Autonomous | strategy_decision.rs | Volatility modulation |
+| Autonomous | risk_guardian.rs | Dynamic leverage |
+| Autonomous | execution_coordinator.rs | Adaptive slippage |
+| Autonomous | state.rs | MemoryIntegration field |
