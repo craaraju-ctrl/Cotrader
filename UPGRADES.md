@@ -3,22 +3,25 @@
 
 ---
 
-## Implemented
+## Implemented Changes
 
 ### 1. SQLite Connection Pool
 
 **Files:** `memory/Cargo.toml`, `memory/src/store.rs`
 
-Replaced `Arc<Mutex<Connection>>` with `Arc<Pool<SqliteConnectionManager>>`.
+Replaced single `Arc<Mutex<Connection>>` with `Arc<Pool<SqliteConnectionManager>>`.
 
 - Pool: 8 max connections, 2 min idle
 - Pragmas: WAL, busy_timeout=5000, synchronous=NORMAL
+- Dependencies: `r2d2 = "0.8"`, `r2d2_sqlite = "0.24"`
 
 ---
 
 ### 2. FinancialRegretScorer
 
 **Files:** `memory/src/consolidation.rs`, `memory/src/lib.rs`
+
+Extracts `regret_score`, `balance_delta`, `position_size`, `regime`, `leverage`, `is_win` from metadata.
 
 Formula: `Access + Recency + (0.35 × regret) + (0.25 × log10(|delta|))`
 
@@ -30,7 +33,7 @@ Modifiers: Leverage >10x amplifies, losses weighted 1.2x
 
 **File:** `memory/src/performance.rs`
 
-DashMap-based lock-free cache with atomic counters.
+DashMap-based lock-free cache with atomic hit/miss counters.
 
 ---
 
@@ -40,7 +43,7 @@ DashMap-based lock-free cache with atomic counters.
 
 15 variants with domain-specific weights (-0.50 to +0.40).
 
-`RetrievalExpert::boost_with_graph_reasoning` now parses enum.
+`RetrievalExpert::boost_with_graph_reasoning` parses enum instead of generic strings.
 
 ---
 
@@ -48,7 +51,7 @@ DashMap-based lock-free cache with atomic counters.
 
 **File:** `memory/src/vector.rs`
 
-AVX2 intrinsics with scalar fallback. 10-30x faster on x86_64.
+AVX2 intrinsics (`_mm256_xor_si256` + popcount) with scalar fallback. 10-30x faster on x86_64.
 
 ---
 
@@ -56,33 +59,18 @@ AVX2 intrinsics with scalar fallback. 10-30x faster on x86_64.
 
 **Files:** `memory/src/types.rs`, `memory/src/temporal.rs`, `memory/src/staleness.rs`
 
-**What changed:**
-
-| Component | Before | After |
-|-----------|--------|-------|
-| `DecayConfig` | 4 fields | 6 fields (+volatility_sensitivity, +structural_floor) |
-| `TemporalEngine::calculate_decay` | Static | Accepts optional `sigma` parameter |
-| `StalenessManager::effective_score` | Static | Accepts optional `sigma` parameter |
+**DecayConfig additions:**
+- `volatility_sensitivity: f64` (default: 2.0)
+- `structural_floor: f64` (default: 0.3)
 
 **Formula:**
 ```
-Effective_Decay_Rate = Base_Rate × (1.0 + alpha × sigma)
+Effective_Rate = Base_Rate × (1.0 + α × σ)
 ```
 
-Where:
-- `sigma` = market volatility (0.0 calm, 1.0 extreme)
-- `alpha` = `volatility_sensitivity` (default: 2.0)
-- Structural rules (procedures, rules) maintain `structural_floor` (default: 0.3)
-
-**Behavior:**
-- High volatility → memories decay faster (assumptions broken)
-- Low volatility → memories persist longer (stable environment)
-- Structural rules → never fully decay (permanent floor)
-
-**Tests:** 8/8 passing
-- `test_volatility_accelerates_decay` — high sigma produces lower decay
-- `test_structural_floor_preserved` — procedures maintain floor
-- `test_volatility_zero_no_extra_decay` — sigma=0 matches default
+- High volatility → memories decay faster
+- Low volatility → memories persist longer
+- Structural rules → maintain permanent floor
 
 ---
 
