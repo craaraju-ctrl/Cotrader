@@ -2,7 +2,7 @@
 name = "rat-tui"
 version.workspace = true
 edition.workspace = true
-description = "rat — Full Terminal UI (ratatui) for Trading Real-time Edge Decision Optimisation. The primary beautiful interface for the autonomous co-pilot."
+description = "rat — Modern Terminal UI for autonomous trading. Component-based architecture with ratatui 0.30+."
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
@@ -10,7 +10,7 @@ homepage.workspace = true
 readme.workspace = true
 
 [dependencies]
-ratatui = "0.29"
+ratatui = "0.30"
 crossterm = { version = "0.28", features = ["event-stream"] }
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json", "blocking"] }
