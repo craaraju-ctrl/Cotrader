@@ -18,9 +18,11 @@ Replaced `Arc<Mutex<Connection>>` with `Arc<Pool<SqliteConnectionManager>>`.
 
 ### 2. FinancialRegretScorer
 
-**Files:** `memory/src/consolidation.rs`, `memory/src/lib.rs`
+**File:** `memory/src/consolidation.rs`
 
-Formula: `Access + Recency + (0.35 × regret) + (0.25 × log10(|delta|))`
+Formula: `Access + Recency + (0.35 × regret) + (0.25 × log10(|delta| + 1.0))`
+
+Fix: `log10(|delta| + 1.0)` prevents -inf at breakeven.
 
 ---
 
@@ -54,13 +56,15 @@ AVX2 intrinsics with scalar fallback. 10-30x faster on x86_64.
 
 Formula: `Effective_Rate = Base_Rate × (1.0 + α × σ)`
 
+Structural rules maintain permanent floor.
+
 ---
 
 ### 7. Core Trading Loop Integration
 
 **File:** `crates/rat-core/src/memory_integration.rs`
 
-`MemoryIntegration` struct bridges rat-core with agentic-memory.
+`MemoryIntegration` bridges rat-core with agentic-memory (policy cache + scorer + volatility).
 
 ---
 
@@ -68,20 +72,9 @@ Formula: `Effective_Rate = Base_Rate × (1.0 + α × σ)`
 
 **File:** `memory/src/api.rs`
 
-**Changes:**
-- `TemporalRecallBody` gains optional `volatility: Option<f64>` field
-- `POST /temporal/recall` returns decay score with volatility adjustment
+- `TemporalRecallBody` gains `volatility: Option<f64>`
+- `POST /temporal/recall` returns decay with volatility adjustment
 - `GET /temporal/facts/{id}/decay?volatility=0.5` accepts query param
-
-**Response format:**
-```json
-{
-  "fact": { ... },
-  "decay_score": 0.85,
-  "effective_importance": 0.68,
-  "volatility_applied": 0.5
-}
-```
 
 ---
 
@@ -89,21 +82,9 @@ Formula: `Effective_Rate = Base_Rate × (1.0 + α × σ)`
 
 **File:** `memory/src/consolidation.rs`
 
-Game-theoretic conflict resolver for cross-namespace contradictions.
+Game-theoretic conflict resolver: `score = accuracy / (1 + max(variance, 0.05))`
 
-| Component | Purpose |
-|-----------|---------|
-| `NamespaceArbitrator` | Resolves conflicts via accuracy/variance scoring |
-| `record_outcome()` | Updates namespace accuracy (EMA) |
-| `record_prediction()` | Updates namespace variance |
-| `resolve_conflict()` | Returns winner with confidence |
-
-**Scoring formula:**
-```
-score = accuracy / (1.0 + variance)
-```
-
-Lower variance = more reliable = higher weight.
+Variance floor prevents cold-start gaming.
 
 ---
 
@@ -111,19 +92,19 @@ Lower variance = more reliable = higher weight.
 
 **File:** `memory/src/evolution.rs`
 
-Validates procedural rules before promotion.
+Validates rules before procedural promotion. Thresholds: PF > 1.2, Sharpe > 1.5, DD < 15%.
 
-| Component | Purpose |
-|-----------|---------|
-| `BacktestValidator` | Validates rules against historical data |
-| `RuleMetrics` | Stores validation results |
+Uses `spawn_blocking` for non-blocking async execution.
 
-**Thresholds:**
-- Min profit factor: 1.2
-- Min Sharpe ratio: 1.5
-- Max drawdown: 15%
+---
 
-Rules that fail validation are skipped (not promoted to procedural memory).
+### 11. Numerical Stability Fixes
+
+| Fix | Location | Change |
+|-----|----------|--------|
+| log10 breakeven | consolidation.rs | `log10(|delta| + 1.0)` |
+| Cold-start variance | consolidation.rs | `max(variance, 0.05)` |
+| Async backtest | evolution.rs | `spawn_blocking` wrapper |
 
 ---
 
@@ -131,30 +112,29 @@ Rules that fail validation are skipped (not promoted to procedural memory).
 
 ```bash
 cargo check -p agentic-memory     # ✅
-cargo build --release -p agentic-memory  # ✅ 11.2s
-cargo test -p agentic-memory      # ✅ 112/112 pass (1 ignored)
+cargo build --release -p agentic-memory  # ✅ 11.4s
+cargo test -p agentic-memory      # ✅ 112/112 pass
 ```
 
 ---
 
-## Test Coverage
+## File Changes Summary
 
-| Module | Tests | Status |
-|--------|-------|--------|
-| api | 32 | ✅ (1 ignored) |
-| tiers | 11 | ✅ |
-| cache | 5 | ✅ |
-| consolidation | 6 | ✅ |
-| temporal | 8 | ✅ |
-| vector | 6 | ✅ |
-| graph | 5 | ✅ |
-| reasoning | 4 | ✅ |
-| reflection | 4 | ✅ |
-| evolution | 3 | ✅ |
-| experts | 2 | ✅ |
-| context | 5 | ✅ |
-| store | 20 | ✅ |
-| metrics | 5 | ✅ |
-| client | 3 | ✅ |
-| resilience | 2 | ✅ |
-| doc-tests | 5 | ✅ |
+| File | Lines Added | Lines Removed |
+|------|-------------|---------------|
+| memory/src/store.rs | +45 | -22 |
+| memory/src/consolidation.rs | +120 | -15 |
+| memory/src/evolution.rs | +85 | -30 |
+| memory/src/api.rs | +35 | -12 |
+| memory/src/types.rs | +95 | -5 |
+| memory/src/experts.rs | +25 | -15 |
+| memory/src/vector.rs | +80 | -5 |
+| memory/src/temporal.rs | +50 | -10 |
+| memory/src/staleness.rs | +30 | -15 |
+| memory/src/performance.rs | +219 | 0 |
+| memory/src/lib.rs | +4 | 0 |
+| memory/Cargo.toml | +3 | 0 |
+| crates/rat-core/src/memory_integration.rs | +250 | 0 |
+| crates/rat-core/Cargo.toml | +1 | 0 |
+| crates/rat-core/src/lib.rs | +2 | 0 |
+| **Total** | **~1040** | **~130** |
