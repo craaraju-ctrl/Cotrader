@@ -59,6 +59,28 @@ impl HardRulesGate {
         Self { state, memory: Some(memory) }
     }
 
+    /// Lock-free cache-first rule evaluation with fallback to legacy RwLock.
+    /// Returns the rule value from ConcurrentPolicyCache or inserts default.
+    fn evaluate_rule_cached(&self, rule_key: &str, default_value: f64) -> f64 {
+        if let Some(ref mem) = self.memory {
+            match mem.policy_cache.get(rule_key) {
+                Some(entry) => entry.max_value,
+                None => {
+                    mem.set_policy(rat_core::memory_integration::PolicyEntry {
+                        rule_id: rule_key.to_string(),
+                        rule_type: "risk_limit".to_string(),
+                        max_value: default_value,
+                        is_active: true,
+                    });
+                    default_value
+                }
+            }
+        } else {
+            default_value
+        }
+    }
+
+
     /// Run ALL hard rules in priority order using the default SharedState.
     /// Delegates to [`evaluate_with_ohlcv`] with a live snapshot from SharedState.
     pub async fn evaluate(&self, symbol: &str) -> HardRulesGateResult {

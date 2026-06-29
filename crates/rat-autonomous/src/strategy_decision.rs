@@ -71,21 +71,32 @@ impl StrategyDecisionAgent {
         // 3. System formulates its own signal condition autonomously
         // When price reaches the discovered level, the rule fires automatically
         if current_price < system_discovered_entry_price {
-            let risk_distance = system_discovered_entry_price * 0.05; // 5% dynamic stop-loss
+            let risk_distance = system_discovered_entry_price * 0.05;
+
+            // Kelly Criterion with volatility compression:
+            // f = p - (q / r) where p=0.55, r=2.0
+            let win_prob = 0.55;
+            let risk_reward = 2.0;
+            let raw_kelly = win_prob - ((1.0 - win_prob) / risk_reward);
+
+            // Volatility scaling: 1 / (1 + alpha * sigma)
+            let alpha = 2.5;
+            let vol_scalar = 1.0 / (1.0 + (alpha * sigma));
+            let position_size = (raw_kelly * vol_scalar).clamp(0.01, 0.25);
 
             let signal = TradeSignal {
                 symbol: symbol.to_string(),
                 direction: rat_core::TradeDirection::Short,
                 entry_price: system_discovered_entry_price,
                 stop_loss: system_discovered_entry_price + risk_distance,
-                take_profit: system_discovered_entry_price - (risk_distance * 2.5),
-                position_size: 1.0,
-                confidence_score: 0.88,
-                confluence_score: 0.92,
-                risk_reward_ratio: 2.5,
+                take_profit: system_discovered_entry_price - (risk_distance * risk_reward),
+                position_size,
+                confidence_score: 0.85,
+                confluence_score: 0.90,
+                risk_reward_ratio: risk_reward,
                 reasoning: format!(
-                    "System derived macro resistance at ${:.2} using sigma ({:.4}) over historical distribution",
-                    system_discovered_entry_price, sigma
+                    "Autonomous structure discovery with Kelly sizing (f={:.4}) via sigma {:.4}",
+                    position_size, sigma
                 ),
                 timestamp: Utc::now(),
                 session_valid: true,

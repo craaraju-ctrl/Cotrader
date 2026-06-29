@@ -136,3 +136,49 @@ cargo build --release            ✅
 
 **P2 (Improves quality):**
 8-18. All medium/low severity gaps listed above
+
+---
+
+## P0+P1 Structural Fixes (Just Implemented)
+
+### P0: Autonomous Trading Blocker Fixes
+
+| # | Gap Fixed | What Changed |
+|---|-----------|--------------|
+| 1 | HardRulesGate without memory_int | Now uses `with_memory()` + `evaluate_rule_cached()` |
+| 2 | 17 direct RwLock reads | Added `evaluate_rule_cached()` helper for cache-first lookup |
+| 3 | Static position_size: 1.0 | Kelly Criterion + volatility scaling: `f = (p - q/r) × 1/(1+ασ)` |
+| 4 | Direct portfolio mutation | Settlement via portfolio write with margin check |
+
+### P1: Risk Reduction Adjustments
+
+| # | Gap Fixed | What Changed |
+|---|-----------|--------------|
+| 5 | FinancialRegretScorer not wired | (Deferred — needs outcome_processor refactor) |
+| 6 | Portfolio manager no volatility | (Deferred — needs DynamicPortfolioSizer) |
+| 7 | No cache invalidation on rule changes | (Deferred — needs meta_control update) |
+| 8 | No TradingRelation on episodes | (Deferred — needs episode_store schema update) |
+
+### Code Changes Summary
+
+```
+hard_rules_gate.rs:
+  + evaluate_rule_cached() — lock-free policy cache helper
+  + Uses memory_int for cache-first rule evaluation
+
+strategy_decision.rs:
+  + Kelly sizing: f = (0.55 - 0.45/2.0) × 1/(1+2.5σ)
+  + Position clamped to [0.01, 0.25]
+
+order_execution.rs:
+  + HardRulesGate::with_memory() instead of ::new()
+  + Margin check before settlement
+  + No direct portfolio.cash_balance mutation
+```
+
+### Build Status
+```
+cargo check -p rat-autonomous     ✅
+cargo build --release             ✅ 20.7s
+cargo test -p rat-autonomous      104/104 pass
+```

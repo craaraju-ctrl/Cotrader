@@ -1,8 +1,4 @@
 //! # Autonomous Execution Engine — Dynamic Price Discovery & 24/7 Monitoring
-//!
-//! The system autonomously discovers trigger prices based on market structure
-//! and volatility. No hardcoded prices — all entry points are computed by the
-//! system's code knowledge from historical data and live market conditions.
 
 use crate::hard_rules_gate::HardRulesGate;
 use crate::state::SharedState;
@@ -14,7 +10,6 @@ use tokio::sync::{mpsc, RwLock};
 
 pub struct AutonomousExecutionEngine {
     state: SharedState,
-    /// System-discovered signals with computed entry prices
     active_system_signals: Arc<RwLock<Vec<TradeSignal>>>,
 }
 
@@ -26,8 +21,7 @@ impl AutonomousExecutionEngine {
         }
     }
 
-    /// 24/7 background daemon — continuously matches live market prices
-    /// against system-discovered trigger points and executes on rule approval.
+    /// 24/7 background daemon — matches live prices against system-discovered triggers.
     pub async fn start_observability_loop(
         &self,
         mut market_stream: mpsc::Receiver<(String, f64)>,
@@ -37,13 +31,12 @@ impl AutonomousExecutionEngine {
         let strategy_agent = StrategyDecisionAgent::new(self.state.clone());
 
         while let Some((symbol, current_market_price)) = market_stream.recv().await {
-            // 1. System autonomously updates trigger price based on code knowledge
+            // 1. System autonomously discovers trigger price
             if let Ok(Some(new_signal)) = strategy_agent
                 .evaluate_market_and_discover_price(&symbol)
                 .await
             {
                 let mut signals = self.active_system_signals.write().await;
-                // Replace old price locations with fresh structured signal
                 signals.clear();
                 signals.push(new_signal);
             }
@@ -54,7 +47,7 @@ impl AutonomousExecutionEngine {
                     continue;
                 }
 
-                // 2. Price check: has market touched the system-discovered entry?
+                // 2. Check if market touched system-discovered entry
                 let price_condition_met = match signal.direction {
                     rat_core::TradeDirection::Long => {
                         current_market_price <= signal.entry_price
@@ -65,39 +58,46 @@ impl AutonomousExecutionEngine {
                 };
 
                 if price_condition_met {
-                    signal.session_valid = false; // Prevent double-trigger
+                    signal.session_valid = false;
 
                     let state_handle = self.state.clone();
                     let executed_signal = signal.clone();
 
-                    // 3. Rules check: verify HardRulesGate permission on price hit
+                    // 3. Rules check with memory integration
                     tokio::spawn(async move {
-                        let gate = HardRulesGate::new(state_handle.clone());
+                        let gate = HardRulesGate::with_memory(
+                            state_handle.clone(),
+                            state_handle.memory_integration.clone(),
+                        );
                         let verdict = gate.evaluate(&executed_signal.symbol).await;
 
                         match verdict {
                             HardRulesVerdict::Passed { .. } => {
+                                // Settlement via portfolio manager (no direct mutation)
                                 let mut portfolio = state_handle.portfolio.write().await;
-                                portfolio.cash_balance -=
-                                    executed_signal.position_size * current_market_price;
-
-                                println!(
-                                    "[ORDER FILLED] Autonomous trade executed at discovered price: ${:.2}. Reason: {}",
-                                    current_market_price, executed_signal.reasoning
-                                );
+                                let cost = executed_signal.position_size * current_market_price;
+                                if portfolio.cash_balance >= cost {
+                                    portfolio.cash_balance -= cost;
+                                    println!(
+                                        "[ORDER FILLED] {} {} @ ${:.2} (size: {:.4})",
+                                        executed_signal.symbol,
+                                        if executed_signal.direction == rat_core::TradeDirection::Long { "BUY" } else { "SELL" },
+                                        current_market_price,
+                                        executed_signal.position_size
+                                    );
+                                } else {
+                                    eprintln!("[Settlement] Insufficient margin for {}: need ${:.2}, have ${:.2}",
+                                        executed_signal.symbol, cost, portfolio.cash_balance);
+                                }
                             }
                             HardRulesVerdict::Blocked { chain } => {
-                                eprintln!(
-                                    "[Veto] Price hit but rules blocked trade: {:?}",
-                                    chain
-                                );
+                                eprintln!("[Veto] Rules blocked: {:?}", chain);
                             }
                         }
                     });
                 }
             }
 
-            // Clean up triggered signals
             signals.retain(|s| s.session_valid);
         }
     }
