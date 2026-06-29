@@ -1,4 +1,40 @@
 # Agentic Memory — Engineering Upgrades & Research Roadmap
+## IMPLEMENTATION STATUS
+
+| Upgrade | Status | Notes |
+|---------|--------|-------|
+| SQLite Connection Pool | ⏳ Deferred | Version conflict with sqlx (rusqlite 0.31 vs 0.35). Requires workspace-wide rusqlite upgrade. |
+| DashMap Policy Cache | ✅ Implemented | `performance.rs` module with `ConcurrentPolicyCache<T>` — lock-free concurrent access via DashMap. |
+| SIMD Hamming Distance | 📋 Planned | Requires `packed_simd` or `std::simd` (nightly). Documented in Part 1.C. |
+| FinancialRegretScorer | 📋 Planned | Documented in Part 2.A with full code skeleton. |
+| TradingRelation Enum | 📋 Planned | Documented in Part 2.B with full code skeleton. |
+| Adaptive Ebbinghaus | 📋 Planned | Documented in Part 3.A — requires volatility feed integration. |
+| Backtest Validation | 📋 Planned | Documented in Part 3.B — requires NATS bus + backtest runner. |
+| Conflict Arbitrator | 📋 Planned | Documented in Part 3.C — game-theoretic namespace resolution. |
+
+### What Was Implemented
+
+**`memory/src/performance.rs`** — New module with:
+
+1. **`ConcurrentPolicyCache<T>`** — Drop-in replacement for `PolicyCache`:
+   - Uses `DashMap<String, CacheEntry<T>>` for lock-free concurrent access
+   - Atomic counters for hit/miss tracking (no mutex needed)
+   - Thread-safe `get()`, `insert()`, `remove()`, `contains()`
+   - Background-safe `purge_expired()` and `evict_oldest()`
+   - Clone-safe via `Arc` wrapping
+
+2. **`ConcurrentStore<S>`** — Generic wrapper for any store:
+   - Uses `tokio::sync::RwLock` for async-friendly locking
+   - Multiple concurrent readers, exclusive writers
+   - `read()` and `write()` methods with closures
+
+### Build Status
+- ✅ `cargo check -p agentic-memory` passes
+- ✅ `cargo build --release -p agentic-memory` succeeds
+- ✅ DashMap dependency added to Cargo.toml
+- ✅ Module registered in lib.rs
+
+
 *Based on complete code audit of store.rs, cache.rs, temporal.rs, graph.rs, consolidation.rs*
 
 ---

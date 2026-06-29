@@ -15,6 +15,7 @@ dependencies = [
  "async-trait",
  "axum",
  "chrono",
+ "dashmap",
  "futures",
  "metrics 0.23.1",
  "metrics-exporter-prometheus",
