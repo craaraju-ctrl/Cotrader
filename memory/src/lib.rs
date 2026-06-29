@@ -72,7 +72,7 @@ pub fn generate_id() -> String {
 
 pub use api::MemoryApi;
 pub use cache::{CachedItem, PolicyCache};
-pub use consolidation::{ConsolidationEngine, DefaultImportanceScorer};
+pub use consolidation::{ConsolidationEngine, DefaultImportanceScorer, FinancialRegretScorer};
 pub use context::ContextManager;
 pub use evolution::{EvolutionConfig, EvolutionEngine, SleepCycleHandle, SleepCycleReport};
 pub use experts::RetrievalExpert;

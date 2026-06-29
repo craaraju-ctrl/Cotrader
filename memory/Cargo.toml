@@ -13,6 +13,8 @@ async-trait = "0.1"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
+r2d2 = "0.8"
+r2d2_sqlite = "0.24"
 
 # HTTP API
 axum = "0.7"

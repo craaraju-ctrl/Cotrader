@@ -5,8 +5,10 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
 
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::{params, Connection};
 
 use crate::types::{
@@ -31,7 +33,7 @@ pub fn init_vector_search() {
 /// SQLite-backed store with tier-aware, graph, reasoning, and vector search support.
 #[derive(Debug, Clone)]
 pub struct MemoryStore {
-    pub(crate) conn: Arc<Mutex<Connection>>,
+    pub(crate) pool: Arc<Pool<SqliteConnectionManager>>,
     vector_dimension: usize,
     vector_search_enabled: Arc<AtomicBool>,
 }
@@ -45,35 +47,48 @@ impl MemoryStore {
     /// Use block scopes `{ let conn = self.lock_db()?; ... }` to drop the guard
     /// before calling lock-acquiring methods, or use `get_tier_config_with_conn()`
     /// variants that accept an already-held `&Connection`.
-    fn lock_db(&self) -> rusqlite::Result<MutexGuard<'_, Connection>> {
-        self.conn.lock().map_err(|e| {
-            rusqlite::Error::InvalidParameterName(format!("Database mutex poisoned: {}", e))
+    /// Acquire a connection from the pool.
+    pub fn lock_db(&self) -> rusqlite::Result<r2d2::PooledConnection<SqliteConnectionManager>> {
+        self.pool.get().map_err(|e| {
+            rusqlite::Error::InvalidParameterName(format!("Pool connection failed: {}", e))
         })
     }
 
     pub fn open(config: &StorageConfig) -> rusqlite::Result<Self> {
         init_vector_search();
 
-        let conn = if config.db_path == ":memory:" {
-            Connection::open_in_memory()?
+        // Create connection manager with WAL pragmas applied to each connection
+        let manager = if config.db_path == ":memory:" {
+            SqliteConnectionManager::memory()
         } else {
-            Connection::open(&config.db_path)?
+            SqliteConnectionManager::file(&config.db_path)
         };
 
-        // Production SQLite pragmas: WAL for concurrent reads, busy_timeout to
-        // prevent SQLITE_BUSY errors under contention, NORMAL sync for perf.
-        conn.execute_batch(
-            "PRAGMA journal_mode=WAL;
-             PRAGMA synchronous=NORMAL;
-             PRAGMA busy_timeout=5000;
-             PRAGMA foreign_keys=ON;
-             PRAGMA temp_store=MEMORY;",
-        )?;
+        // Build pool: 8 concurrent connections, 2 kept warm
+        let pool = Pool::builder()
+            .max_size(8)
+            .min_idle(Some(2))
+            .build(manager)
+            .map_err(|e| rusqlite::Error::InvalidParameterName(format!("Pool build failed: {}", e)))?;
 
         let dim = config.vector_dimension.clamp(64, 4096);
 
+        // Apply pragmas to the pool by configuring the first connection
+        {
+            let conn = pool.get().map_err(|e| {
+                rusqlite::Error::InvalidParameterName(format!("Failed to get initial connection: {}", e))
+            })?;
+            conn.execute_batch(
+                "PRAGMA journal_mode=WAL;
+                 PRAGMA synchronous=NORMAL;
+                 PRAGMA busy_timeout=5000;
+                 PRAGMA foreign_keys=ON;
+                 PRAGMA temp_store=MEMORY;",
+            )?;
+        }
+
         let store = Self {
-            conn: Arc::new(Mutex::new(conn)),
+            pool: Arc::new(pool),
             vector_dimension: dim,
             vector_search_enabled: Arc::new(AtomicBool::new(false)),
         };

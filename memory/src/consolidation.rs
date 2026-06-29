@@ -98,6 +98,141 @@ impl Default for DefaultImportanceScorer {
     }
 }
 
+/// Financial-aware importance scorer for trading memory.
+/// Binds memory longevity to actual portfolio impact.
+pub struct FinancialRegretScorer {
+    /// Weight for regret score (0.0-1.0)
+    pub regret_weight: f64,
+    /// Weight for balance delta impact
+    pub balance_delta_weight: f64,
+    /// Weight for position size impact
+    pub position_weight: f64,
+    /// Weight for regime change significance
+    pub regime_weight: f64,
+}
+
+impl Default for FinancialRegretScorer {
+    fn default() -> Self {
+        Self {
+            regret_weight: 0.35,
+            balance_delta_weight: 0.25,
+            position_weight: 0.20,
+            regime_weight: 0.20,
+        }
+    }
+}
+
+impl FinancialRegretScorer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Compute importance score for a financial memory record.
+    /// Formula: Access_Factor + Recency_Factor + (w1 * regret) + (w2 * log10(delta))
+    pub fn score(&self, context: &ImportanceContext, metadata: &std::collections::HashMap<String, String>) -> f64 {
+        let mut score = 0.0;
+
+        // Access factor (up to 0.3)
+        score += (context.access_count as f64).min(100.0) / 100.0 * 0.3;
+
+        // Recency factor (up to 0.25)
+        let recency_factor = (-context.age_seconds / 86400.0_f64).exp();
+        score += recency_factor * 0.25;
+
+        // Financial components from metadata
+        let regret_score = metadata.get("regret_score")
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.5);
+
+        let balance_delta = metadata.get("balance_delta")
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0);
+
+        let position_size = metadata.get("position_size")
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0);
+
+        let regime = metadata.get("regime")
+            .cloned()
+            .unwrap_or_else(|| "Unknown".to_string());
+
+        let is_win = metadata.get("is_win")
+            .map(|s| s == "true")
+            .unwrap_or(true);
+
+        let leverage = metadata.get("leverage")
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(1);
+
+        // Regret component: high regret = high importance
+        score += regret_score * self.regret_weight;
+
+        // Balance delta: log-scale impact
+        let delta_impact = if balance_delta.abs() > 0.0 {
+            balance_delta.abs().log10().clamp(0.0, 5.0) / 5.0
+        } else {
+            0.0
+        };
+        score += delta_impact * self.balance_delta_weight;
+
+        // Position size: larger positions = more memorable
+        let position_impact = (position_size / 100000.0).clamp(0.0, 1.0);
+        score += position_impact * self.position_weight;
+
+        // Regime significance
+        let regime_impact = match regime.as_str() {
+            "Volatile" | "HighVolatility" => 1.0,
+            "TrendingBull" | "TrendingBear" => 0.7,
+            "Ranging" => 0.4,
+            _ => 0.3,
+        };
+        score += regime_impact * self.regime_weight;
+
+        // Leverage amplifier
+        if leverage > 10 {
+            score *= 1.0 + (leverage as f64 / 100.0);
+        }
+
+        // Loss asymmetry: losses remembered more strongly
+        if !is_win {
+            score *= 1.2;
+        }
+
+        score.clamp(0.0, 1.0)
+    }
+
+    /// Score from a tiered record using its metadata.
+    pub fn score_record(&self, record: &TieredRecord, store: &MemoryStore) -> f64 {
+        let age_seconds = match chrono::DateTime::parse_from_rfc3339(&record.record.timestamp) {
+            Ok(dt) => {
+                let now = chrono::Utc::now();
+                let dt_utc = dt.with_timezone(&chrono::Utc);
+                (now - dt_utc).num_seconds().max(0) as f64
+            }
+            Err(_) => 86400.0,
+        };
+
+        let graph_connections = store
+            .get_edges(&record.record.id)
+            .map(|e| e.len())
+            .unwrap_or(0);
+
+        let context = ImportanceContext {
+            access_count: record.access_count,
+            age_seconds,
+            has_embedding: record.record.embedding.is_some(),
+            content_length: record.record.content.len(),
+            content_type: record.record.content_type.clone(),
+            tier: record.tier,
+            graph_connections,
+            expert_endorsements: 0,
+        };
+
+        self.score(&context, &record.record.metadata)
+    }
+}
+
+
 /// The consolidation engine runs periodic cycles to optimize memory.
 pub struct ConsolidationEngine {
     store: MemoryStore,
