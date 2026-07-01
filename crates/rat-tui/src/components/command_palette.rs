@@ -31,7 +31,7 @@ fn get_commands() -> Vec<Command> {
         Command { name: "Risk", shortcut: "8", description: "Risk dashboard & VaR metrics", action: |app| { app.selected_tab = Tab::Health; } },
         Command { name: "Settings", shortcut: "9", description: "Configuration & mode toggle", action: |app| { app.selected_tab = Tab::Settings; } },
         Command { name: "Help", shortcut: "0", description: "Keyboard shortcuts & about", action: |app| { app.selected_tab = Tab::Help; } },
-        Command { name: "Toggle Mode", shortcut: "", description: "Switch paper/live trading mode", action: |_app| { /* Handled via cmd_tx in main.rs */ } },
+        Command { name: "Toggle Mode", shortcut: "", description: "Switch paper/live trading mode", action: |app| { app.pending_command = Some(crate::api_client::StatusMsg::ToggleMode); } },
         Command { name: "Clear Error", shortcut: "", description: "Dismiss any error messages", action: |app| { app.clear_error(); } },
         Command { name: "Reset Drawdown", shortcut: "", description: "Reset max drawdown counter", action: |app| { app.portfolio.max_drawdown = 0.0; } },
     ]

@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::collections::{HashMap, VecDeque};
 use chrono::{DateTime, Local};
 
@@ -256,6 +254,7 @@ pub struct App {
     pub show_command_palette: bool,
     pub command_palette_query: String,
     pub command_palette_selected: usize,
+    pub pending_command: Option<crate::api_client::StatusMsg>,
     /// Real-time alerts/notifications
     pub alerts: VecDeque<Alert>,
     /// Risk metrics (computed from portfolio data)

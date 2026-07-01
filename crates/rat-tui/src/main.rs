@@ -99,7 +99,7 @@ impl AppController {
                 if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     return true;
                 }
-                if key.code == KeyCode::Char('?') {
+                if key.code == KeyCode::Char('?') && self.app.selected_tab != Tab::Help {
                     self.app.show_help = !self.app.show_help;
                     return false;
                 }
@@ -273,6 +273,11 @@ impl AppController {
         // Drain all pending API messages and update app state
         while let Ok(msg) = self.rx.try_recv() {
             api_client::process_message(msg, &mut self.app);
+        }
+
+        // Send any pending commands from component actions (e.g., command palette)
+        if let Some(cmd) = self.app.pending_command.take() {
+            let _ = self.cmd_tx.send(cmd);
         }
 
         // Update ticker animation
