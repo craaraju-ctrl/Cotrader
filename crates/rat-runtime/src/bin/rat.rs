@@ -251,10 +251,42 @@ async fn handle_start_all(
     println!();
     println!("  RAT Agent — Starting All Services");
     println!("  Mode: {}  |  Symbols: {}", mode, symbols);
+    println!("  Services: Memory, LLM (Ollama), Kronos, Orchestrator, Pipeline");
     println!();
 
     // Track child processes for graceful shutdown
     let mut children: Vec<(String, tokio::process::Child)> = Vec::new();
+
+    // ── 0. Ollama LLM Server ────────────────────────────────────────────
+    {
+        // Check if Ollama is already running
+        let ollama_running = reqwest::Client::new()
+            .get("http://localhost:11434/api/tags")
+            .timeout(std::time::Duration::from_secs(2))
+            .send()
+            .await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false);
+
+        if ollama_running {
+            println!("  [OK] Ollama LLM already running (port 11434)");
+        } else {
+            println!("  [..] Starting Ollama LLM server...");
+            let child = tokio::process::Command::new("ollama")
+                .args(["serve"])
+                .stdout(std::fs::File::create(logs.join("ollama.log")).unwrap())
+                .stderr(std::fs::File::create(logs.join("ollama.err")).unwrap())
+                .kill_on_drop(true)
+                .spawn();
+            match child {
+                Ok(c) => {
+                    children.push(("ollama".into(), c));
+                    wait_for_port(11434, "Ollama LLM", 30).await;
+                }
+                Err(_) => println!("  [WARN] Ollama not found — install from ollama.com"),
+            }
+        }
+    }
 
     // ── 1. Memory Server (port 3111) ──────────────────────────────────────
     if !no_memory {

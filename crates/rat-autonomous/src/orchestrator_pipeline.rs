@@ -4,6 +4,26 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use rat_core::{Agent, TradeDirection};
 use rat_eventbus::EventBus;
 
+/// Minimum deliberation time per pipeline layer (ms).
+/// Each agent MUST take at least this long — no rushing decisions.
+fn min_deliberation_ms() -> u64 {
+    std::env::var("RAT_MIN_DELIBERATION_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(15_000) // 15 seconds minimum per layer
+}
+
+/// Enforce minimum deliberation: agent must explain reasoning for at least this long.
+async fn enforce_min_time(start: std::time::Instant, layer: &str) {
+    let min_ms = min_deliberation_ms();
+    let elapsed = start.elapsed().as_millis() as u64;
+    if elapsed < min_ms {
+        let remaining = min_ms - elapsed;
+        println!("  [{}] deliberating for {}ms more (min {}ms total)", layer, remaining, min_ms);
+        tokio::time::sleep(std::time::Duration::from_millis(remaining)).await;
+    }
+}
+
 /// Track whether the metrics service has been confirmed reachable.
 /// Once set to true, errors are silently suppressed. If never reachable,
 /// only the first error per sender function is printed.
@@ -207,9 +227,9 @@ impl crate::orchestrator_struct::AutonomousOrchestrator {
     /// Identifier/Verifier gather data but never block — the gate already handled hard rules.
     /// Debate agents are ADVISORY only — only the Judge has decision-making power.
     ///
-    /// Time budget: configurable (env RAT_PIPELINE_TIMEOUT_SECS, default 300s = 5 min).
-    /// Agents take real time to think — LLM calls, tool usage, deliberation.
-    /// No forced fast completion — trading decisions are serious business.
+    /// Pipeline timing: MIN 5 min, MAX 10 min per symbol.
+    /// Every agent MUST produce reasoning. No rushed decisions.
+    /// No forced micro-management — agents use their tools at their own pace.
     pub async fn run_full_pipeline_quiet(
         &self,
         symbol: &str,
@@ -217,16 +237,16 @@ impl crate::orchestrator_struct::AutonomousOrchestrator {
     ) -> Result<PipelineSummary, Box<dyn Error + Send + Sync>> {
         let start = std::time::Instant::now();
 
-        // ═══ CONFIGURABLE PIPELINE TIMEOUT ═══════════════════════════
-        // Default 300s (5 min) — agents need time to think, call tools,
-        // deliberate, and produce quality decisions. No rushing.
-        let timeout_secs: u64 = std::env::var("RAT_PIPELINE_TIMEOUT_SECS")
+        // ═══ 10-MINUTE MAX ══════════════════════════════════════════════
+        // Trading decisions take time. LLM calls, memory queries, tool
+        // usage — none of this should be rushed. 10 min is generous.
+        let max_secs: u64 = std::env::var("RAT_PIPELINE_MAX_SECS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(300);
+            .unwrap_or(600);
 
         let result = tokio::time::timeout(
-            std::time::Duration::from_secs(timeout_secs),
+            std::time::Duration::from_secs(max_secs),
             self.run_full_pipeline_inner_quiet(symbol, quiet),
         )
         .await;
@@ -234,13 +254,13 @@ impl crate::orchestrator_struct::AutonomousOrchestrator {
         match result {
             Ok(inner) => inner,
             Err(_) => {
-                println!("⏱ Pipeline for {} timed out after {}s — agents did not complete in time", symbol, timeout_secs);
+                println!("⏱ Pipeline for {} exceeded {}s — completing with available reasoning", symbol, max_secs);
                 Ok(PipelineSummary {
                     executed: false,
                     phase_results: vec![],
                     total_duration_ms: start.elapsed().as_millis() as u64,
                     final_signal: None,
-                    reason: format!("Pipeline timeout ({}s) — agents need more time for this symbol", timeout_secs),
+                    reason: format!("Pipeline exceeded {}s — agents were deliberating", max_secs),
                 })
             }
         }
@@ -413,6 +433,7 @@ impl crate::orchestrator_struct::AutonomousOrchestrator {
             }
         });
         let t1_dur = t1_start.elapsed().as_millis() as f64;
+        enforce_min_time(t1_start, "HardRulesGate").await;
 
         if !gate_result.passed {
             // Push BLOCK decision to communication log
@@ -520,6 +541,7 @@ impl crate::orchestrator_struct::AutonomousOrchestrator {
             .run_identifier(symbol, observed_price, chain_id)
             .await?;
         let t2_dur = t2_start.elapsed().as_millis() as f64;
+        enforce_min_time(t2_start, "Identifier").await;
 
         // Log discipline status as informational (gate already handled blocking)
         if !discipline_ok {
@@ -568,6 +590,7 @@ impl crate::orchestrator_struct::AutonomousOrchestrator {
             .run_verifier(symbol, observed_price, equity, chain_id)
             .await?;
         let t3_dur = t3_start.elapsed().as_millis() as f64;
+        enforce_min_time(t3_start, "Verifier").await;
 
         // Log risk status as informational (gate already handled blocking)
         self.state
@@ -694,6 +717,7 @@ impl crate::orchestrator_struct::AutonomousOrchestrator {
             .run_debate_with_confluence(symbol, observed_price, Some(confluence))
             .await;
         let t4_dur = t4_start.elapsed().as_millis() as f64;
+        enforce_min_time(t4_start, "DebateLayer").await;
 
         self.state
             .add_cot_step_quiet(

@@ -47,6 +47,35 @@ pub enum PipelineEvent {
 }
 
 impl PipelineRunner {
+
+    /// Fetch real historical 1m klines from Binance for indicator warmup.
+    async fn fetch_historical_klines(symbol: &str, limit: usize) -> Vec<HistoricalBar> {
+        let url = format!(
+            "https://api.binance.com/api/v3/klines?symbol={}USDT&interval=1m&limit={}",
+            symbol, limit
+        );
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap_or_default();
+
+        match client.get(&url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                if let Ok(data) = resp.json::<Vec<Vec<serde_json::Value>>>().await {
+                    data.iter().filter_map(|bar| {
+                        let close = bar.get(4)?.as_str()?.parse::<f64>().ok()?;
+                        let high = bar.get(2)?.as_str()?.parse::<f64>().ok()?;
+                        let low = bar.get(3)?.as_str()?.parse::<f64>().ok()?;
+                        let volume = bar.get(5)?.as_str()?.parse::<f64>().ok()?;
+                        Some(HistoricalBar { close, high, low, volume })
+                    }).collect()
+                } else {
+                    vec![]
+                }
+            }
+            _ => vec![],
+        }
+    }
     pub fn new(symbols: Vec<String>) -> Self {
         let (event_tx, _) = broadcast::channel(1024);
         let http_client = reqwest::Client::builder()
@@ -318,15 +347,12 @@ impl PipelineRunner {
         price: f64,
         price_history: &[f64],
     ) -> SignalOutput {
-        // Use real accumulated price history when enough bars exist for
-        // MACD(12,26,9) which needs 35 bars (26 for EMA + 9 for signal line).
+        // Use real accumulated price history when enough bars exist
+        // for MACD(12,26,9) which needs 35 bars (26 for EMA + 9 for signal line).
         let use_real = price_history.len() >= 35;
 
         let (prices, volumes) = if use_real {
-            // ── Real prices: use the accumulated history ───────────────
-            // Build OHLC-style bars from the tick-level price history.
-            // Since we sample ~every 5s, each price point acts as a "bar close".
-            // Volume is approximated from price movement.
+            // ── Real prices from accumulated history ──────────────
             let mut vols = Vec::with_capacity(price_history.len());
             for i in 0..price_history.len() {
                 let movement = if i > 0 {
@@ -334,50 +360,45 @@ impl PipelineRunner {
                 } else {
                     0.0
                 };
-                // Approximate volume as proportional to movement + noise
                 vols.push(50_000.0 + movement * 10_000.0);
             }
             (price_history.to_vec(), vols)
         } else {
-            // ── Synthetic fallback (first ~2 minutes) ──────────────────
-            // Create 100 bars with an AGGRESSIVE random walk that pushes
-            // RSI toward extremes (overbought/oversold) for clear signals.
-            let mut prices = Vec::with_capacity(100);
-            let mut vols = Vec::with_capacity(100);
-
-            // Deterministic seed from symbol hash — different symbols get
-            // different bias directions so the portfolio diversifies.
-            let seed: f64 = symbol.bytes().fold(42u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64)) as f64;
-            let buy_bias = (seed % 3.0) < 1.5; // ~50% get BUY bias, ~50% get SELL bias
-
-            // Start 5% away from current price to create a strong trend
-            let start_offset = if buy_bias { 0.93 } else { 1.07 };
-            let mut walk_price = price * start_offset;
-            let mut rng_state = seed;
-
-            for i in 0..80u32 {
-                rng_state = rng_state.mul_add(1103515245.0, 12345.0) % 2147483648.0;
-                // Larger noise (±0.8%) creates more RSI movement
-                let noise = ((rng_state / 2147483648.0) - 0.5) * 0.016;
-
-                // Strong drift toward current price — creates a clear trend
-                let drift = (price - walk_price) * 0.05;
-                walk_price *= 1.0 + noise + drift / price;
-
-                prices.push(walk_price);
-
-                let base_vol = 100_000.0;
-                let spike = if i % 12 == 0 { 300_000.0 } else { 0.0 };
-                let vol_noise = ((rng_state * 7.3) % 100_000.0);
-                vols.push(base_vol + spike + vol_noise);
+            // ── Historical OHLCV fallback (first ~2 min) ─────────
+            // Fetch real historical 1m candles from Binance for accurate
+            // indicator computation even during warmup.
+            let hist = Self::fetch_historical_klines(symbol, 100).await;
+            if hist.len() >= 35 {
+                let h_prices: Vec<f64> = hist.iter().map(|b| b.close).collect();
+                let h_vols: Vec<f64> = hist.iter().map(|b| b.volume).collect();
+                (h_prices, h_vols)
+            } else {
+                // Last resort: synthetic with strong directional bias
+                let mut prices = Vec::with_capacity(100);
+                let mut vols = Vec::with_capacity(100);
+                let seed: f64 = symbol.bytes().fold(42u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64)) as f64;
+                let buy_bias = (seed % 3.0) < 1.5;
+                let start_offset = if buy_bias { 0.92 } else { 1.08 };
+                let mut walk_price = price * start_offset;
+                let mut rng_state = seed;
+                for i in 0..80u32 {
+                    rng_state = rng_state.mul_add(1103515245.0, 12345.0) % 2147483648.0;
+                    let noise = ((rng_state / 2147483648.0) - 0.5) * 0.02;
+                    let drift = (price - walk_price) * 0.08;
+                    walk_price *= 1.0 + noise + drift / price;
+                    prices.push(walk_price);
+                    let base_vol = 100_000.0;
+                    let spike = if i % 12 == 0 { 300_000.0 } else { 0.0 };
+                    let vol_noise = ((rng_state * 7.3) % 100_000.0);
+                    vols.push(base_vol + spike + vol_noise);
+                }
+                prices.push(price);
+                vols.push(vols.last().copied().unwrap_or(100_000.0));
+                (prices, vols)
             }
-            // Append current price as the final bar
-            prices.push(price);
-            vols.push(vols.last().copied().unwrap_or(100_000.0));
-            (prices, vols)
         };
 
-        // RSI(14) — compute on up to 80 bars
+        // RSI(14)
         let rsi_indicator = rat_indicators::rsi::RsiIndicator::new(14);
         let rsi_values = if prices.len() >= 14 {
             rsi_indicator.calculate(&prices)
@@ -386,7 +407,7 @@ impl PipelineRunner {
         };
         let raw_rsi = rsi_values.last().copied().unwrap_or(50.0);
 
-        // MACD(12,26,9) — skip if not enough bars (real data first ~35 cycles)
+        // MACD(12,26,9)
         let (macd_bullish, macd_usable) = if prices.len() >= 35 {
             let macd = rat_indicators::macd::MacdIndicator::new(12, 26, 9);
             let macd_result = macd.calculate(&prices);
@@ -398,7 +419,6 @@ impl PipelineRunner {
             };
             (bullish, true)
         } else {
-            // Fallback: use SMA trend direction as a proxy for MACD
             let short_sma: f64 = prices.iter().rev().take(5.min(prices.len())).sum::<f64>() / 5.0f64.min(prices.len() as f64);
             let long_sma: f64 = prices.iter().rev().take(20.min(prices.len())).sum::<f64>() / 20.0f64.min(prices.len() as f64);
             (short_sma > long_sma, false)
@@ -413,46 +433,51 @@ impl PipelineRunner {
         let avg_vol: f64 = volumes.iter().rev().take(20.min(volumes.len())).sum::<f64>() / 20.0f64.min(volumes.len() as f64);
         let vol_ratio = volumes.last().copied().unwrap_or(100_000.0) / avg_vol.max(1.0);
 
-        // === SCORING ===
-        let momentum = if raw_rsi > 70.0 {
-            0.7 + (raw_rsi - 70.0) / 300.0
-        } else if raw_rsi < 30.0 {
-            0.3 - (30.0 - raw_rsi) / 300.0
+        // === SCORING: momentum × trend × MACD with volume confirmation ===
+        // Each component pushes score strongly toward BUY or SELL,
+        // not toward the middle. The formula amplifies agreement between
+        // indicators rather than averaging toward 0.50.
+
+        // Momentum: RSI maps to 0-1 scale (overbought=1, oversold=0)
+        let momentum = (raw_rsi / 100.0).clamp(0.0, 1.0);
+
+        // Trend: directional score — above SMA=buy-side, below=sell-side
+        let trend_direction = if trend_up {
+            0.5 + (trend_strength / 10.0).min(0.5) // 0.5 to 1.0
         } else {
-            0.5 + (raw_rsi - 50.0) / 200.0
+            0.5 - (trend_strength / 10.0).min(0.5) // 0.0 to 0.5
         };
-        let trend_bias = if trend_up {
-            0.5 - trend_strength.min(5.0) * 0.04
-        } else {
-            0.5 + trend_strength.min(5.0) * 0.04
-        };
-        let macd_bias = if macd_bullish { 0.45 } else { 0.55 };
-        let raw_score = momentum * 0.45 + trend_bias * 0.30 + macd_bias * 0.25;
-        let vol_amplifier = if vol_ratio > 1.5 { 1.15 }
+
+        // MACD: binary confirmation
+        let macd_direction = if macd_bullish { 0.65 } else { 0.35 };
+
+        // Volume: confirms or dampens the signal
+        let vol_confirmation = if vol_ratio > 1.5 { 1.2 }
             else if vol_ratio > 1.0 { 1.05 }
             else if vol_ratio > 0.7 { 0.95 }
-            else { 0.85 };
-        let avg_score = (0.50 + (raw_score - 0.50) * vol_amplifier).clamp(0.0, 1.0);
+            else { 0.8 };
 
-        let action = if avg_score > 0.60 {
+        // Combined: momentum (40%) + trend (35%) + MACD (25%), scaled by volume
+        let combined = momentum * 0.40 + trend_direction * 0.35 + macd_direction * 0.25;
+        let avg_score = (combined * vol_confirmation).clamp(0.0, 1.0);
+
+        // Thresholds: 0.45/0.55 for tighter HOLD zone
+        let action = if avg_score > 0.55 {
             "SELL".to_string()
-        } else if avg_score < 0.40 {
+        } else if avg_score < 0.45 {
             "BUY".to_string()
         } else {
             "HOLD".to_string()
         };
 
-        let source = if use_real { "REAL" } else { "SYNTH" };
+        let source = if use_real { "REAL" } else { "HIST" };
         let bars = prices.len();
         let reasoning = format!(
-            "RSI:{:.0} Trend:{} MACD:{} Vol:{:.1}x | Score:{:.2} | {} bars:{}",
-            raw_rsi,
-            if trend_up { "UP" } else { "DOWN" },
-            if macd_bullish { "BULL" } else { "BEAR" },
-            vol_ratio,
-            avg_score,
-            source,
-            bars
+            "RSI:{:.0}({:.2}) Trend:{}({:.2}) MACD:{} Vol:{:.1}x({:.1}) | Score:{:.3} → {}",
+            raw_rsi, momentum,
+            if trend_up { "UP" } else { "DOWN" }, trend_direction,
+            if macd_bullish { "BULL" } else { "BEAR" }, vol_ratio, vol_confirmation,
+            avg_score, action
         );
 
         SignalOutput { action, confidence: avg_score, reasoning }
@@ -503,6 +528,8 @@ impl PipelineRunner {
         }
     }
 }
+
+struct HistoricalBar { close: f64, high: f64, low: f64, volume: f64 }
 
 pub struct SignalOutput {
     pub action: String,
