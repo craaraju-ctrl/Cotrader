@@ -207,13 +207,9 @@ impl crate::orchestrator_struct::AutonomousOrchestrator {
     /// Identifier/Verifier gather data but never block — the gate already handled hard rules.
     /// Debate agents are ADVISORY only — only the Judge has decision-making power.
     ///
-    /// Time budget: 60s total per symbol (10s hard rules + 25s LLM + 25s Kronos).
-    /// The entire pipeline is wrapped in a 60-second timeout so a slow model
-    /// on any single symbol never blocks the batch from progressing.
-    /// Run the full pipeline for a single symbol.
-    /// When `quiet=true`, per-agent COT steps are suppressed (only summary fires).
-    /// Automated callers (medium_loop) pass `quiet=true` to eliminate ~17 lock acquisitions
-    /// per pipeline run. Manual/interactive callers pass `quiet=false` for full TUI display.
+    /// Time budget: configurable (env RAT_PIPELINE_TIMEOUT_SECS, default 300s = 5 min).
+    /// Agents take real time to think — LLM calls, tool usage, deliberation.
+    /// No forced fast completion — trading decisions are serious business.
     pub async fn run_full_pipeline_quiet(
         &self,
         symbol: &str,
@@ -221,9 +217,16 @@ impl crate::orchestrator_struct::AutonomousOrchestrator {
     ) -> Result<PipelineSummary, Box<dyn Error + Send + Sync>> {
         let start = std::time::Instant::now();
 
-        // ═══ HARD 60-SECOND PER-SYMBOL TIMEOUT ═══════════════════════
+        // ═══ CONFIGURABLE PIPELINE TIMEOUT ═══════════════════════════
+        // Default 300s (5 min) — agents need time to think, call tools,
+        // deliberate, and produce quality decisions. No rushing.
+        let timeout_secs: u64 = std::env::var("RAT_PIPELINE_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(300);
+
         let result = tokio::time::timeout(
-            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(timeout_secs),
             self.run_full_pipeline_inner_quiet(symbol, quiet),
         )
         .await;
@@ -231,13 +234,13 @@ impl crate::orchestrator_struct::AutonomousOrchestrator {
         match result {
             Ok(inner) => inner,
             Err(_) => {
-                println!("⏱ Pipeline for {} timed out after 60s — skipping", symbol);
+                println!("⏱ Pipeline for {} timed out after {}s — agents did not complete in time", symbol, timeout_secs);
                 Ok(PipelineSummary {
                     executed: false,
                     phase_results: vec![],
                     total_duration_ms: start.elapsed().as_millis() as u64,
                     final_signal: None,
-                    reason: "Pipeline per-symbol timeout (60s)".to_string(),
+                    reason: format!("Pipeline timeout ({}s) — agents need more time for this symbol", timeout_secs),
                 })
             }
         }
@@ -377,10 +380,14 @@ impl crate::orchestrator_struct::AutonomousOrchestrator {
         // Low-priority failures are WARNINGS only — they log but don't block.
         let t1_start = std::time::Instant::now();
         let hard_rules = crate::hard_rules_gate::HardRulesGate::new(self.state.clone());
-        // ═══ HARD 10-SECOND RULES TIMEOUT ════════════════════════
-        // Uses the unified OHLCV snapshot so all 3 layers see identical data.
+        // ═══ HARD RULES TIMEOUT ════════════════════════════════════════
+        // Default 60s — rules need time to evaluate all 29 conditions properly.
+        let rules_timeout: u64 = std::env::var("RAT_RULES_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60);
         let gate_result = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(rules_timeout),
             hard_rules.evaluate_with_ohlcv(symbol, &ohlcv_snapshot),
         )
         .await
@@ -666,6 +673,17 @@ impl crate::orchestrator_struct::AutonomousOrchestrator {
             }
         }
 
+        // ═══ DELIBERATION PERIOD ════════════════════════════════════════════
+        // Agents need time to absorb Layer 1 results before debating.
+        // No forced speed — allow agents to load context, fetch additional data.
+        let deliberation_ms: u64 = std::env::var("RAT_DELIBERATION_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(500);
+        if deliberation_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(deliberation_ms)).await;
+        }
+
         // ═══ LAYER 3: DEBATE LAYER (Advisory Only) ════════════════════════════
         // Multi-round adversarial decision: Bull Team vs Bear Team → Synthesizer → Judge
         // NOTE: Debate agents are ADVISORY only. They provide evidence + confidence.
@@ -762,8 +780,13 @@ impl crate::orchestrator_struct::AutonomousOrchestrator {
                 // (Rules + LLM + Kronos) to produce a consensus trade signal.
                 // This is ALWAYS called — not just when debate HOLDs — so the
                 // LLM and Kronos are always "in the loop" with the pipeline.
+                // Default 120s — LLM + Kronos need real time for complex decisions.
+                let strategy_timeout: u64 = std::env::var("RAT_STRATEGY_TIMEOUT_SECS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(120);
                 let strategy_signal = tokio::time::timeout(
-                    std::time::Duration::from_secs(30),
+                    std::time::Duration::from_secs(strategy_timeout),
                     self.strategy.generate_signal_with_debate(symbol, observed_price, &verdict),
                 )
                 .await
