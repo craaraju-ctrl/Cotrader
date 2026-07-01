@@ -43,3 +43,5 @@ dist/
 
 # Kronos model cache
 kronos/models/
+.fastembed_cache/
+memory/data.db
