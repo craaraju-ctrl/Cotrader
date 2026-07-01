@@ -139,13 +139,13 @@ impl GoalManager {
                     period: _,
                     target_pct,
                 } => {
-                    let portfolio = self.state.portfolio.read().await;
+                    let portfolio = self.state.portfolio_store.portfolio.read().await;
                     let current = portfolio.daily_pnl_pct;
                     drop(portfolio);
                     (current / target_pct).clamp(0.0, 1.0)
                 }
                 GoalType::RiskLimit { max_drawdown_pct } => {
-                    let portfolio = self.state.portfolio.read().await;
+                    let portfolio = self.state.portfolio_store.portfolio.read().await;
                     let dd = portfolio.max_drawdown_today.abs() / portfolio.total_equity.max(1.0);
                     drop(portfolio);
                     if dd > *max_drawdown_pct {
@@ -166,7 +166,7 @@ impl GoalManager {
                     dd / max_drawdown_pct
                 }
                 GoalType::Learning { topic: _ } => {
-                    let store = &self.state.episode_store;
+                    let store = &self.state.agent_memory.episode_store;
                     let n = store
                         .load_recent_closed_trades(50, None)
                         .unwrap_or_default()
@@ -179,7 +179,7 @@ impl GoalManager {
                     description: _,
                     probe_count,
                 } => {
-                    let store = &self.state.episode_store;
+                    let store = &self.state.agent_memory.episode_store;
                     let n = store
                         .load_recent_closed_trades(50, None)
                         .unwrap_or_default()

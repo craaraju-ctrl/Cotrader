@@ -22,7 +22,7 @@ impl LiquiditySkill {
     }
 
     pub async fn analyze(&self, symbol: &str) -> LiquiditySnapshot {
-        let history = self.state.ohlcv_history.read().await;
+        let history = self.state.market_data.ohlcv_history.read().await;
         if let Some(bars) = history.get(symbol) {
             if let Some(last) = bars.last() {
                 return compute_liquidity(bars, last.close);

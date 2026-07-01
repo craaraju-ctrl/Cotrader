@@ -177,12 +177,12 @@
 
           <div class="trade-form-group" id="tradePriceGroup">
             <span class="trade-form-label">Price</span>
-            <input class="trade-input" id="tradePriceInput" type="text" placeholder="0.00" value="68742.50">
+            <input class="trade-input" id="tradePriceInput" type="text" placeholder="0.00" value="68742.50" oninput="sanitizeNumericInput(this); updateTradeTotal()">
           </div>
 
           <div class="trade-form-group">
             <span class="trade-form-label">Amount</span>
-            <input class="trade-input" id="tradeAmount" type="text" placeholder="0.00" value="0.01" oninput="updateTradeTotal()">
+            <input class="trade-input" id="tradeAmount" type="text" placeholder="0.00" value="0.01" oninput="sanitizeNumericInput(this); updateTradeTotal()">
           </div>
 
           <div class="trade-percentages">
@@ -426,6 +426,49 @@
           </thead>
           <tbody id="wlAssetsBody"></tbody>
         </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <!--  ORDER CONFIRMATION MODAL                                           -->
+  <!-- ══════════════════════════════════════════════════════════════════════ -->
+  <div class="modal-overlay" id="orderConfirmModal">
+    <div class="modal-content" style="max-width:420px">
+      <div class="modal-header">
+        <span class="modal-title">Confirm Order</span>
+        <button class="modal-close" onclick="closeOrderConfirmation()">×</button>
+      </div>
+      <div class="confirm-body">
+        <div class="confirm-row">
+          <span class="confirm-label">Side</span>
+          <span class="confirm-value" id="confirmSide">Buy</span>
+        </div>
+        <div class="confirm-row">
+          <span class="confirm-label">Pair</span>
+          <span class="confirm-value" id="confirmSymbol">BTC/USDT</span>
+        </div>
+        <div class="confirm-row">
+          <span class="confirm-label">Type</span>
+          <span class="confirm-value" id="confirmType">Market</span>
+        </div>
+        <div class="confirm-row">
+          <span class="confirm-label">Price</span>
+          <span class="confirm-value mono" id="confirmPrice">Market</span>
+        </div>
+        <div class="confirm-row">
+          <span class="confirm-label">Amount</span>
+          <span class="confirm-value mono" id="confirmAmount">0.01 BTC</span>
+        </div>
+        <div class="confirm-divider"></div>
+        <div class="confirm-row confirm-total-row">
+          <span class="confirm-label">Total</span>
+          <span class="confirm-value mono" id="confirmTotal">$687.43</span>
+        </div>
+      </div>
+      <div class="confirm-actions">
+        <button class="exchange-btn exchange-btn-secondary" onclick="closeOrderConfirmation()" style="flex:1">Cancel</button>
+        <button class="exchange-btn exchange-btn-primary" onclick="confirmAndSubmitOrder()" style="flex:1">Confirm</button>
       </div>
     </div>
   </div>

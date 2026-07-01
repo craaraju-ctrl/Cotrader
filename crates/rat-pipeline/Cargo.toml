@@ -1,0 +1,26 @@
+[package]
+name = "rat-pipeline"
+version.workspace = true
+edition.workspace = true
+description = "rat-pipeline — Trading pipeline orchestration"
+license.workspace = true
+
+[[bin]]
+name = "rat-pipeline"
+path = "src/bin/rat_pipeline.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { workspace = true }
+async-trait = "0.1"
+anyhow = "1"
+reqwest = { version = "0.12", features = ["json"] }
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures-util = "0.3"
+rat-indicators = { path = "../rat-indicators" }
+rat-agents = { path = "../rat-agents" }
+agentic-memory = { path = "../../memory" }
+rat-core = { path = "../rat-core" }
+rand = "0.8"

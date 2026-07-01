@@ -11,32 +11,58 @@ use crate::app::{App, Tab, NUM_TABS};
 use crate::components::Component;
 use crate::theme::THEME;
 
+/// Convert a byte index to a Tab variant safely.
+/// Returns None if the index is out of range.
+fn tab_from_index(idx: u8) -> Option<Tab> {
+    match idx {
+        0 => Some(Tab::Dashboard),
+        1 => Some(Tab::Trading),
+        2 => Some(Tab::Orderbook),
+        3 => Some(Tab::Positions),
+        4 => Some(Tab::Agents),
+        5 => Some(Tab::Performance),
+        6 => Some(Tab::PolicyCache),
+        7 => Some(Tab::Health),
+        8 => Some(Tab::Settings),
+        9 => Some(Tab::Help),
+        _ => None,
+    }
+}
+
+/// Get the next tab in order, wrapping around to Dashboard after Help.
+fn next_tab(tab: Tab) -> Tab {
+    let next_idx = ((tab as u8) + 1) % NUM_TABS as u8;
+    tab_from_index(next_idx).unwrap_or(Tab::Dashboard)
+}
+
+/// Get the previous tab in order, wrapping from Dashboard to Help.
+fn prev_tab(tab: Tab) -> Tab {
+    let prev_idx = (tab as u8 + NUM_TABS as u8 - 1) % NUM_TABS as u8;
+    tab_from_index(prev_idx).unwrap_or(Tab::Dashboard)
+}
+
 pub struct TabsComponent;
 
 impl Component for TabsComponent {
     fn handle_key(&mut self, key: KeyEvent, app: &mut App) -> bool {
         match key.code {
             KeyCode::Tab => {
-                app.selected_tab = match app.selected_tab {
-                    Tab::Help => Tab::Dashboard,
-                    _ => unsafe { std::mem::transmute(app.selected_tab as u8 + 1) },
-                };
+                app.selected_tab = next_tab(app.selected_tab);
                 app.scroll_offset = 0;
                 app.selected_row = 0;
                 true
             }
             KeyCode::BackTab => {
-                app.selected_tab = match app.selected_tab {
-                    Tab::Dashboard => Tab::Help,
-                    _ => unsafe { std::mem::transmute(app.selected_tab as u8 - 1) },
-                };
+                app.selected_tab = prev_tab(app.selected_tab);
                 app.scroll_offset = 0;
                 app.selected_row = 0;
                 true
             }
             KeyCode::Char(c @ '1'..='9') => {
-                let idx = (c as usize - '1' as usize).min(NUM_TABS - 1);
-                app.selected_tab = unsafe { std::mem::transmute(idx as u8) };
+                let idx = (c as u8 - b'1').min(NUM_TABS as u8 - 1);
+                if let Some(tab) = tab_from_index(idx) {
+                    app.selected_tab = tab;
+                }
                 app.scroll_offset = 0;
                 app.selected_row = 0;
                 true
@@ -53,7 +79,7 @@ impl Component for TabsComponent {
     fn render(&self, frame: &mut Frame, area: Rect, app: &App) {
         let titles: Vec<Line> = (0..NUM_TABS)
             .map(|i| {
-                let tab: Tab = unsafe { std::mem::transmute(i as u8) };
+                let tab = tab_from_index(i as u8).unwrap_or(Tab::Dashboard);
                 let title = format!("{} {}", tab.icon(), tab.title());
                 if i == app.selected_tab as usize {
                     Line::from(Span::styled(

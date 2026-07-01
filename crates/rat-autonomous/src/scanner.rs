@@ -23,11 +23,11 @@ impl WatchlistScannerAgent {
     pub async fn scan_watchlist(&self) -> Result<Vec<String>, Box<dyn Error + Send + Sync>> {
         println!("[Scanner] 🔍 Scanning watchlist for high-conviction setups...");
 
-        let watchlist = self.state.watchlist.read().await;
+        let watchlist = self.state.market_data.watchlist.read().await;
         let mut prices = Vec::with_capacity(watchlist.len());
 
         for sym in watchlist.iter() {
-            let portfolio = self.state.portfolio.read().await;
+            let portfolio = self.state.portfolio_store.portfolio.read().await;
             let from_open = portfolio
                 .open_positions
                 .iter()
@@ -38,7 +38,7 @@ impl WatchlistScannerAgent {
             let price = if let Some(p) = from_open {
                 p
             } else {
-                let history = self.state.ohlcv_history.read().await;
+                let history = self.state.market_data.ohlcv_history.read().await;
                 history
                     .get(sym)
                     .and_then(|h| h.last().map(|b| b.close))
@@ -57,7 +57,7 @@ impl WatchlistScannerAgent {
 
             // Read real portfolio equity for accurate drawdown comparison
             let equity = {
-                let portfolio = self.state.portfolio.read().await;
+                let portfolio = self.state.portfolio_store.portfolio.read().await;
                 portfolio.total_equity
             };
             let context = MarketContext {
@@ -74,7 +74,7 @@ impl WatchlistScannerAgent {
                 trend_direction: None,
             };
 
-            let rules = self.state.rules.read().await;
+            let rules = self.state.rule_engine.rules.read().await;
             let pivots = calculate_pivot_points(
                 context.high,
                 context.low,
@@ -84,7 +84,7 @@ impl WatchlistScannerAgent {
             let confluence = calculate_confluence_score(&context, &pivots);
             drop(rules);
 
-            let regime = self.state.market_regime.read().await;
+            let regime = self.state.market_data.market_regime.read().await;
             let regime_str = match *regime {
                 Some(MarketRegime::TrendingBull) => "Bullish trend",
                 Some(MarketRegime::TrendingBear) => "Bearish trend",
@@ -115,7 +115,7 @@ impl WatchlistScannerAgent {
         }
 
         {
-            let mut last_scan = self.state.last_watchlist_scan.write().await;
+            let mut last_scan = self.state.io.last_watchlist_scan.write().await;
             *last_scan = Some(Utc::now());
         }
 
@@ -123,7 +123,7 @@ impl WatchlistScannerAgent {
     }
 
     pub async fn add_to_watchlist(&self, symbol: &str) -> bool {
-        let mut watchlist = self.state.watchlist.write().await;
+        let mut watchlist = self.state.market_data.watchlist.write().await;
         let upper = symbol.to_uppercase();
         if !watchlist.contains(&upper) {
             watchlist.push(upper.clone());
@@ -135,7 +135,7 @@ impl WatchlistScannerAgent {
     }
 
     pub async fn remove_from_watchlist(&self, symbol: &str) -> bool {
-        let mut watchlist = self.state.watchlist.write().await;
+        let mut watchlist = self.state.market_data.watchlist.write().await;
         let upper = symbol.to_uppercase();
         if let Some(pos) = watchlist.iter().position(|s| s == &upper) {
             watchlist.remove(pos);
@@ -147,7 +147,7 @@ impl WatchlistScannerAgent {
     }
 
     pub async fn get_watchlist(&self) -> Vec<String> {
-        self.state.watchlist.read().await.clone()
+        self.state.market_data.watchlist.read().await.clone()
     }
 }
 

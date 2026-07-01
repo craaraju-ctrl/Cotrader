@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use std::error::Error;
 use rat_core::{
-    Agent, AgentInput, AgentOutput, AgentTier, LlmExecutor, PostTradeReflection, TradingEpisode,
+    Agent, AgentInput, AgentOutput, AgentTier, PostTradeReflection, TradingEpisode,
 };
 
 pub struct ReflectorAgent {
@@ -20,12 +20,12 @@ impl ReflectorAgent {
         println!("[Reflector] Reflecting on past decisions for {}...", symbol);
 
         let today_key = format!("decisions/{}/{}", symbol, Utc::now().format("%Y%m%d"));
-        let _recent = self.state.memory.get_decision(&today_key).ok().flatten();
+        let _recent = self.state.agent_memory.memory.get_decision(&today_key).ok().flatten();
 
         let pattern_key = format!("patterns/{}", symbol);
-        let _patterns = self.state.memory.get_decision(&pattern_key).ok().flatten();
+        let _patterns = self.state.agent_memory.memory.get_decision(&pattern_key).ok().flatten();
 
-        let portfolio = self.state.portfolio.read().await;
+        let portfolio = self.state.portfolio_store.portfolio.read().await;
 
         let reflection = format!(
             "Reflection for {}: Daily P&L: ${:.2} | Trades: {} | Wins: {} | Losses: {} | Consecutive Losses: {}",
@@ -39,100 +39,94 @@ impl ReflectorAgent {
         let reflection_key = format!("reflections/{}/{}", symbol, Utc::now().timestamp());
         let _ = self
             .state
-            .memory
+            .agent_memory.memory
             .store_decision(&reflection_key, &reflection);
 
         Ok(reflection)
     }
 
-    /// Deep post-trade reflection — analyses a specific closed trade via the LLM,
-    /// generates a structured PostTradeReflection, stores the episode in memory.
+    /// Deep post-trade reflection — computes a structured PostTradeReflection
+    /// deterministically from episode data (no LLM dependency).
+    /// The LLM-based reflection has been removed since the LLM is now stubbed.
+    /// Regret score is computed from outcome P&L: higher loss = higher regret.
     pub async fn deep_reflect_on_episode(
         &self,
         episode: &TradingEpisode,
-        llm: &LlmExecutor,
     ) -> Result<PostTradeReflection, Box<dyn Error + Send + Sync>> {
         println!(
             "[Reflector] 🔬 Deep reflecting on episode {}...",
             episode.episode_id
         );
 
-        // Smarter: before reflecting, recall what "I" (Reflector) or the system did in past similar episodes for this symbol/action, and the previous lessons (this helps the agent understand exactly what it was doing last time and build better reflections, reducing hallucinated lessons).
-        let trained_recall = self
-            .state
-            .recall_trained_memory(
-                &format!("reflection on {} {} action", episode.symbol, episode.action),
-                2,
-            )
-            .await;
-        println!(
-            "[Reflector smarter] Using trained memory for better self-understanding: {}",
-            trained_recall
-        );
-
-        let episode_summary = format!(
-            "Symbol: {} | Action: {} | Entry: {:.2} | SL: {:.2} | TP: {:.2} | Confidence: {:.1}%\nMarket: price={:.2} trend={} confluence={:.1}% regime={} session={}",
-            episode.symbol, episode.action, episode.entry_price,
-            episode.stop_loss, episode.take_profit,
-            episode.confidence * 100.0,
-            episode.market_state.price, episode.market_state.trend,
-            episode.market_state.confluence * 100.0,
-            episode.market_state.regime, episode.market_state.session_valid,
-        );
-
-        let outcome_summary = match &episode.outcome {
-            Some(o) => format!(
-                "Exit: {:.2} | P&L: ${:.2} ({:+.2}%) | Reason: {} | Held: {}s | Max: {:.2} | Min: {:.2}",
-                o.exit_price, o.pnl, o.pnl_pct * 100.0,
-                o.exit_reason, o.holding_period_secs,
-                o.max_unrealized_pnl, o.min_unrealized_pnl,
-            ),
-            None => "Trade still open or no outcome recorded.".to_string(),
+        // Compute regret from outcome: 0.0 = perfect, 1.0 = terrible mistake
+        let (regret, lesson, should_alert) = match &episode.outcome {
+            Some(o) => {
+                let abs_pnl_pct = o.pnl_pct.abs();
+                // Regret is proportional to how much we lost vs expected
+                let regret = if o.pnl_pct < 0.0 {
+                    (abs_pnl_pct * 5.0).clamp(0.0, 1.0) // losing trade
+                } else {
+                    (abs_pnl_pct * 0.5).clamp(0.0, 0.3) // winning trade: low regret
+                };
+                let lesson = match o.exit_reason.as_str() {
+                    "stop_loss" => format!(
+                        "Stop-loss hit at {:.2} for {} (P&L: {:+.2}%). SL was {:.2} → entry {:.2}.",
+                        o.exit_price, episode.symbol, o.pnl_pct * 100.0,
+                        episode.stop_loss, episode.entry_price
+                    ),
+                    "take_profit" => format!(
+                        "Take-profit at {:.2} ({:+.2}%). Entry {:.2} → TP {:.2}.",
+                        o.exit_price, o.pnl_pct * 100.0,
+                        episode.entry_price, episode.take_profit
+                    ),
+                    _ => format!(
+                        "{} closed at {:.2} with P&L {:+.2}%.",
+                        episode.symbol, o.exit_price, o.pnl_pct * 100.0
+                    ),
+                };
+                let should_alert = o.pnl_pct < -0.05; // >5% loss → alert
+                (regret, lesson, should_alert)
+            }
+            None => (0.0, format!("Trade still open for {}.", episode.symbol), false),
         };
 
         self.state
             .push_live_comm(
                 "Guardian",
-                "Ollama",
+                "Reflector",
                 "REFLECT",
                 &format!(
-                    "Requesting trade reflection for {} (Episode {})",
-                    episode.symbol, episode.episode_id
+                    "Deterministic reflection for {} (Episode {}): regret={:.2}",
+                    episode.symbol, episode.episode_id, regret
                 ),
                 Some(episode.symbol.clone()),
             )
             .await;
 
-        let reflection = llm
-            .ask_for_reflection(&episode_summary, &outcome_summary)
-            .await;
-
-        self.state
-            .push_live_comm(
-                "Ollama",
-                "Guardian",
-                "ANALYZED",
-                &format!(
-                    "Reflection: regret_score={:.2} | lesson={}",
-                    reflection.regret_score, reflection.lesson
-                ),
-                Some(episode.symbol.clone()),
-            )
-            .await;
+        // Build structured reflection
+        let reflection = PostTradeReflection {
+            timestamp: Utc::now(),
+            lesson: lesson.clone(),
+            violated_assumptions: Vec::new(),
+            regret_score: regret,
+            what_went_wrong: Vec::new(),
+            what_went_right: Vec::new(),
+            suggested_rule_change: None,
+            should_alert,
+        };
 
         // Store the reflection in memory alongside the episode
         if let Ok(json) = serde_json::to_string(&reflection) {
             let key = format!("reflection/{}", episode.episode_id);
-            let _ = self.state.memory.store_state(&key, &json);
+            let _ = self.state.agent_memory.memory.store_state(&key, &json);
         }
 
-        // Promote to vector memory for trained intelligence (semantic search in debate/historian)
+        // Promote to vector memory for trained intelligence
         let summary = format!(
             "{} reflection: lesson={} regret={:.2}",
-            episode.symbol, reflection.lesson, reflection.regret_score
+            episode.symbol, lesson, regret
         );
-        let vm = self.state.vector_memory.clone();
-        let llm_ref = self.state.llm.clone();
+        let vm = self.state.agent_memory.vector_memory.clone();
         let eid = episode.episode_id.clone();
         let sym = episode.symbol.clone();
         tokio::spawn(async move {
@@ -142,27 +136,18 @@ impl ReflectorAgent {
                     &eid,
                     &sym,
                     &summary,
-                    Some(reflection.regret_score),
-                    &llm_ref,
+                    Some(regret),
                 )
                 .await;
         });
 
-        // If there's a suggested rule change, store it for the MetaControlAgent
-        if let Some(ref change) = reflection.suggested_rule_change {
-            let key = format!("rule_suggestion/{}", Utc::now().timestamp());
-            let _ = self.state.memory.store_state(&key, change);
-            println!("[Reflector] 💡 Rule change suggestion stored: {}", change);
-        }
-
-        if reflection.should_alert {
-            println!("[Reflector] 🚨 CRITICAL LESSON: {}", reflection.lesson);
-            // Wire Notifier
+        if should_alert {
+            println!("[Reflector] 🚨 CRITICAL LESSON: {}", lesson);
             rat_core::notifier::alert(
                 "CRITICAL REFLECTION",
                 &format!(
                     "{}: {} (regret {:.2})",
-                    episode.symbol, reflection.lesson, reflection.regret_score
+                    episode.symbol, lesson, regret
                 ),
             )
             .await;
@@ -170,7 +155,7 @@ impl ReflectorAgent {
 
         println!(
             "[Reflector] ✅ Deep reflection complete — regret: {:.2}, lesson: {}",
-            reflection.regret_score, reflection.lesson
+            regret, lesson
         );
 
         Ok(reflection)

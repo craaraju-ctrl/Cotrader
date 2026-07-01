@@ -33,7 +33,7 @@ fn setup_env(db_name: &str) -> (AutonomousOrchestrator, String) {
 }
 
 async fn seed_ohlcv(state: &SharedState, symbol: &str, base_price: f64) {
-    let mut history = state.ohlcv_history.write().await;
+    let mut history = state.market_data.ohlcv_history.write().await;
     let mut bars = Vec::with_capacity(20);
     for i in 0..20 {
         let noise = (i as f64).sin() * base_price * 0.01;
@@ -86,7 +86,7 @@ async fn test_paper_trade_full_cycle() {
     seed_ohlcv(&orch.state, "BTC", 65_000.0).await;
 
     // Verify clean starting state
-    let equity_before = orch.state.portfolio.read().await.total_equity;
+    let equity_before = orch.state.portfolio_store.portfolio.read().await.total_equity;
     assert_eq!(equity_before, 100_000.0, "Initial equity should be ₹100k");
 
     // 1. Create a trade signal: BUY 0.05 BTC at 65000, SL 64000, TP 67000
@@ -112,7 +112,7 @@ async fn test_paper_trade_full_cycle() {
     // 3. Verify position appears in portfolio
     //    Note: execution coordinator applies slippage (0.05%) to entry/SL/TP
     {
-        let portfolio = orch.state.portfolio.read().await;
+        let portfolio = orch.state.portfolio_store.portfolio.read().await;
         assert_eq!(
             portfolio.open_positions.len(),
             1,
@@ -142,7 +142,7 @@ async fn test_paper_trade_full_cycle() {
     }
 
     // 4. Verify equity hasn't changed (paper trade = virtual money, no real cash movement yet)
-    let equity_after = orch.state.portfolio.read().await.total_equity;
+    let equity_after = orch.state.portfolio_store.portfolio.read().await.total_equity;
     assert!(
         (equity_after - 100_000.0).abs() < 1.0,
         "Equity should remain ~₹100k after paper trade entry"
@@ -159,7 +159,7 @@ async fn test_paper_trade_full_cycle() {
     println!("  ✅ Execution coordinator check completed");
 
     // Position should still be open (price hasn't hit SL or TP)
-    let pos_count = orch.state.portfolio.read().await.open_positions.len();
+    let pos_count = orch.state.portfolio_store.portfolio.read().await.open_positions.len();
     assert_eq!(
         pos_count, 1,
         "Position should still be open (price not at SL/TP)"
@@ -172,7 +172,7 @@ async fn test_paper_trade_full_cycle() {
 /// This is how real prices flow in — through the OHLCV history — not by mutating
 /// positions directly.
 async fn push_price_tick(state: &SharedState, symbol: &str, price: f64) {
-    let mut history = state.ohlcv_history.write().await;
+    let mut history = state.market_data.ohlcv_history.write().await;
     if let Some(bars) = history.get_mut(symbol) {
         let last = bars.last().unwrap();
         bars.push(OhlcvBar {
@@ -211,7 +211,7 @@ async fn test_sl_tp_monitoring_triggers_stop_loss() {
     assert!(result.is_ok(), "Execution run should succeed after SL hit");
 
     // Verify position was closed
-    let portfolio = orch.state.portfolio.read().await;
+    let portfolio = orch.state.portfolio_store.portfolio.read().await;
     assert!(
         portfolio.open_positions.is_empty(),
         "Position should be closed after SL hit"
@@ -259,7 +259,7 @@ async fn test_rejected_signal_zero_position_size() {
     );
 
     // Portfolio should remain empty
-    assert_eq!(orch.state.portfolio.read().await.open_positions.len(), 0);
+    assert_eq!(orch.state.portfolio_store.portfolio.read().await.open_positions.len(), 0);
     println!("  ✅ Rejected signal correctly: {}", err);
 
     let _ = fs::remove_file(&db_path);
@@ -290,7 +290,7 @@ async fn test_sl_tp_monitoring_triggers_take_profit() {
     assert!(result.is_ok(), "Execution run should succeed after TP hit");
 
     // Verify position was closed
-    let portfolio = orch.state.portfolio.read().await;
+    let portfolio = orch.state.portfolio_store.portfolio.read().await;
     assert!(
         portfolio.open_positions.is_empty(),
         "Position should be closed after TP hit"
@@ -332,12 +332,12 @@ async fn test_equity_pnl_updates_after_close() {
     // Add position directly via portfolio manager
     orch.portfolio.add_position(&signal).await.unwrap();
 
-    let equity_before_close = orch.state.portfolio.read().await.total_equity;
+    let equity_before_close = orch.state.portfolio_store.portfolio.read().await.total_equity;
     println!("  Equity after open: {:.2}", equity_before_close);
 
     // Simulate price going to TP
     {
-        let mut portfolio = orch.state.portfolio.write().await;
+        let mut portfolio = orch.state.portfolio_store.portfolio.write().await;
         if let Some(pos) = portfolio
             .open_positions
             .iter_mut()
@@ -358,7 +358,7 @@ async fn test_equity_pnl_updates_after_close() {
     assert!(pnl > 0.0, "Closing at TP should be profitable");
 
     // Verify portfolio state after close
-    let portfolio = orch.state.portfolio.read().await;
+    let portfolio = orch.state.portfolio_store.portfolio.read().await;
     assert!(
         portfolio.open_positions.is_empty(),
         "All positions should be closed"
@@ -410,7 +410,7 @@ async fn test_multiple_positions_partial_close() {
         .await
         .unwrap();
 
-    assert_eq!(orch.state.portfolio.read().await.open_positions.len(), 2);
+    assert_eq!(orch.state.portfolio_store.portfolio.read().await.open_positions.len(), 2);
 
     // Push ETH price to SL level — refresh_position_prices() picks this up and
     // triggers the stop-loss for ETH while BTC stays open
@@ -420,7 +420,7 @@ async fn test_multiple_positions_partial_close() {
     orch.execution.run(None).await.unwrap();
 
     // BTC should still be open, ETH should be closed
-    let portfolio = orch.state.portfolio.read().await;
+    let portfolio = orch.state.portfolio_store.portfolio.read().await;
     assert_eq!(
         portfolio.open_positions.len(),
         1,
@@ -464,7 +464,7 @@ async fn test_pipeline_then_execution() {
     );
 
     // Run the verifier with current equity
-    let equity = orch.state.portfolio.read().await.total_equity;
+    let equity = orch.state.portfolio_store.portfolio.read().await.total_equity;
     let risk = orch
         .rat()
         .run_verifier("NIFTY", 24_500.0, equity, 1)
@@ -495,7 +495,7 @@ async fn test_pipeline_then_execution() {
     }
 
     // Regardless of LLM availability, the execution coordinator should handle it gracefully
-    let pos_count = orch.state.portfolio.read().await.open_positions.len();
+    let pos_count = orch.state.portfolio_store.portfolio.read().await.open_positions.len();
     println!(
         "  📊 Positions after pipeline→execute: {} (1 expected if execution succeeded)",
         pos_count

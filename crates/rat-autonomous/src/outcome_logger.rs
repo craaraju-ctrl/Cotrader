@@ -33,13 +33,13 @@ impl Agent for OutcomeLoggerAgent {
     ) -> Result<AgentOutput, Box<dyn Error + Send + Sync>> {
         match input {
             Some(AgentInput::LogOutcome { key, value }) => {
-                let _ = self.state.memory.store_decision(&key, &value);
+                let _ = self.state.agent_memory.memory.store_decision(&key, &value);
                 println!("[OutcomeLogger] Logged: {}", key);
                 Ok(AgentOutput::Done)
             }
             _ => {
                 // Default: log current portfolio summary
-                let portfolio = self.state.portfolio.read().await;
+                let portfolio = self.state.portfolio_store.portfolio.read().await;
                 let summary = format!(
                     "Daily P&L: ${:.2} | Trades: {} | Wins: {} | Losses: {} | Equity: ${:.2}",
                     portfolio.daily_pnl,
@@ -49,7 +49,7 @@ impl Agent for OutcomeLoggerAgent {
                     portfolio.total_equity
                 );
                 let key = format!("summary/{}", Utc::now().timestamp());
-                let _ = self.state.memory.store_decision(&key, &summary);
+                let _ = self.state.agent_memory.memory.store_decision(&key, &summary);
                 println!("[OutcomeLogger] {}", summary);
                 Ok(AgentOutput::Done)
             }

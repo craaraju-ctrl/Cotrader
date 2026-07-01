@@ -37,7 +37,8 @@ pub fn render_backtest(f: &mut Frame, area: Rect, app: &AppState) {
         return;
     }
 
-    let cache = data.unwrap();
+    // SAFETY: data was checked for None above via data.is_none() guard
+    let Some(cache) = data else { return; };
 
     let trades = cache
         .get("total_trades")

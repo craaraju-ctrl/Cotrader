@@ -167,7 +167,7 @@ impl ReconciliationEngine {
         };
 
         // 1. Get broker positions
-        let broker = self.state.broker_registry.active_broker().await;
+        let broker = self.state.portfolio_store.broker_registry.active_broker().await;
         let broker_positions = match broker.get_positions().await {
             Ok(p) => p,
             Err(e) => {
@@ -180,7 +180,7 @@ impl ReconciliationEngine {
 
         // 2. Get local positions
         let local_positions: Vec<Position> = {
-            let portfolio = self.state.portfolio.read().await;
+            let portfolio = self.state.portfolio_store.portfolio.read().await;
             let mut positions = Vec::new();
             for pos in &portfolio.open_positions {
                 positions.push(Position {
@@ -308,7 +308,7 @@ impl ReconciliationEngine {
                         });
 
                         // Update local qty to match broker (broker is source of truth)
-                        let mut portfolio = self.state.portfolio.write().await;
+                        let mut portfolio = self.state.portfolio_store.portfolio.write().await;
                         if let Some(lp) = portfolio
                             .open_positions
                             .iter_mut()
@@ -338,14 +338,13 @@ impl ReconciliationEngine {
                             });
 
                             // Update local price to match broker
-                            if let Some(pnl) = self
-                                .state
-                                .portfolio
-                                .write()
-                                .await
-                                .open_positions
-                                .iter_mut()
-                                .find(|p| p.symbol == broker_pos.symbol)
+                            if let Some(pnl) = self                        .state
+                        .portfolio_store.portfolio
+                        .write()
+                        .await
+                        .open_positions
+                        .iter_mut()
+                        .find(|p| p.symbol == broker_pos.symbol)
                             {
                                 pnl.current_price = broker_pos.current_price;
                                 pnl.unrealized_pnl = match pnl.direction {

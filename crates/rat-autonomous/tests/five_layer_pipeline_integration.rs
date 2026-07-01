@@ -47,7 +47,7 @@ async fn setup(db_name: &str) -> (AutonomousOrchestrator, String) {
     let state = SharedState::new(memory, rules, config, &sqlite_db_path).expect("SharedState init");
     // Clear calendar events so red_folder Critical rule doesn't fire in tests
     // (SharedState::new calls generate_economic_calendar which populates today's events)
-    *state.calendar_events.write().await = Vec::new();
+    *state.market_data.calendar_events.write().await = Vec::new();
 
     let mut orch = AutonomousOrchestrator::new(state);
     orch.init_rat();
@@ -55,7 +55,7 @@ async fn setup(db_name: &str) -> (AutonomousOrchestrator, String) {
 }
 
 async fn seed_rich_ohlcv(state: &SharedState, symbol: &str, base_price: f64) {
-    let mut history = state.ohlcv_history.write().await;
+    let mut history = state.market_data.ohlcv_history.write().await;
     let mut bars = Vec::with_capacity(50);
     for i in 0..50 {
         let trend = base_price * (i as f64 * 0.005);
@@ -90,7 +90,7 @@ async fn seed_aggregated_signal(state: &SharedState, conviction: f64) {
         bearish_count: 1,
         neutral_count: 0,
     };
-    *state.last_aggregated_signal.write().await = Some(agg);
+    *state.agent_memory.last_aggregated_signal.write().await = Some(agg);
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -102,7 +102,7 @@ async fn test_full_pipeline_end_to_end() {
 
     seed_rich_ohlcv(&orch.state, "BTC", 65_000.0).await;
     seed_aggregated_signal(&orch.state, 0.85).await;
-    *orch.state.market_regime.write().await =
+    *orch.state.market_data.market_regime.write().await =
         Some(rat_autonomous::types::MarketRegime::TrendingBull);
 
     let result = orch.run_full_pipeline("BTC").await;
@@ -140,7 +140,7 @@ async fn test_full_pipeline_end_to_end() {
     }
 
     // COT chain should have entries from all layers
-    let cot_count = orch.state.cot_store.read().await.len();
+    let cot_count = orch.state.agent_memory.cot_store.read().await.len();
     assert!(
         cot_count > 0,
         "Should have COT entries from pipeline layers"
@@ -160,7 +160,7 @@ async fn test_gate_blocks_prevents_downstream() {
 
     // Disable trading → Critical rule blocks
     {
-        let mut portfolio = orch.state.portfolio.write().await;
+        let mut portfolio = orch.state.portfolio_store.portfolio.write().await;
         portfolio.trading_enabled = false;
     }
 
@@ -202,12 +202,12 @@ async fn test_gate_drawdown_blocks_before_identifier() {
 
     // Set drawdown > 2% (Critical)
     {
-        let mut portfolio = orch.state.portfolio.write().await;
+        let mut portfolio = orch.state.portfolio_store.portfolio.write().await;
         portfolio.max_drawdown_today = 0.025;
     }
 
     // Record COT entries before pipeline run
-    let cot_before = orch.state.cot_store.read().await.len();
+    let cot_before = orch.state.agent_memory.cot_store.read().await.len();
 
     let result = orch.run_full_pipeline("BTC").await;
     assert!(result.is_ok());
@@ -226,7 +226,7 @@ async fn test_gate_drawdown_blocks_before_identifier() {
     );
 
     // COT should have gate entry but NOT Identifier/Debate entries
-    let cot_after = orch.state.cot_store.read().await.len();
+    let cot_after = orch.state.agent_memory.cot_store.read().await.len();
     let new_entries = cot_after - cot_before;
     // Expect: pipeline_start + hard_rules_gate blocked = ~2 entries max
     // (NO identifier, NO verifier, NO debate, NO judge, NO execution entries)
@@ -255,7 +255,7 @@ async fn test_high_priority_overrides_medium() {
 
     // Set High rule (heat > 10%) + bear regime (Medium rule)
     {
-        let mut portfolio = orch.state.portfolio.write().await;
+        let mut portfolio = orch.state.portfolio_store.portfolio.write().await;
         portfolio.total_equity = 100_000.0;
         for i in 0..3 {
             portfolio.open_positions.push(OpenPosition {
@@ -273,7 +273,7 @@ async fn test_high_priority_overrides_medium() {
             });
         }
     }
-    *orch.state.market_regime.write().await =
+    *orch.state.market_data.market_regime.write().await =
         Some(rat_autonomous::types::MarketRegime::TrendingBear);
 
     // Run HardRulesGate directly to verify priority resolution
@@ -313,7 +313,7 @@ async fn test_deb_layer_with_new_indicators() {
 
     seed_rich_ohlcv(&orch.state, "SOL", 180.0).await;
     seed_aggregated_signal(&orch.state, 0.75).await;
-    *orch.state.market_regime.write().await =
+    *orch.state.market_data.market_regime.write().await =
         Some(rat_autonomous::types::MarketRegime::TrendingBull);
 
     let debate = rat_autonomous::debate_layer::DebateLayer::new(orch.state.clone());
@@ -386,13 +386,13 @@ async fn test_judge_vetoes_low_confidence() {
     seed_rich_ohlcv(&orch.state, "ETH", 3_500.0).await;
 
     // Bear regime raises Judge's confidence threshold to 0.60
-    *orch.state.market_regime.write().await =
+    *orch.state.market_data.market_regime.write().await =
         Some(rat_autonomous::types::MarketRegime::TrendingBear);
 
     // Low confluence + bear regime → weak debate signals
     // This creates conditions where synthesis confidence will be low
     {
-        let mut portfolio = orch.state.portfolio.write().await;
+        let mut portfolio = orch.state.portfolio_store.portfolio.write().await;
         portfolio.consecutive_losses = 3;
     }
 
@@ -430,12 +430,12 @@ async fn test_low_priority_warnings_dont_block() {
 
     seed_rich_ohlcv(&orch.state, "BTC", 65_000.0).await;
     seed_aggregated_signal(&orch.state, 0.85).await;
-    *orch.state.market_regime.write().await =
+    *orch.state.market_data.market_regime.write().await =
         Some(rat_autonomous::types::MarketRegime::TrendingBull);
 
     // Add 3 positions on BTC (Low: max_positions_per_symbol)
     {
-        let mut portfolio = orch.state.portfolio.write().await;
+        let mut portfolio = orch.state.portfolio_store.portfolio.write().await;
         for i in 0..3 {
             portfolio.open_positions.push(OpenPosition {
                 symbol: "BTC".to_string(),
@@ -494,10 +494,10 @@ async fn test_cot_chain_captures_all_layers() {
 
     seed_rich_ohlcv(&orch.state, "BTC", 65_000.0).await;
     seed_aggregated_signal(&orch.state, 0.85).await;
-    *orch.state.market_regime.write().await =
+    *orch.state.market_data.market_regime.write().await =
         Some(rat_autonomous::types::MarketRegime::TrendingBull);
 
-    let cot_before = orch.state.cot_store.read().await.len();
+    let cot_before = orch.state.agent_memory.cot_store.read().await.len();
 
     let result = orch.run_full_pipeline("BTC").await;
     assert!(
@@ -507,7 +507,7 @@ async fn test_cot_chain_captures_all_layers() {
     );
 
     let summary = result.unwrap();
-    let cot_after = orch.state.cot_store.read().await.len();
+    let cot_after = orch.state.agent_memory.cot_store.read().await.len();
     let new_entries = cot_after - cot_before;
 
     // A successful pipeline should produce COT entries for:
@@ -529,7 +529,7 @@ async fn test_cot_chain_captures_all_layers() {
     );
 
     // Verify the COT chain contains entries from multiple layers
-    let cot = orch.state.cot_store.read().await;
+    let cot = orch.state.agent_memory.cot_store.read().await;
     let chain_entries: Vec<_> = cot.iter().rev().take(new_entries).collect();
 
     let has_hard_rules = chain_entries
@@ -572,7 +572,7 @@ async fn test_pipeline_resilience_varied_conditions() {
     ];
 
     for (i, regime) in regimes.iter().enumerate() {
-        *orch.state.market_regime.write().await = *regime;
+        *orch.state.market_data.market_regime.write().await = *regime;
 
         let result = orch.run_full_pipeline("BTC").await;
         assert!(
@@ -615,7 +615,7 @@ async fn test_identifier_feeds_debate_context() {
 
     seed_rich_ohlcv(&orch.state, "SOL", 180.0).await;
     seed_aggregated_signal(&orch.state, 0.80).await;
-    *orch.state.market_regime.write().await =
+    *orch.state.market_data.market_regime.write().await =
         Some(rat_autonomous::types::MarketRegime::TrendingBull);
 
     // Run Identifier first to populate market state (patterns, pivots, confluence, etc.)
@@ -694,13 +694,14 @@ async fn test_medium_only_block_stops_pipeline() {
             close: 3500.0,
             volume: 100000.0,
         };
-        orch.state
-            .ohlcv_history
-            .write()
-            .await
-            .insert("ETH".to_string(), vec![bar; 101]);
+        orch.            state
+                .market_data
+                .ohlcv_history
+                .write()
+                .await
+                .insert("ETH".to_string(), vec![bar; 101]);
     }
-    *orch.state.market_regime.write().await =
+    *orch.state.market_data.market_regime.write().await =
         Some(rat_autonomous::types::MarketRegime::TrendingBear);
     seed_aggregated_signal(&orch.state, 0.25).await;
 

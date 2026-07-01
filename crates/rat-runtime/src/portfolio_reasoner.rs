@@ -25,7 +25,7 @@ impl PortfolioReasoner {
     }
 
     pub async fn should_open_new(&self, symbol: &str, direction: TradeDirection) -> Decision {
-        let portfolio = self.state.portfolio.read().await;
+        let portfolio = self.state.portfolio_store.portfolio.read().await;
         let equity = portfolio.total_equity;
         if equity <= 0.0 {
             return Decision::Reject {
@@ -110,7 +110,7 @@ impl PortfolioReasoner {
     /// Compute how much adding this symbol would improve portfolio diversification.
     /// Returns 0.0 to 1.0 where positive = beneficial diversification.
     pub async fn compute_diversification_benefit(&self, symbol: &str) -> f64 {
-        let portfolio = self.state.portfolio.read().await;
+        let portfolio = self.state.portfolio_store.portfolio.read().await;
         if portfolio.open_positions.is_empty() {
             return 1.0; // First position is always diversifying
         }

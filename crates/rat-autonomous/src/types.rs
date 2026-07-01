@@ -483,7 +483,7 @@ impl OhlcvSnapshot {
     /// Capture a snapshot from shared state at the current instant.
     pub async fn capture(symbol: &str, state: &crate::state::SharedState) -> Self {
         let bars = {
-            let hist = state.ohlcv_history.read().await;
+            let hist = state.market_data.ohlcv_history.read().await;
             hist.get(symbol).cloned().unwrap_or_default()
         };
         Self {

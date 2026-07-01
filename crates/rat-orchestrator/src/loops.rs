@@ -47,7 +47,7 @@ pub async fn fast_loop(
 
     loop {
         let now = Utc::now();
-        let assets = orchestrator.state.watchlist.read().await.clone();
+        let assets = orchestrator.state.market_data.watchlist.read().await.clone();
         let sem = rate_limiter.clone();
 
         // Parallel price fetching with rate limiting (max 5 concurrent)
@@ -64,7 +64,7 @@ pub async fn fast_loop(
             let handle = tokio::spawn(async move {
                 // Get latest known price for fallback
                 let old_price = {
-                    let portfolio = orch_clone.state.portfolio.read().await;
+                    let portfolio = orch_clone.state.portfolio_store.portfolio.read().await;
                     if let Some(pos) = portfolio
                         .open_positions
                         .iter()
@@ -72,7 +72,7 @@ pub async fn fast_loop(
                     {
                         pos.current_price
                     } else {
-                        let history = orch_clone.state.ohlcv_history.read().await;
+                        let history = orch_clone.state.market_data.ohlcv_history.read().await;
                         history
                             .get(sym.as_str())
                             .and_then(|h| h.last().map(|b| b.close))
@@ -119,11 +119,11 @@ pub async fn fast_loop(
                     "price": price,
                 })
                 .to_string();
-                let _ = orch_clone.state.update_tx.send(price_update);
+                let _ = orch_clone.state.io.update_tx.send(price_update);
 
                 // Update 1m OHLCV
                 {
-                    let mut history = orch_clone.state.ohlcv_history.write().await;
+                    let mut history = orch_clone.state.market_data.ohlcv_history.write().await;
                     let hist = history.entry(sym.clone()).or_default();
                     update_ohlcv_history(hist, price, &now_clone);
                 }
@@ -144,14 +144,14 @@ pub async fn fast_loop(
         // book instead of using fixed slippage. Throttled to ~30s to limit API
         // load; no-op (and zero API calls) unless realistic_paper_enabled.
         {
-            let engine = orchestrator.state.broker_registry.paper_engine();
+            let engine = orchestrator.state.portfolio_store.broker_registry.paper_engine();
             if engine.config.realistic_paper_enabled {
                 static LAST_DEPTH_REFRESH: AtomicU64 = AtomicU64::new(0);
                 let now_secs = Utc::now().timestamp().max(0) as u64;
                 let last = LAST_DEPTH_REFRESH.load(Ordering::Relaxed);
                 if now_secs.saturating_sub(last) >= 30 {
                     LAST_DEPTH_REFRESH.store(now_secs, Ordering::Relaxed);
-                    let symbols = orchestrator.state.watchlist.read().await.clone();
+                    let symbols = orchestrator.state.market_data.watchlist.read().await.clone();
                     for sym in symbols.into_iter().filter(|s| is_crypto_symbol(s)) {
                         match fetch_binance_depth(&client, &sym, 20).await {
                             Ok((bids, asks, update_id)) => {
@@ -172,7 +172,7 @@ pub async fn fast_loop(
         {
             let has_positions = orchestrator
                 .state
-                .portfolio
+                .portfolio_store.portfolio
                 .read()
                 .await
                 .open_positions
@@ -185,7 +185,7 @@ pub async fn fast_loop(
         // Portfolio snapshot and broadcast every 12 cycles (~1 min)
         let cycle_num = Utc::now().timestamp();
         if cycle_num % 60 < 6 {
-            let p = orchestrator.state.portfolio.read().await;
+            let p = orchestrator.state.portfolio_store.portfolio.read().await;
             let mut portfolio_update =
                 rat_autonomous::state::SharedState::portfolio_snapshot_json(&p);
             if let Some(obj) = portfolio_update.as_object_mut() {
@@ -221,7 +221,7 @@ pub async fn fast_loop(
                 .publish(&event_subjects::health("orchestrator"), &health)
                 .await;
 
-            let _ = orchestrator.state.update_tx.send(portfolio_update);
+            let _ = orchestrator.state.io.update_tx.send(portfolio_update);
             log_portfolio_snapshot(&p, &orchestrator.state).await;
         }
 
@@ -246,7 +246,7 @@ pub async fn medium_loop(
 
     loop {
         let now = Utc::now();
-        let assets = orchestrator.state.watchlist.read().await.clone();
+        let assets = orchestrator.state.market_data.watchlist.read().await.clone();
 
         // Execute due agent tasks (market_scan, goal_review, etc.)
         execute_due_tasks(&orchestrator, &now).await;
@@ -258,7 +258,7 @@ pub async fn medium_loop(
             let st = orchestrator.state.clone();
             let handle = tokio::spawn(async move {
                 let price = {
-                    let portfolio = st.portfolio.read().await;
+                    let portfolio = st.portfolio_store.portfolio.read().await;
                     if let Some(pos) = portfolio
                         .open_positions
                         .iter()
@@ -266,7 +266,7 @@ pub async fn medium_loop(
                     {
                         pos.current_price
                     } else {
-                        let history = st.ohlcv_history.read().await;
+                        let history = st.market_data.ohlcv_history.read().await;
                         history
                             .get(sym.as_str())
                             .and_then(|h| h.last().map(|b| b.close))
@@ -289,10 +289,10 @@ pub async fn medium_loop(
                         _ => None,
                     };
                     if let Some(regime) = inferred_regime {
-                        let current = *st.market_regime.read().await;
+                        let current = *st.market_data.market_regime.read().await;
                         if current != Some(regime) {
                             info!(regime = ?regime, hint = %snap.regime_hint, "Setting market regime");
-                            *st.market_regime.write().await = Some(regime);
+                            *st.market_data.market_regime.write().await = Some(regime);
                         }
                     }
 
@@ -317,8 +317,7 @@ pub async fn medium_loop(
             let sem = ohlcv_limiter.clone();
             ohlcv_handles.push(tokio::spawn(async move {
                 // Check if existing OHLCV is fresh enough to skip re-fetch
-                let needs_refresh = {
-                    let history = st.ohlcv_history.read().await;
+                let needs_refresh = {                        let history = st.market_data.ohlcv_history.read().await;
                     match history.get(sym.as_str()) {
                         Some(bars) if !bars.is_empty() => {
                             if let Some(last) = bars.last() {
@@ -345,7 +344,7 @@ pub async fn medium_loop(
                     fetch_yahoo_ohlcv(&cl, &sym, "1m", "7d").await.ok()?
                 };
                 if !bars.is_empty() {
-                    st.ohlcv_history.write().await.insert(sym, bars);
+                    st.market_data.ohlcv_history.write().await.insert(sym, bars);
                 }
                 Some(())
             }));
@@ -354,51 +353,77 @@ pub async fn medium_loop(
             let _ = handle.await;
         }
 
-        // ═══ STEP 2: Run pipeline SEQUENTIALLY (one symbol at a time) ═══
-        // Parallel runs caused LLM contention, portfolio races, and wrong results.
-        for symbol in assets.clone() {
+        // ═══ STEP 2: Run pipeline CONCURRENTLY (up to 3 symbols at a time) ═══
+        // The global PIPELINE_SEM (3 permits) + IN_FLIGHT dedup in
+        // pipeline_runner.rs prevent overload and re-entry. Each symbol runs
+        // independently; the semaphore prevents LLM/provider overload.
+        // Staggered start spreads the initial burst across ~1s.
+        let pipeline_limiter = Arc::new(Semaphore::new(3));
+        let mut pipeline_handles = Vec::with_capacity(assets.len());
+        for (i, symbol) in assets.iter().enumerate() {
             let sym = symbol.clone();
-            info!(symbol = %sym, "Agentic pipeline starting");
+            let orch = orchestrator.clone();
+            let cl = client.clone();
+            let bus_clone = bus.clone();
+            let limiter = pipeline_limiter.clone();
+            // Stagger start: (i % 100) * 10ms = up to 990ms spread
+            let stagger_ms = (i as u64 % 100) * 10;
 
-            let outcome = rat_autonomous::pipeline_runner::run_single_quiet(
-                &orchestrator,
-                &client,
-                &sym,
-                true, // quiet=true: skip per-agent COT for automated runs
-            )
-            .await;
-            let report = &outcome.report;
-
-            if report.executed {
-                info!(symbol = %sym, reason = %report.reason, "Trade EXECUTED");
-                if let Some(ref summary) = outcome.summary {
-                    capture_trade_episode(&orchestrator, summary).await;
-                    if let Some(ref signal) = summary.final_signal {
-                        let signal_event = RatEvent::Signal(rat_eventbus::SignalEvent {
-                            symbol: signal.symbol.clone(),
-                            action: if signal.direction == rat_core::TradeDirection::Long {
-                                "BUY".to_string()
-                            } else {
-                                "SELL".to_string()
-                            },
-                            entry_price: signal.entry_price,
-                            stop_loss: signal.stop_loss,
-                            take_profit: signal.take_profit,
-                            confidence: signal.confidence_score,
-                            reasoning: signal.reasoning.clone(),
-                            source: "pipeline".to_string(),
-                            timestamp_micros: chrono::Utc::now().timestamp_micros(),
-                        });
-                        let _ = bus
-                            .publish(&event_subjects::signal(&sym), &signal_event)
-                            .await;
-                    }
+            pipeline_handles.push(tokio::spawn(async move {
+                // Stagger to avoid thundering herd on first cycle
+                if stagger_ms > 0 {
+                    tokio::time::sleep(Duration::from_millis(stagger_ms)).await;
                 }
-            } else if report.success {
-                info!(symbol = %sym, action = %report.action, reason = %report.reason, "Pipeline hold");
-            } else {
-                warn!(symbol = %sym, error = ?report.error, "Pipeline error");
-            }
+                // Acquire pipeline permit (max 3 concurrent)
+                let _permit = match limiter.acquire().await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+
+                let outcome = rat_autonomous::pipeline_runner::run_single_quiet(
+                    &orch,
+                    &cl,
+                    &sym,
+                    true,
+                )
+                .await;
+                let report = &outcome.report;
+
+                if report.executed {
+                    info!(symbol = %sym, reason = %report.reason, "Trade EXECUTED");
+                    if let Some(ref summary) = outcome.summary {
+                        capture_trade_episode(&orch, summary).await;
+                        if let Some(ref signal) = summary.final_signal {
+                            let signal_event = RatEvent::Signal(rat_eventbus::SignalEvent {
+                                symbol: signal.symbol.clone(),
+                                action: if signal.direction == rat_core::TradeDirection::Long {
+                                    "BUY".to_string()
+                                } else {
+                                    "SELL".to_string()
+                                },
+                                entry_price: signal.entry_price,
+                                stop_loss: signal.stop_loss,
+                                take_profit: signal.take_profit,
+                                confidence: signal.confidence_score,
+                                reasoning: signal.reasoning.clone(),
+                                source: "pipeline".to_string(),
+                                timestamp_micros: chrono::Utc::now().timestamp_micros(),
+                            });
+                            let _ = bus_clone
+                                .publish(&event_subjects::signal(&sym), &signal_event)
+                                .await;
+                        }
+                    }
+                } else if report.success {
+                    info!(symbol = %sym, action = %report.action, reason = %report.reason, "Pipeline hold");
+                } else {
+                    warn!(symbol = %sym, error = ?report.error, "Pipeline error");
+                }
+            }));
+        }
+        // Wait for all pipeline tasks to complete before moving to STEP 3
+        for handle in pipeline_handles {
+            let _ = handle.await;
         }
 
         // Fetch and summarize news for all symbols
@@ -407,17 +432,18 @@ pub async fn medium_loop(
             let c = client.clone();
             let st = orchestrator.state.clone();
             tokio::spawn(async move {
-                let fetcher = rat_core::NewsFetcher::new(c, (*st.config).clone());
+                let fetcher = rat_core::NewsFetcher::new(c, (*st.io.config).clone());
                 match fetcher.fetch_headlines(&sym).await {
                     Ok(headlines) if !headlines.is_empty() => {
-                        let summary = st.llm.summarize_news(&headlines, &sym).await;
+                        let headline_strings: Vec<String> = headlines.iter().map(|h| h.title.clone()).collect();
+                        let summary = st.io.llm.summarize_news(&headline_strings, &sym).await;
                         let ctx = rat_core::NewsContext {
                             symbol: sym.clone(),
                             headlines,
                             summary,
                             fetched_at: Utc::now(),
                         };
-                        st.latest_news.write().await.insert(sym, ctx);
+                        st.agent_memory.latest_news.write().await.insert(sym, ctx);
                     }
                     Ok(_) => {}
                     Err(e) => warn!(symbol = %sym, error = %e, "Failed to fetch news"),
@@ -476,13 +502,13 @@ pub async fn slow_loop(
                 info!("Rebuilding knowledge graph...");
                 state.rebuild_knowledge_graph().await;
                 {
-                    let kg = state.knowledge_graph.read().await;
+                    let kg = state.agent_memory.knowledge_graph.read().await;
                     info!(nodes = kg.node_count(), edges = kg.edge_count(), "Knowledge graph rebuilt");
                 }
 
                 // 1. Run deep reflection on all recent episodes with outcomes
                 let since_ts = (Utc::now() - chrono::Duration::days(2)).timestamp();
-                let stored = state.memory.load_episodes_since(since_ts).unwrap_or_default();
+                let stored = state.agent_memory.memory.load_episodes_since(since_ts).unwrap_or_default();
                 info!(count = stored.len(), "Reviewing recent episodes...");
 
                 let mut reflected = 0;
@@ -490,7 +516,7 @@ pub async fn slow_loop(
                     if let Ok(mut episode) = serde_json::from_str::<TradingEpisode>(json) {
                         if episode.outcome.is_some() && episode.reflection.is_none() {
                             let reflection = orchestrator.reflector
-                                .deep_reflect_on_episode(&episode, &state.llm)
+                                .deep_reflect_on_episode(&episode)
                                 .await
                                 .unwrap_or_else(|e| rat_core::PostTradeReflection {
                                     timestamp: Utc::now(),
@@ -504,7 +530,7 @@ pub async fn slow_loop(
                                 });
                             episode.reflection = Some(reflection);
                             if let Ok(updated_json) = serde_json::to_string(&episode) {
-                                let _ = state.memory.store_episode(ep_id, &updated_json);
+                                let _ = state.agent_memory.memory.store_episode(ep_id, &updated_json);
                             }
                             reflected += 1;
                         }
@@ -524,7 +550,7 @@ pub async fn slow_loop(
                     Err(e) => warn!(error = %e, "Meta-review failed"),
                 }
 
-                let recent_regrets = state.episode_store
+                let recent_regrets = state.agent_memory.episode_store
                     .fetch_recent_regret_scores(20)
                     .unwrap_or_default();
                 if recent_regrets.len() >= 15 {
@@ -533,12 +559,12 @@ pub async fn slow_loop(
                         warn!(avg_regret = avg_regret, "High avg regret detected — running EvolvedMetaControl");
 
                         let meta_evolved = rat_autonomous::meta_control::EvolvedMetaControl::new(
-                            (*state.episode_store).clone(), 0.05, 1,
+                            (*state.agent_memory.episode_store).clone(), 0.05, 1,
                         );
                         let current_config = rat_autonomous::risk_guardian::RiskGuardianConfig::default_fallback();
 
                         let current_regime = {
-                            let regime = state.market_regime.read().await;
+                            let regime = state.market_data.market_regime.read().await;
                             match *regime {
                                 Some(rat_autonomous::types::MarketRegime::TrendingBull) =>
                                     rat_autonomous::regime_classifier::MarketRegime::TrendingBull,
@@ -570,10 +596,17 @@ pub async fn slow_loop(
                     }
                 }
 
+                // ── Automated Self-Evolution Background Validation ────────
+                // Runs periodic trend analysis on closed trades to measure
+                // compounding improvement (regret trend, win rate trend).
+                let evolution_result =
+                    rat_autonomous::self_evolution::run_background_validation(&state).await;
+                info!(result = %evolution_result, "Self-evolution background analysis");
+
                 // Check for RULE_REVERT
                 if recent_regrets.len() >= 15 {
                     let meta_evolved = rat_autonomous::meta_control::EvolvedMetaControl::new(
-                        (*state.episode_store).clone(), 0.05, 1,
+                        (*state.agent_memory.episode_store).clone(), 0.05, 1,
                     );
                     let current_config = rat_autonomous::risk_guardian::RiskGuardianConfig::default_fallback();
                     if let Some(_restored_config) = meta_evolved.check_and_revert_if_degraded(&current_config) {
@@ -584,13 +617,13 @@ pub async fn slow_loop(
                 }
 
                 // 3. Update agent market summary
-                let p = state.portfolio.read().await;
+                let p = state.portfolio_store.portfolio.read().await;
                 let summary = format!(
                     "End of day: P&L {:+.2} | {} trades | {} wins / {} losses | Equity: ${:.2}",
                     p.daily_pnl, p.total_trades_today, p.winning_trades_today, p.losing_trades_today, p.total_equity
                 );
                 drop(p);
-                let mut market_summary = state.agent_market_summary.write().await;
+                let mut market_summary = state.agent_memory.agent_market_summary.write().await;
                 *market_summary = summary.clone();
                 info!(summary = %summary, "Agent market summary updated");
             }
@@ -608,7 +641,7 @@ async fn capture_trade_episode(
         let now = Utc::now();
         let ep_id = format!("ep/{}/{}", signal.symbol, now.timestamp());
 
-        let regime = orchestrator.state.market_regime.read().await;
+        let regime = orchestrator.state.market_data.market_regime.read().await;
         let regime_str = match *regime {
             Some(rat_autonomous::types::MarketRegime::TrendingBull) => "TrendingBull",
             Some(rat_autonomous::types::MarketRegime::TrendingBear) => "TrendingBear",
@@ -619,12 +652,12 @@ async fn capture_trade_episode(
         };
         drop(regime);
 
-        let goals = orchestrator.state.trading_goals.read().await;
+        let goals = orchestrator.state.portfolio_store.trading_goals.read().await;
         let mode_str = format!("{:?}", goals.mode);
         drop(goals);
 
         let mtf_summary = {
-            let mtf = orchestrator.state.multi_timeframe_data.read().await;
+            let mtf = orchestrator.state.market_data.multi_timeframe_data.read().await;
             match mtf.get(&signal.symbol) {
                 Some(tf_data) => tf_data
                     .iter()
@@ -635,7 +668,7 @@ async fn capture_trade_episode(
             }
         };
 
-        let portfolio = orchestrator.state.portfolio.read().await;
+        let portfolio = orchestrator.state.portfolio_store.portfolio.read().await;
 
         let episode = TradingEpisode {
             episode_id: ep_id.clone(),
@@ -692,19 +725,19 @@ async fn capture_trade_episode(
         drop(portfolio);
 
         if let Ok(json) = serde_json::to_string(&episode) {
-            let _ = orchestrator.state.memory.store_episode(&ep_id, &json);
+            let _ = orchestrator.state.agent_memory.memory.store_episode(&ep_id, &json);
             orchestrator
                 .state
-                .latest_episode
+                .agent_memory.latest_episode
                 .write()
                 .await
                 .insert(signal.symbol.clone(), ep_id.clone());
             info!(episode_id = %ep_id, "Stored episode");
 
             {
-                let mtf_analyses = orchestrator.state.multi_tf_analyses.read().await;
+                let mtf_analyses = orchestrator.state.market_data.multi_tf_analyses.read().await;
                 if let Some(tf_analyses) = mtf_analyses.get(&signal.symbol) {
-                    let store = &orchestrator.state.episode_store;
+                    let store = &orchestrator.state.agent_memory.episode_store;
                     for (_tf_label, analysis) in tf_analyses.iter() {
                         let pattern_count = analysis.patterns.len();
                         let _ = store.insert_mtf_snapshot(
@@ -735,14 +768,13 @@ async fn capture_trade_episode(
 
             let summary = episode.market_state.to_summary();
             let store_text = format!("{} {}", summary, signal.reasoning);
-            let mut vm = orchestrator.state.vector_memory.write().await;
+            let mut vm = orchestrator.state.agent_memory.vector_memory.write().await;
             if let Err(e) = vm
                 .store(
                     &ep_id,
                     &signal.symbol,
                     &store_text,
                     None,
-                    &orchestrator.state.llm,
                 )
                 .await
             {
@@ -885,38 +917,115 @@ pub async fn fetch_binance_24h_ticker(
 
 fn symbol_to_coingecko_id(symbol: &str) -> String {
     match symbol {
+        // Layer1
         "BTC" => "bitcoin".to_string(),
         "ETH" => "ethereum".to_string(),
         "SOL" => "solana".to_string(),
         "BNB" => "binancecoin".to_string(),
-        "XRP" => "ripple".to_string(),
         "ADA" => "cardano".to_string(),
-        "DOGE" => "dogecoin".to_string(),
         "AVAX" => "avalanche-2".to_string(),
-        "MATIC" => "matic-network".to_string(),
-        "LINK" => "chainlink".to_string(),
         "DOT" => "polkadot".to_string(),
-        "ATOM" => "cosmos".to_string(),
-        "LTC" => "litecoin".to_string(),
-        "BCH" => "bitcoin-cash".to_string(),
-        "UNI" => "uniswap".to_string(),
-        "AAVE" => "aave".to_string(),
+        "MATIC" => "matic-network".to_string(),
         "NEAR" => "near".to_string(),
+        "ATOM" => "cosmos".to_string(),
+        "FTM" => "fantom".to_string(),
+        "ALGO" => "algorand".to_string(),
+        "HBAR" => "hedera-hashgraph".to_string(),
         "ICP" => "internet-computer".to_string(),
-        "FIL" => "filecoin".to_string(),
+        "XTZ" => "tezos".to_string(),
+        "EGLD" => "elrond-erd-2".to_string(),
+        "FLOW" => "flow".to_string(),
+        "MINA" => "mina-protocol".to_string(),
+        "KSM" => "kusama".to_string(),
+        "SEI" => "sei-network".to_string(),
         "APT" => "aptos".to_string(),
-        "ARB" => "arbitrum".to_string(),
-        "OP" => "optimism".to_string(),
         "SUI" => "sui".to_string(),
         "INJ" => "injective-protocol".to_string(),
-        "TIA" => "celestia".to_string(),
-        "SEI" => "sei-network".to_string(),
-        "PEPE" => "pepe".to_string(),
-        "WIF" => "dogwifcoin".to_string(),
-        "SHIB" => "shiba-inu".to_string(),
         "TON" => "the-open-network".to_string(),
         "TRX" => "tron".to_string(),
+        // DeFi
+        "UNI" => "uniswap".to_string(),
+        "AAVE" => "aave".to_string(),
+        "CRV" => "curve-dao-token".to_string(),
+        "CAKE" => "pancakeswap-token".to_string(),
+        "SUSHI" => "sushi".to_string(),
+        "COMP" => "compound-governance-token".to_string(),
+        "MKR" => "maker".to_string(),
+        "SNX" => "havven".to_string(),
+        "BAL" => "balancer".to_string(),
+        "YFI" => "yearn-finance".to_string(),
+        "LDO" => "lido-dao".to_string(),
+        "RPL" => "rocket-pool".to_string(),
+        "FXS" => "frax-share".to_string(),
+        "CVX" => "convex-finance".to_string(),
+        "GMX" => "gmx".to_string(),
+        "GNS" => "gains-network".to_string(),
+        "JOE" => "joe".to_string(),
+        // Payments / Privacy
+        "XRP" => "ripple".to_string(),
+        "LTC" => "litecoin".to_string(),
         "XLM" => "stellar".to_string(),
+        "DASH" => "dash".to_string(),
+        "ZEC" => "zcash".to_string(),
+        "XMR" => "monero".to_string(),
+        "NANO" => "nano".to_string(),
+        // Oracles / Infra
+        "LINK" => "chainlink".to_string(),
+        "GRT" => "the-graph".to_string(),
+        "BAND" => "band-protocol".to_string(),
+        "API3" => "api3".to_string(),
+        "TRB" => "tellor".to_string(),
+        "UMA" => "uma".to_string(),
+        // Gaming / Metaverse
+        "AXS" => "axie-infinity".to_string(),
+        "SAND" => "the-sandbox".to_string(),
+        "MANA" => "decentraland".to_string(),
+        "GALA" => "gala".to_string(),
+        "ENJ" => "enjincoin".to_string(),
+        "CHZ" => "chiliz".to_string(),
+        "ILV" => "illuvium".to_string(),
+        "YGG" => "yield-guild-games".to_string(),
+        "IMX" => "immutable-x".to_string(),
+        "RON" => "ronin".to_string(),
+        // Meme
+        "DOGE" => "dogecoin".to_string(),
+        "SHIB" => "shiba-inu".to_string(),
+        "PEPE" => "pepe".to_string(),
+        "WIF" => "dogwifcoin".to_string(),
+        "BONK" => "bonk".to_string(),
+        "FLOKI" => "floki".to_string(),
+        "BABYDOGE" => "baby-doge-coin".to_string(),
+        "ELON" => "dogelon-mars".to_string(),
+        // Layer2
+        "ARB" => "arbitrum".to_string(),
+        "OP" => "optimism".to_string(),
+        "LRC" => "loopring".to_string(),
+        "BOBA" => "boba-network".to_string(),
+        "METIS" => "metis-token".to_string(),
+        "CTSI" => "cartesi".to_string(),
+        // Storage / Compute
+        "FIL" => "filecoin".to_string(),
+        "AR" => "arweave".to_string(),
+        "STORJ" => "storj".to_string(),
+        "AKT" => "akash-network".to_string(),
+        // Exchange
+        "CRO" => "crypto-com-chain".to_string(),
+        "OKB" => "okb".to_string(),
+        "KCS" => "kucoin-shares".to_string(),
+        "LEO" => "leo-token".to_string(),
+        "HT" => "huobi-token".to_string(),
+        // AI / Data
+        "FET" => "fetch-ai".to_string(),
+        "AGIX" => "singularitynet".to_string(),
+        "OCEAN" => "ocean-protocol".to_string(),
+        "RNDR" => "render-token".to_string(),
+        "TAO" => "bittensor".to_string(),
+        "ARKM" => "arkham".to_string(),
+        "NMR" => "numeraire".to_string(),
+        "TRAC" => "origintrail".to_string(),
+        "ORAI" => "oraichain-token".to_string(),
+        "MDT" => "measurable-data-token".to_string(),
+        // Fallback
         other => other.to_lowercase(),
     }
 }
@@ -1147,7 +1256,7 @@ async fn fetch_multi_tf_binance(
     symbol: &str,
     state: &SharedState,
 ) -> Result<Vec<TimeframeData>, Box<dyn std::error::Error + Send + Sync>> {
-    let equity = { state.portfolio.read().await.total_equity };
+    let equity = { state.portfolio_store.portfolio.read().await.total_equity };
     let mut results = Vec::new();
     for (interval, limit, _weight, label) in ALL_TIMEFRAMES {
         match rat_core::fetch_klines(client, symbol, interval, *limit).await {
@@ -1194,7 +1303,7 @@ async fn fetch_multi_tf_yahoo(
     symbol: &str,
     state: &SharedState,
 ) -> Result<Vec<TimeframeData>, Box<dyn std::error::Error + Send + Sync>> {
-    let equity = { state.portfolio.read().await.total_equity };
+    let equity = { state.portfolio_store.portfolio.read().await.total_equity };
     let mut results = Vec::new();
 
     // Map each of the 11 timeframes to (yahoo_interval, yahoo_range)
@@ -1259,7 +1368,7 @@ async fn fetch_multi_tf_yahoo(
 async fn compute_mtf_analysis(symbol: &str, state: &SharedState) {
     let tf_data_map = {
         state
-            .multi_timeframe_data
+            .market_data.multi_timeframe_data
             .read()
             .await
             .get(symbol)
@@ -1390,12 +1499,12 @@ async fn compute_mtf_analysis(symbol: &str, state: &SharedState) {
     };
 
     state
-        .multi_tf_analyses
+        .market_data.multi_tf_analyses
         .write()
         .await
         .insert(symbol.to_string(), tf_analyses);
     state
-        .multi_tf_aggregate
+        .market_data.multi_tf_aggregate
         .write()
         .await
         .insert(symbol.to_string(), aggregate);
@@ -1427,7 +1536,7 @@ pub async fn refresh_multi_tf(assets: &[String], client: &reqwest::Client, state
             };
             if !tf_data.is_empty() {
                 tf_orch
-                    .multi_timeframe_data
+                    .market_data.multi_timeframe_data
                     .write()
                     .await
                     .insert(tf_symbol.clone(), tf_data);
@@ -1458,7 +1567,7 @@ pub async fn update_multi_tf_data(
     if !tf_data.is_empty() {
         orchestrator
             .state
-            .multi_timeframe_data
+            .market_data.multi_timeframe_data
             .write()
             .await
             .insert(symbol.to_string(), tf_data);
@@ -1469,7 +1578,7 @@ async fn execute_due_tasks(
     orchestrator: &AutonomousOrchestrator,
     now: &chrono::DateTime<chrono::Utc>,
 ) {
-    let tasks = orchestrator.state.agent_tasks.read().await;
+    let tasks = orchestrator.state.io.agent_tasks.read().await;
     let due_tasks: Vec<(usize, String)> = tasks
         .iter()
         .enumerate()
@@ -1488,7 +1597,7 @@ async fn execute_due_tasks(
                 let _ = orchestrator.execution.run(None).await;
             }
             "portfolio_review" => {
-                let p = orchestrator.state.portfolio.read().await;
+                let p = orchestrator.state.portfolio_store.portfolio.read().await;
                 info!(
                     pnl = p.daily_pnl,
                     trades = p.total_trades_today,
@@ -1497,8 +1606,8 @@ async fn execute_due_tasks(
                 drop(p);
             }
             "goal_review" => {
-                let mut goals = orchestrator.state.trading_goals.write().await;
-                let p = orchestrator.state.portfolio.read().await;
+                let mut goals = orchestrator.state.portfolio_store.trading_goals.write().await;
+                let p = orchestrator.state.portfolio_store.portfolio.read().await;
                 goals.recalculate_mode(p.daily_pnl_pct, p.consecutive_losses, p.total_trades_today);
                 info!(mode = ?goals.mode, daily_pnl_pct = p.daily_pnl_pct * 100.0, "Trading goals recalibrated");
                 drop(p);
@@ -1506,7 +1615,7 @@ async fn execute_due_tasks(
             }
             _ => {}
         }
-        let mut tasks = orchestrator.state.agent_tasks.write().await;
+        let mut tasks = orchestrator.state.io.agent_tasks.write().await;
         if idx < tasks.len() {
             tasks[idx].last_run = Some(*now);
         }
@@ -1514,20 +1623,20 @@ async fn execute_due_tasks(
 }
 
 async fn recalibrate_goals(orchestrator: &AutonomousOrchestrator) {
-    let mut goals = orchestrator.state.trading_goals.write().await;
-    let p = orchestrator.state.portfolio.read().await;
+    let mut goals = orchestrator.state.portfolio_store.trading_goals.write().await;
+    let p = orchestrator.state.portfolio_store.portfolio.read().await;
     goals.recalculate_mode(p.daily_pnl_pct, p.consecutive_losses, p.total_trades_today);
 }
 
 pub async fn save_portfolio_state(state: &SharedState) {
-    let portfolio = state.portfolio.read().await;
+    let portfolio = state.portfolio_store.portfolio.read().await;
     if let Ok(json) = serde_json::to_string(&*portfolio) {
-        let _ = state.memory.store_state("portfolio/state", &json);
+        let _ = state.agent_memory.memory.store_state("portfolio/state", &json);
     }
 }
 
 async fn log_portfolio_snapshot(portfolio: &PortfolioState, state: &SharedState) {
-    let goals = state.trading_goals.read().await;
+    let goals = state.portfolio_store.trading_goals.read().await;
     info!(
         equity = portfolio.total_equity,
         cash = portfolio.cash_balance,
@@ -1544,8 +1653,8 @@ async fn log_portfolio_snapshot(portfolio: &PortfolioState, state: &SharedState)
 }
 
 async fn log_portfolio_snapshot_full(orchestrator: &AutonomousOrchestrator) {
-    let p = orchestrator.state.portfolio.read().await;
-    let goals = orchestrator.state.trading_goals.read().await;
+    let p = orchestrator.state.portfolio_store.portfolio.read().await;
+    let goals = orchestrator.state.portfolio_store.trading_goals.read().await;
     info!(
         equity = p.total_equity,
         cash = p.cash_balance,

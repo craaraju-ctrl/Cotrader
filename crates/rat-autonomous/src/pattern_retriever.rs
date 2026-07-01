@@ -24,13 +24,13 @@ impl PatternRetrieverAgent {
 
         // Get current market context for similarity matching
         let (confluence, regime) = {
-            let signals = self.state.last_signals.read().await;
+            let signals = self.state.rule_engine.last_signals.read().await;
             let conf = signals
                 .iter()
                 .rfind(|s| s.symbol == symbol)
                 .map(|s| s.confluence_score)
                 .unwrap_or(0.5);
-            let r = self.state.market_regime.read().await;
+            let r = self.state.market_data.market_regime.read().await;
             let regime_str = match *r {
                 Some(crate::types::MarketRegime::TrendingBull) => "TrendingBull",
                 Some(crate::types::MarketRegime::TrendingBear) => "TrendingBear",
@@ -45,7 +45,7 @@ impl PatternRetrieverAgent {
         // ── Primary: query SQLite for historically similar setups ────────────
         let similar = self
             .state
-            .episode_store
+            .agent_memory.episode_store
             .find_similar_episodes(symbol, &regime, confluence, 10)
             .unwrap_or_default();
 
@@ -98,7 +98,7 @@ impl PatternRetrieverAgent {
         }
 
         // ── Fallback: in-memory signal patterns (when history is sparse) ────
-        let signals = self.state.last_signals.read().await;
+        let signals = self.state.rule_engine.last_signals.read().await;
         let relevant: Vec<&TradeSignal> = signals.iter().filter(|s| s.symbol == symbol).collect();
 
         if !relevant.is_empty() {
@@ -165,7 +165,7 @@ impl PatternRetrieverAgent {
         let memory_key = format!("patterns/{}/{}", symbol, key);
         let timestamped = format!("[{}] {}", Utc::now().to_rfc3339(), data);
         self.state
-            .memory
+            .agent_memory.memory
             .store_decision(&memory_key, &timestamped)?;
         println!("[PatternRetriever] 💾 Stored pattern: {}", memory_key);
         Ok(())
@@ -203,7 +203,7 @@ impl Agent for PatternRetrieverAgent {
             }
             _ => {
                 // Default: scan all symbols in watchlist for patterns
-                let watchlist = self.state.watchlist.read().await;
+                let watchlist = self.state.market_data.watchlist.read().await;
                 for sym in watchlist.iter() {
                     let _ = self.find_patterns(sym).await;
                 }

@@ -197,7 +197,7 @@ impl RuntimeEngine {
 
                 // Check for hard stop
                 {
-                    let portfolio = hb_state.portfolio.read().await;
+                    let portfolio = hb_state.portfolio_store.portfolio.read().await;
                     let dd = portfolio.max_drawdown_today.abs() / portfolio.total_equity.max(1.0);
                     if dd * 100.0 > 15.0 {
                         tracing::error!("⚠ HARD STOP: Drawdown {:.1}% exceeds limit.", dd * 100.0);
@@ -205,7 +205,7 @@ impl RuntimeEngine {
                 }
 
                 // Log portfolio summary
-                let p = hb_state.portfolio.read().await;
+                let p = hb_state.portfolio_store.portfolio.read().await;
                 tracing::info!(
                     "[Portfolio] Equity: ${:.2} | Positions: {} | P&L: ${:.2} | DD: {:.2}%",
                     p.total_equity,
@@ -231,8 +231,9 @@ impl RuntimeEngine {
                 {
                     let cache = cache_persist.lock().await;
                     // Sample current P&L and equity from portfolio before saving
-                    let portfolio = pnl_state.portfolio.read().await;
+                    let portfolio = pnl_state.portfolio_store.portfolio.read().await;
                     cache.record_pnl_snapshot(portfolio.daily_pnl);
+                    let portfolio = pnl_state.portfolio_store.portfolio.read().await;
                     cache.record_equity_snapshot(portfolio.total_equity);
                     cache.save();
                 }
@@ -271,7 +272,7 @@ impl RuntimeEngine {
 
                             // 1. Update OHLCV history (counter tracks bar rollover at ~1 min intervals)
                             {
-                                let mut history = state.ohlcv_history.write().await;
+                                let mut history = state.market_data.ohlcv_history.write().await;
                                 let hist = history.entry(symbol.clone()).or_default();
                                 let now_rfc = timestamp.to_rfc3339();
                                 let tick_count =
@@ -281,7 +282,7 @@ impl RuntimeEngine {
 
                             // 2. Update world model with real price change magnitude
                             {
-                                let hist = state.ohlcv_history.read().await;
+                                let hist = state.market_data.ohlcv_history.read().await;
                                 let prev_close = hist
                                     .get(&symbol)
                                     .and_then(|h| h.iter().rev().nth(1).map(|b| b.close))
@@ -357,7 +358,7 @@ impl RuntimeEngine {
 
         // Build summary
         {
-            let portfolio = self.orchestrator.state.portfolio.read().await;
+            let portfolio = self.orchestrator.state.portfolio_store.portfolio.read().await;
             self.total_pnl = portfolio.daily_pnl;
             let dd = portfolio.max_drawdown_today.abs() / portfolio.total_equity.max(1.0);
             self.max_drawdown = dd;
@@ -469,7 +470,7 @@ impl RuntimeEngine {
                         close: bar.close,
                         volume: bar.volume,
                     };
-                    let mut history = self.orchestrator.state.ohlcv_history.write().await;
+                    let mut history = self.orchestrator.state.market_data.ohlcv_history.write().await;
                     for sym in &self.symbols {
                         let hist = history.entry(sym.clone()).or_default();
                         hist.push(ohlcv_bar.clone());
@@ -482,7 +483,7 @@ impl RuntimeEngine {
                 // Also set the market regime from the accumulated bars after each push
                 if bar_count == 30 {
                     // After 30 bars, infer a preliminary regime
-                    let history = self.orchestrator.state.ohlcv_history.read().await;
+                    let history = self.orchestrator.state.market_data.ohlcv_history.read().await;
                     for sym in &self.symbols {
                         if let Some(bars) = history.get(sym) {
                             if bars.len() >= 10 {
@@ -492,7 +493,7 @@ impl RuntimeEngine {
                                 let regime = rat_autonomous::helpers::estimate_market_regime(
                                     &prices, &highs, &lows,
                                 );
-                                *self.orchestrator.state.market_regime.write().await = Some(regime);
+                                *self.orchestrator.state.market_data.market_regime.write().await = Some(regime);
                                 tracing::info!(
                                     "[Backtest] Inferred regime for {}: {:?}",
                                     sym,
@@ -530,7 +531,7 @@ impl RuntimeEngine {
                 self.cycles_completed += 1;
 
                 // Update P&L tracking
-                let portfolio = self.orchestrator.state.portfolio.read().await;
+                let portfolio = self.orchestrator.state.portfolio_store.portfolio.read().await;
                 let dd = portfolio.max_drawdown_today.abs() / portfolio.total_equity.max(1.0);
                 self.max_drawdown = self.max_drawdown.max(dd);
 
@@ -555,7 +556,7 @@ impl RuntimeEngine {
 
         // Final P&L
         {
-            let portfolio = self.orchestrator.state.portfolio.read().await;
+            let portfolio = self.orchestrator.state.portfolio_store.portfolio.read().await;
             self.total_pnl = portfolio.daily_pnl;
         }
 
@@ -605,7 +606,7 @@ impl RuntimeEngine {
                         // ⚠️ MUST drop the write lock before acquiring the read lock
                         // to avoid a deadlock (tokio RwLock is not reentrant)
                         {
-                            let mut history = self.orchestrator.state.ohlcv_history.write().await;
+                            let mut history = self.orchestrator.state.market_data.ohlcv_history.write().await;
                             for sym in &self.symbols {
                                 let hist = history.entry(sym.clone()).or_default();
                                 hist.push(ohlcv_bar.clone());
@@ -617,7 +618,7 @@ impl RuntimeEngine {
 
                         // Infer regime at bar 30 (separate scope — no write lock held)
                         if i == 30 {
-                            let history = self.orchestrator.state.ohlcv_history.read().await;
+                            let history = self.orchestrator.state.market_data.ohlcv_history.read().await;
                             for sym in &self.symbols {
                                 if let Some(bars) = history.get(sym) {
                                     if bars.len() >= 10 {
@@ -629,7 +630,7 @@ impl RuntimeEngine {
                                             rat_autonomous::helpers::estimate_market_regime(
                                                 &prices, &highs, &lows,
                                             );
-                                        *self.orchestrator.state.market_regime.write().await =
+                                        *self.orchestrator.state.market_data.market_regime.write().await =
                                             Some(regime);
                                         tracing::info!(
                                             "[Validate] Inferred regime for {}: {:?}",
@@ -659,7 +660,7 @@ impl RuntimeEngine {
             tracing::info!(">>> INDUCING REGRET: tightening stop-loss and reducing position sizing to force trade exits");
             // Tighten rules to force high-regret outcomes
             {
-                let mut rules = self.orchestrator.state.rules.write().await;
+                let mut rules = self.orchestrator.state.rule_engine.rules.write().await;
                 // Halve max risk per trade to make positions smaller and tighter
                 rules.max_risk_per_trade *= 0.5;
                 // Reduce min_confluence_score to allow more trades through
@@ -675,8 +676,8 @@ impl RuntimeEngine {
         // ── Initialize the OutcomeProcessor for self-evolution tracking ───
         use rat_autonomous::execution_coordinator::init_outcome_processor;
         let _processor = init_outcome_processor(
-            (*self.orchestrator.state.episode_store).clone(),
-            (*self.orchestrator.state.episode_store).clone(),
+            (*self.orchestrator.state.agent_memory.episode_store).clone(),
+            (*self.orchestrator.state.agent_memory.episode_store).clone(),
         )
         .await;
 
@@ -1015,7 +1016,7 @@ impl RuntimeEngine {
 
         // Use the orchestrator's execution coordinator for position sizing
         let size = {
-            let portfolio = self.orchestrator.state.portfolio.read().await;
+            let portfolio = self.orchestrator.state.portfolio_store.portfolio.read().await;
             let equity = portfolio.total_equity;
             let risk_amount = equity * 0.02; // 2% risk per trade
             let stop_distance = (current_price - sl).abs();

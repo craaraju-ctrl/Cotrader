@@ -40,7 +40,7 @@ async fn setup_no_external_deps(db_name: &str) -> (AutonomousOrchestrator, Strin
     let rules = DisciplineRules::default();
     let state = SharedState::new(memory, rules, config, &sqlite_db_path).expect("SharedState init");
     // Clear calendar events so red_folder Critical rule doesn't block pipeline
-    *state.calendar_events.write().await = Vec::new();
+    *state.market_data.calendar_events.write().await = Vec::new();
 
     let mut orch = AutonomousOrchestrator::new(state);
     orch.init_rat();
@@ -63,7 +63,7 @@ async fn seed_aggregated_signal(state: &SharedState, symbol: &str) {
         bearish_count: 1,
         neutral_count: 0,
     };
-    let mut last_agg = state.last_aggregated_signal.write().await;
+    let mut last_agg = state.agent_memory.last_aggregated_signal.write().await;
     *last_agg = Some(agg);
     println!(
         "  📊 Seeded aggregated signal for {} with conviction=0.75",
@@ -73,7 +73,7 @@ async fn seed_aggregated_signal(state: &SharedState, symbol: &str) {
 
 /// Seed realistic OHLCV data with enough bars for RSI/MACD/ATR computation.
 async fn seed_rich_ohlcv(state: &SharedState, symbol: &str, base_price: f64) {
-    let mut history = state.ohlcv_history.write().await;
+    let mut history = state.market_data.ohlcv_history.write().await;
     let mut bars = Vec::with_capacity(50);
     for i in 0..50 {
         // Create a trending pattern: base_price + sinusoidal trend + noise
@@ -219,7 +219,7 @@ async fn test_identifier_with_kronos_down() {
     );
 
     // Verify Kronos forecast was stored as None (unavailable)
-    let forecast = orch.state.last_forecast.read().await;
+    let forecast = orch.state.market_data.last_forecast.read().await;
     assert!(
         forecast.is_none(),
         "Kronos forecast should be None when service is unreachable"
@@ -489,7 +489,7 @@ async fn test_all_16_agents_execute() {
     println!("  ✅ Identifier group (7 agents) completed");
 
     // Run Verifier (3 agents: risk_psych, risk_calc, reflector + 2 guardian: drawdown, overtrading)
-    let equity = orch.state.portfolio.read().await.total_equity;
+    let equity = orch.state.portfolio_store.portfolio.read().await.total_equity;
     let verifier_result = orch.rat().run_verifier("BTC", 65_000.0, equity, 2).await;
     assert!(
         verifier_result.is_ok(),
@@ -508,7 +508,7 @@ async fn test_all_16_agents_execute() {
     println!("  ✅ Executer group (3 agents) completed");
 
     // COT store should have entries from agents recording their work
-    let cot_count = orch.state.cot_store.read().await.len();
+    let cot_count = orch.state.agent_memory.cot_store.read().await.len();
     assert!(
         cot_count > 0,
         "Should have COT entries from agents, got {}",

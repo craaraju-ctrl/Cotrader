@@ -35,7 +35,7 @@ impl MetaControlAgent {
         // Regime-specific skill weight evolution.
         // Research shows that different skills perform better in different regimes.
         // This adjusts weights based on recent regime-specific accuracy.
-        let regime = *self.state.market_regime.read().await;
+        let regime = *self.state.market_data.market_regime.read().await;
         let regime_str = match &regime {
             Some(crate::types::MarketRegime::TrendingBull) => "TrendingBull",
             Some(crate::types::MarketRegime::TrendingBear) => "TrendingBear",
@@ -76,7 +76,7 @@ impl MetaControlAgent {
         };
 
         let mut changes = Vec::new();
-        let mut rules = self.state.rules.write().await;
+        let mut rules = self.state.rule_engine.rules.write().await;
         for (skill, delta) in adjustments {
             let before = rules.get_skill_weight(skill);
             rules.adjust_skill_weight(skill, delta);
@@ -120,7 +120,7 @@ impl MetaControlAgent {
         &self,
         _days_back: i64,
     ) -> Result<WeeklyReviewReport, Box<dyn Error + Send + Sync>> {
-        let stats = self.state.episode_store.session_stats();
+        let stats = self.state.agent_memory.episode_store.session_stats();
         let report = WeeklyReviewReport {
             total_episodes_reviewed: stats.trades_today as usize,
             high_regret_episodes: if stats.avg_regret > 0.5 {

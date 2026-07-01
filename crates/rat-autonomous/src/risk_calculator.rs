@@ -27,7 +27,7 @@ impl Agent for RiskCalculatorAgent {
         input: Option<AgentInput>,
     ) -> Result<AgentOutput, Box<dyn Error + Send + Sync>> {
         if let Some(AgentInput::RiskRequest { context }) = input {
-            let rules = self.state.rules.read().await;
+            let rules = self.state.rule_engine.rules.read().await;
             let check = check_risk_limits(&context, &rules);
             println!("[RiskCalculator] Risk check completed");
             Ok(AgentOutput::RiskResult(check))

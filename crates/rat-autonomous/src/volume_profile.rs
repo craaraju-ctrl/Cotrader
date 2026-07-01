@@ -18,7 +18,7 @@ impl VolumeProfileSkill {
     }
 
     pub async fn analyze(&self, symbol: &str) -> (f64, f64, f64, f64) {
-        let history = self.state.ohlcv_history.read().await;
+        let history = self.state.market_data.ohlcv_history.read().await;
         if let Some(bars) = history.get(symbol) {
             if bars.len() >= 20 {
                 let profile = compute_volume_profile(bars, 20);

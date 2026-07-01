@@ -12,6 +12,7 @@ pub mod graph_rag; // Knowledge Graph for relationship-based recall (symbol→re
 pub mod kronos_client;
 pub mod live_calendar;
 pub mod llm;
+pub mod embeddings;
 pub mod memory;
 pub mod messages;
 pub mod news;

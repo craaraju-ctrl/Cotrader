@@ -18,6 +18,7 @@ path = "src/bin/rat_cli.rs"
 
 [dependencies]
 rat-core = { path = "../rat-core", features = ["lancedb"] }
+rat-eventbus = { path = "../rat-eventbus" }
 async-trait = "0.1"
 tokio = { version = "1", features = ["full"] }
 chrono = { workspace = true }

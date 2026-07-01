@@ -34,7 +34,7 @@ async fn setup_env(db_name: &str) -> (AutonomousOrchestrator, String) {
     let rules = DisciplineRules::default();
     let state = SharedState::new(memory, rules, config, &sqlite_db_path).expect("SharedState init");
     // Clear calendar events so red_folder Critical rule doesn't fire
-    *state.calendar_events.write().await = Vec::new();
+    *state.market_data.calendar_events.write().await = Vec::new();
 
     let mut orch = AutonomousOrchestrator::new(state);
     orch.init_rat();
@@ -42,7 +42,7 @@ async fn setup_env(db_name: &str) -> (AutonomousOrchestrator, String) {
 }
 
 async fn seed_ohlcv(state: &SharedState, symbol: &str, base_price: f64) {
-    let mut history = state.ohlcv_history.write().await;
+    let mut history = state.market_data.ohlcv_history.write().await;
     let mut bars = Vec::with_capacity(120);
     for i in 0..120 {
         let trend = base_price * (i as f64 * 0.002);
@@ -80,7 +80,7 @@ async fn seed_aggregated_signal(state: &SharedState, conviction: f64) {
         bearish_count: if conviction < 0.5 { 4 } else { 1 },
         neutral_count: 0,
     };
-    *state.last_aggregated_signal.write().await = Some(agg);
+    *state.agent_memory.last_aggregated_signal.write().await = Some(agg);
 }
 
 /// Categorize a pipeline summary reason into a specific blocking point label.
@@ -173,7 +173,7 @@ async fn simulate_losing_trades(orch: &AutonomousOrchestrator, count: usize, sym
 
         // Add a losing position directly
         {
-            let mut portfolio = orch.state.portfolio.write().await;
+            let mut portfolio = orch.state.portfolio_store.portfolio.write().await;
             let loss = -(entry * 0.02); // 2% loss per trade
             portfolio.open_positions.push(OpenPosition {
                 symbol: symbol.to_string(),
@@ -215,7 +215,7 @@ async fn debug_100_trades_blocking_points() {
 
     // Seed high confluence so initial trades pass the gate
     seed_aggregated_signal(&orch.state, 0.85).await;
-    *orch.state.market_regime.write().await = Some(MarketRegime::TrendingBull);
+    *orch.state.market_data.market_regime.write().await = Some(MarketRegime::TrendingBull);
 
     let symbols = ["BTC", "ETH", "SOL"];
     let regimes = [
@@ -243,7 +243,7 @@ async fn debug_100_trades_blocking_points() {
         if i > 0 && i % 10 == 0 {
             let regime_idx = (i / 10) % regimes.len();
             let new_regime = regimes[regime_idx];
-            *orch.state.market_regime.write().await = new_regime;
+            *orch.state.market_data.market_regime.write().await = new_regime;
             println!(
                 "  [Phase] Trade {}: Regime changed to {:?}",
                 i + 1,
@@ -268,7 +268,7 @@ async fn debug_100_trades_blocking_points() {
         // ── Every 40 trades: reset portfolio to allow more trades through ──
         if i == 40 || i == 80 {
             {
-                let mut portfolio = orch.state.portfolio.write().await;
+                let mut portfolio = orch.state.portfolio_store.portfolio.write().await;
                 portfolio.consecutive_losses = 0;
                 portfolio.total_trades_today = 0;
                 portfolio.max_drawdown_today = 0.0;

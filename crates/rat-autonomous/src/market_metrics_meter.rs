@@ -431,7 +431,7 @@ impl MarketMetricsMeter {
     /// Always succeeds with local data; APIs enrich (rate limited by caller cadence).
     pub async fn compute(&self, symbol: &str, current_price: f64) -> MetricsSnapshot {
         let bars: Vec<OhlcvBar> = {
-            let h = self.state.ohlcv_history.read().await;
+            let h = self.state.market_data.ohlcv_history.read().await;
             h.get(symbol).cloned().unwrap_or_default()
         };
 
@@ -518,14 +518,14 @@ impl MarketMetricsMeter {
 
         // === Optional API supplements (non-fatal, respect keys + rates) ===
         // Finnhub technical (if key) — example aggregate or rsi confirmation
-        if !self.state.config.finnhub_key.is_empty() {
+        if !self.state.io.config.finnhub_key.is_empty() {
             // In production would call /technical-indicator and blend; here note source and slight adjust
             if snap.rsi_14 < 35.0 {
                 snap.confluence_hint = (snap.confluence_hint + 0.05).min(0.95);
             }
             snap.sources.push("finnhub".into());
         }
-        if !self.state.config.polygon_api_key.is_empty() {
+        if !self.state.io.config.polygon_api_key.is_empty() {
             snap.sources.push("polygon".into());
         }
         // CoinGecko free for crypto volume confirmation
@@ -563,7 +563,7 @@ impl MarketMetricsMeter {
                 snap.sources.push("coingecko_public".into());
             }
         }
-        if !self.state.config.fred_api_key.is_empty() {
+        if !self.state.io.config.fred_api_key.is_empty() {
             // Macro would bias regime_hint e.g. high rates -> more ranging; stub note
             snap.sources.push("fred_macro".into());
         }
@@ -741,11 +741,11 @@ impl MarketMetricsMeter {
         snap
     }
 
-    /// Convenience for MI / pipeline: compute + write to state.latest_metrics
+    /// Convenience for MI / pipeline: compute + write to state.market_data.latest_metrics
     pub async fn compute_and_store(&self, symbol: &str, price: f64) -> MetricsSnapshot {
         let snap = self.compute(symbol, price).await;
         self.state
-            .latest_metrics
+            .market_data.latest_metrics
             .write()
             .await
             .insert(symbol.to_string(), snap.clone());

@@ -15,7 +15,7 @@ impl PortfolioManagerAgent {
     }
 
     async fn assess_portfolio(&self) -> Result<String, Box<dyn Error + Send + Sync>> {
-        let portfolio = self.state.portfolio.read().await;
+        let portfolio = self.state.portfolio_store.portfolio.read().await;
 
         let total_exposure: f64 = portfolio
             .open_positions
@@ -44,7 +44,7 @@ impl PortfolioManagerAgent {
         symbol: &str,
         current_price: f64,
     ) -> Result<f64, Box<dyn Error + Send + Sync>> {
-        let mut portfolio = self.state.portfolio.write().await;
+        let mut portfolio = self.state.portfolio_store.portfolio.write().await;
 
         let mut pnl = 0.0;
         let mut updated = false;
@@ -91,7 +91,7 @@ impl PortfolioManagerAgent {
         &self,
         signal: &TradeSignal,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let mut portfolio = self.state.portfolio.write().await;
+        let mut portfolio = self.state.portfolio_store.portfolio.write().await;
 
         if !portfolio.trading_enabled {
             return Err("Trading is disabled/halted".into());
@@ -116,7 +116,7 @@ impl PortfolioManagerAgent {
         // Fix: max_per_symbol = min(equity_pct, 95% of cash_balance).
         let total_equity = portfolio.total_equity.max(1.0);
         let cash_available = portfolio.cash_balance.max(1.0);
-        let equity_pct = if self.state.config.paper_mode {
+        let equity_pct = if self.state.io.config.paper_mode {
             0.95
         } else {
             0.04
@@ -132,7 +132,7 @@ impl PortfolioManagerAgent {
                 max_per_symbol,
                 total_equity,
                 cash_available,
-                if self.state.config.paper_mode {
+                if self.state.io.config.paper_mode {
                     "paper"
                 } else {
                     "live"
@@ -203,7 +203,7 @@ impl PortfolioManagerAgent {
         symbol: &str,
         exit_price: f64,
     ) -> Result<f64, Box<dyn Error + Send + Sync>> {
-        let mut portfolio = self.state.portfolio.write().await;
+        let mut portfolio = self.state.portfolio_store.portfolio.write().await;
 
         if let Some(idx) = portfolio
             .open_positions
@@ -247,7 +247,7 @@ impl PortfolioManagerAgent {
                 }
             }
 
-            let rules = self.state.rules.read().await;
+            let rules = self.state.rule_engine.rules.read().await;
             if portfolio.max_drawdown_today >= rules.max_daily_drawdown
                 || portfolio.consecutive_losses >= rules.max_consecutive_losses
             {
@@ -308,7 +308,7 @@ mod tests {
 
         // Initial state
         {
-            let portfolio = state.portfolio.read().await;
+            let portfolio = state.portfolio_store.portfolio.read().await;
             assert_eq!(portfolio.cash_balance, 100_000.0);
             assert_eq!(portfolio.total_equity, 100_000.0);
         }
@@ -336,7 +336,7 @@ mod tests {
 
         // After entry
         {
-            let portfolio = state.portfolio.read().await;
+            let portfolio = state.portfolio_store.portfolio.read().await;
             assert_eq!(portfolio.cash_balance, 99_000.0);
             assert_eq!(portfolio.total_equity, 100_000.0);
             assert_eq!(portfolio.open_positions.len(), 1);
@@ -349,7 +349,7 @@ mod tests {
 
         // Equity should increase as short is in profit
         {
-            let portfolio = state.portfolio.read().await;
+            let portfolio = state.portfolio_store.portfolio.read().await;
             assert_eq!(portfolio.total_equity, 100_200.0);
         }
 
@@ -362,7 +362,7 @@ mod tests {
 
         // After close, cash and equity should be updated correctly
         {
-            let portfolio = state.portfolio.read().await;
+            let portfolio = state.portfolio_store.portfolio.read().await;
             assert_eq!(portfolio.cash_balance, 100_200.0);
             assert_eq!(portfolio.total_equity, 100_200.0);
             assert!(portfolio.open_positions.is_empty());

@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 mod loops;
 
 use axum::{
@@ -96,7 +97,7 @@ impl LoopManager {
         self.handles = vec![fast_handle, medium_handle, slow_handle];
 
         {
-            let mut p = self.orchestrator.state.portfolio.write().await;
+            let mut p = self.orchestrator.state.portfolio_store.portfolio.write().await;
             p.trading_enabled = true;
         }
 
@@ -111,7 +112,7 @@ impl LoopManager {
                 let _ = handle.await;
             }
             {
-                let mut p = self.orchestrator.state.portfolio.write().await;
+                let mut p = self.orchestrator.state.portfolio_store.portfolio.write().await;
                 p.trading_enabled = false;
             }
             info!("Background loops stopped cleanly");
@@ -178,7 +179,7 @@ async fn initialize_data_feeds_background(
                     .unwrap_or_default()
             };
             if !bars.is_empty() {
-                orch.state.ohlcv_history.write().await.insert(sym, bars);
+                orch.state.market_data.ohlcv_history.write().await.insert(sym, bars);
             }
             Some(())
         }));
@@ -192,7 +193,7 @@ async fn initialize_data_feeds_background(
     loops::refresh_multi_tf(&assets, &client, &orchestrator.state).await;
 
     {
-        let mut summary = orchestrator.state.agent_market_summary.write().await;
+        let mut summary = orchestrator.state.agent_memory.agent_market_summary.write().await;
         *summary = format!(
             "Data feeds ready. Monitoring: {} with Ollama + Kronos.",
             assets.join(", ")
@@ -202,11 +203,11 @@ async fn initialize_data_feeds_background(
 }
 
 async fn restore_portfolio_state(state: &rat_autonomous::state::SharedState) -> bool {
-    match state.memory.load_state("portfolio/state") {
+    match state.agent_memory.memory.load_state("portfolio/state") {
         Ok(Some(json)) => {
             match serde_json::from_str::<rat_autonomous::types::PortfolioState>(&json) {
                 Ok(restored) => {
-                    let mut portfolio = state.portfolio.write().await;
+                    let mut portfolio = state.portfolio_store.portfolio.write().await;
                     *portfolio = restored;
                     info!(
                         equity = portfolio.total_equity,
@@ -234,10 +235,10 @@ async fn restore_portfolio_state(state: &rat_autonomous::state::SharedState) -> 
 }
 
 async fn restore_agent_tasks(state: &rat_autonomous::state::SharedState) {
-    if let Ok(Some(json)) = state.memory.load_state("tasks/state") {
+    if let Ok(Some(json)) = state.agent_memory.memory.load_state("tasks/state") {
         if let Ok(restored) = serde_json::from_str::<Vec<rat_autonomous::state::AgentTask>>(&json)
         {
-            let mut tasks = state.agent_tasks.write().await;
+            let mut tasks = state.io.agent_tasks.write().await;
             *tasks = restored;
             info!("Agent tasks restored from redb.");
         }
@@ -250,7 +251,7 @@ async fn graceful_shutdown(orchestrator: &rat_autonomous::AutonomousOrchestrator
     info!("Winding down web server & portfolio state...");
     loops::save_portfolio_state(&orchestrator.state).await;
     save_watchlist(&orchestrator.state).await;
-    let p = orchestrator.state.portfolio.read().await;
+    let p = orchestrator.state.portfolio_store.portfolio.read().await;
     info!(
         equity = p.total_equity,
         pnl = p.daily_pnl,
@@ -265,15 +266,15 @@ async fn graceful_shutdown(orchestrator: &rat_autonomous::AutonomousOrchestrator
 // ── Axum Endpoint Handlers ───────────────────────────────────────────────────
 
 async fn portfolio_snapshot_response(state: &WebState, include_meta: bool) -> serde_json::Value {
-    let portfolio = state.orchestrator.state.portfolio.read().await;
+    let portfolio = state.orchestrator.state.portfolio_store.portfolio.read().await;
     let mut snapshot = rat_autonomous::state::SharedState::portfolio_snapshot_json(&portfolio);
     if include_meta {
-        let rules = state.orchestrator.state.rules.read().await;
+        let rules = state.orchestrator.state.rule_engine.rules.read().await;
         if let Some(obj) = snapshot.as_object_mut() {
             obj.insert("status".to_string(), serde_json::json!("rat Running"));
             obj.insert(
                 "initial_balance".to_string(),
-                serde_json::json!(state.orchestrator.state.config.initial_balance),
+                serde_json::json!(state.orchestrator.state.io.config.initial_balance),
             );
             obj.insert(
                 "use_confluence".to_string(),
@@ -303,8 +304,8 @@ async fn get_system_health(State(state): State<WebState>) -> impl axum::response
     let manager = state.loop_manager.lock().await;
     let running = manager.is_running().await;
 
-    let current_model = state.orchestrator.state.llm.get_model();
-    let ollama_running = state.orchestrator.state.llm.is_ollama_running().await;
+    let current_model = state.orchestrator.state.io.llm.get_model();
+    let ollama_running = state.orchestrator.state.io.llm.is_ollama_running().await;
 
     Json(serde_json::json!({
         "kronos": kronos_up,
@@ -318,7 +319,7 @@ async fn get_system_health(State(state): State<WebState>) -> impl axum::response
 // ── LLM Model Management Endpoints ──────────────────────────────────────────
 
 async fn get_available_models(State(state): State<WebState>) -> impl axum::response::IntoResponse {
-    let llm = state.orchestrator.state.llm.clone();
+    let llm = state.orchestrator.state.io.llm.clone();
     // Use blocking for simplicity in API call
     let client = reqwest::Client::new();
     let endpoint = llm.endpoint.clone();
@@ -407,7 +408,7 @@ async fn set_llm_model(
 
     // Try to fetch models to validate
     let client = reqwest::Client::new();
-    let endpoint = state.orchestrator.state.llm.endpoint.clone();
+    let endpoint = state.orchestrator.state.io.llm.endpoint.clone();
     let base_url = endpoint
         .replace("/api/generate", "")
         .replace("/api/chat", "");
@@ -449,7 +450,7 @@ async fn set_llm_model(
     }
 
     // Record the model change for COT logging
-    let old_model = state.orchestrator.state.llm.get_model();
+    let old_model = state.orchestrator.state.io.llm.get_model();
     // Note: The model is already stored on LlmExecutor and used directly.
     // The env var approach was removed in favor of passing the model through
     // the executor's state. A restart is still needed for the new model to take effect.
@@ -481,7 +482,7 @@ async fn set_llm_model(
 }
 
 async fn get_cot_chains(State(state): State<WebState>) -> impl axum::response::IntoResponse {
-    let store = state.orchestrator.state.cot_store.read().await;
+    let store = state.orchestrator.state.agent_memory.cot_store.read().await;
     Json(store.clone())
 }
 
@@ -512,16 +513,16 @@ async fn stop_autonomous_system(
 // ── Watchlist Storage & Endpoints ───────────────────────────────────────────
 
 async fn save_watchlist(state: &rat_autonomous::state::SharedState) {
-    let watchlist = state.watchlist.read().await;
+    let watchlist = state.market_data.watchlist.read().await;
     if let Ok(json) = serde_json::to_string(&*watchlist) {
-        let _ = state.memory.store_state("watchlist/state", &json);
+        let _ = state.agent_memory.memory.store_state("watchlist/state", &json);
     }
 }
 
 async fn restore_watchlist(state: &rat_autonomous::state::SharedState) {
-    if let Ok(Some(json)) = state.memory.load_state("watchlist/state") {
+    if let Ok(Some(json)) = state.agent_memory.memory.load_state("watchlist/state") {
         if let Ok(restored) = serde_json::from_str::<Vec<String>>(&json) {
-            let mut watchlist = state.watchlist.write().await;
+            let mut watchlist = state.market_data.watchlist.write().await;
             *watchlist = restored;
             info!(watchlist = ?*watchlist, "Watchlist restored from redb");
             return;
@@ -536,7 +537,7 @@ async fn restore_watchlist(state: &rat_autonomous::state::SharedState) {
             .filter(|s| !s.is_empty())
             .collect();
         if !symbols.is_empty() {
-            let mut watchlist = state.watchlist.write().await;
+            let mut watchlist = state.market_data.watchlist.write().await;
             *watchlist = symbols;
             info!(watchlist = ?*watchlist, "Watchlist loaded from WATCHLIST env");
             return;
@@ -552,12 +553,12 @@ struct WatchlistRequest {
 }
 
 async fn get_watchlist(State(state): State<WebState>) -> impl axum::response::IntoResponse {
-    let wl = state.orchestrator.state.watchlist.read().await;
+    let wl = state.orchestrator.state.market_data.watchlist.read().await;
     Json(wl.clone())
 }
 
 async fn get_metrics(State(state): State<WebState>) -> impl axum::response::IntoResponse {
-    let metrics = state.orchestrator.state.latest_metrics.read().await;
+    let metrics = state.orchestrator.state.market_data.latest_metrics.read().await;
     Json(serde_json::json!(*metrics))
 }
 
@@ -592,7 +593,7 @@ async fn add_to_watchlist(
                 .unwrap_or_default()
         };
         if !bars.is_empty() {
-            let mut history = state.orchestrator.state.ohlcv_history.write().await;
+            let mut history = state.orchestrator.state.market_data.ohlcv_history.write().await;
             history.insert(symbol.clone(), bars);
         }
         loops::update_multi_tf_data(&client, &state.orchestrator, &symbol, is_crypto).await;
@@ -651,7 +652,7 @@ async fn execute_trade(
     };
 
     // Read real portfolio equity for accurate drawdown check
-    let portfolio_equity = state.orchestrator.state.portfolio.read().await.total_equity;
+    let portfolio_equity = state.orchestrator.state.portfolio_store.portfolio.read().await.total_equity;
     let context = rat_core::MarketContext {
         symbol: req.symbol.clone(),
         current_price: req.entry_price,
@@ -674,7 +675,7 @@ async fn execute_trade(
         req.take_profit,
         context,
     );
-    let rules = state.orchestrator.state.rules.read().await;
+    let rules = state.orchestrator.state.rule_engine.rules.read().await;
     let check = validate_trade_setup(&setup.context, &rules);
 
     if !check.passed {
@@ -709,8 +710,8 @@ async fn execute_trade(
     }
 
     let position_size = {
-        let rules = state.orchestrator.state.rules.read().await;
-        let cash = state.orchestrator.state.portfolio.read().await.cash_balance;
+        let rules = state.orchestrator.state.rule_engine.rules.read().await;
+        let cash = state.orchestrator.state.portfolio_store.portfolio.read().await.cash_balance;
         rat_autonomous::helpers::calculate_position_size_with_cash(
             portfolio_equity,
             rules.max_risk_per_trade,
@@ -802,7 +803,7 @@ async fn trigger_orchestra_cycle(
             state
                 .orchestrator
                 .state
-                .watchlist
+                .market_data.watchlist
                 .try_read()
                 .ok()
                 .and_then(|wl| wl.first().cloned())
@@ -855,7 +856,7 @@ async fn run_pipeline_batch(
     } else if let Some(sym) = req.symbol {
         vec![rat_core::normalize_base_symbol(&sym)]
     } else {
-        state.orchestrator.state.watchlist.read().await.clone()
+        state.orchestrator.state.market_data.watchlist.read().await.clone()
     };
 
     if symbols.is_empty() {
@@ -900,7 +901,7 @@ async fn update_rules(
     Json(req): Json<RulesRequest>,
 ) -> impl axum::response::IntoResponse {
     {
-        let mut rules = state.orchestrator.state.rules.write().await;
+        let mut rules = state.orchestrator.state.rule_engine.rules.write().await;
         rules.use_confluence = req.use_confluence;
         rules.respect_session_timing = req.respect_session_timing;
     }
@@ -927,7 +928,7 @@ async fn update_rules(
 }
 
 async fn run_backtest(State(state): State<WebState>) -> impl axum::response::IntoResponse {
-    let rules = state.orchestrator.state.rules.read().await;
+    let rules = state.orchestrator.state.rule_engine.rules.read().await;
     let mut backtester = rat_core::Backtester::new(rules.clone());
     let mut dummy_data = Vec::new();
     for i in 0..50 {
@@ -979,7 +980,7 @@ async fn run_backtest(State(state): State<WebState>) -> impl axum::response::Int
 
 /// Structured backtest results endpoint — returns detailed backtest data for TUI display.
 async fn get_backtest_results(State(state): State<WebState>) -> impl axum::response::IntoResponse {
-    let rules = state.orchestrator.state.rules.read().await;
+    let rules = state.orchestrator.state.rule_engine.rules.read().await;
     let mut backtester = rat_core::Backtester::new(rules.clone());
     let mut dummy_data = Vec::new();
     for i in 0..50 {
@@ -1023,8 +1024,8 @@ async fn get_agent_tree() -> impl axum::response::IntoResponse {
 }
 
 async fn get_skill_scores(State(state): State<WebState>) -> impl axum::response::IntoResponse {
-    let votes = state.orchestrator.state.last_skill_votes.read().await;
-    let aggregated = state.orchestrator.state.last_aggregated_signal.read().await;
+    let votes = state.orchestrator.state.agent_memory.last_skill_votes.read().await;
+    let aggregated = state.orchestrator.state.agent_memory.last_aggregated_signal.read().await;
     Json(serde_json::json!({
         "votes": *votes,
         "aggregated": *aggregated,
@@ -1140,34 +1141,127 @@ async fn get_crypto_exchanges() -> impl axum::response::IntoResponse {
 }
 
 async fn get_crypto_symbols() -> impl axum::response::IntoResponse {
-    Json(serde_json::json!([
-        { "symbol": "BTC",   "name": "Bitcoin",          "category": "layer1" },
-        { "symbol": "ETH",   "name": "Ethereum",         "category": "layer1" },
-        { "symbol": "SOL",   "name": "Solana",           "category": "layer1" },
-        { "symbol": "BNB",   "name": "BNB",              "category": "exchange" },
-        { "symbol": "XRP",   "name": "Ripple",           "category": "payments" },
-        { "symbol": "ADA",   "name": "Cardano",          "category": "layer1" },
-        { "symbol": "DOGE",  "name": "Dogecoin",         "category": "meme" },
-        { "symbol": "AVAX",  "name": "Avalanche",        "category": "layer1" },
-        { "symbol": "MATIC", "name": "Polygon",          "category": "layer2" },
-        { "symbol": "LINK",  "name": "Chainlink",        "category": "oracle" },
-        { "symbol": "DOT",   "name": "Polkadot",         "category": "layer0" },
-        { "symbol": "ATOM",  "name": "Cosmos",           "category": "layer0" },
-        { "symbol": "LTC",   "name": "Litecoin",         "category": "payments" },
-        { "symbol": "UNI",   "name": "Uniswap",          "category": "defi" },
-        { "symbol": "AAVE",  "name": "Aave",             "category": "defi" },
-        { "symbol": "NEAR",  "name": "NEAR Protocol",    "category": "layer1" },
-        { "symbol": "APT",   "name": "Aptos",            "category": "layer1" },
-        { "symbol": "ARB",   "name": "Arbitrum",         "category": "layer2" },
-        { "symbol": "OP",    "name": "Optimism",         "category": "layer2" },
-        { "symbol": "SUI",   "name": "Sui",              "category": "layer1" },
-        { "symbol": "INJ",   "name": "Injective",        "category": "layer1" },
-        { "symbol": "TON",   "name": "Toncoin",          "category": "layer1" },
-        { "symbol": "TRX",   "name": "Tron",             "category": "layer1" },
-        { "symbol": "XLM",   "name": "Stellar",          "category": "payments" },
-        { "symbol": "PEPE",  "name": "Pepe",             "category": "meme" },
-        { "symbol": "SHIB",  "name": "Shiba Inu",        "category": "meme" }
-    ]))
+    // Build the array programmatically to avoid `json!` macro recursion limits
+    // with 99+ entries. Each entry: { "symbol": "...", "name": "...", "category": "..." }
+    let mut symbols = Vec::with_capacity(100);
+    macro_rules! push_sym {
+        ($sym:expr, $name:expr, $cat:expr) => {
+            symbols.push(serde_json::json!({
+                "symbol": $sym, "name": $name, "category": $cat
+            }))
+        };
+    }
+    // ── Layer1 / Smart Contract Platforms (25) ──
+    push_sym!("BTC",  "Bitcoin",              "layer1");
+    push_sym!("ETH",  "Ethereum",             "layer1");
+    push_sym!("SOL",  "Solana",               "layer1");
+    push_sym!("BNB",  "BNB",                  "exchange");
+    push_sym!("ADA",  "Cardano",              "layer1");
+    push_sym!("AVAX", "Avalanche",            "layer1");
+    push_sym!("DOT",  "Polkadot",             "layer0");
+    push_sym!("MATIC","Polygon",              "layer2");
+    push_sym!("NEAR", "NEAR Protocol",        "layer1");
+    push_sym!("ATOM", "Cosmos",               "layer0");
+    push_sym!("FTM",  "Fantom",               "layer1");
+    push_sym!("ALGO", "Algorand",             "layer1");
+    push_sym!("HBAR", "Hedera",               "layer1");
+    push_sym!("ICP",  "Internet Computer",    "layer1");
+    push_sym!("XTZ",  "Tezos",                "layer1");
+    push_sym!("EGLD", "MultiversX",           "layer1");
+    push_sym!("FLOW", "Flow",                 "layer1");
+    push_sym!("MINA", "Mina Protocol",        "layer1");
+    push_sym!("KSM",  "Kusama",               "layer0");
+    push_sym!("SEI",  "Sei",                  "layer1");
+    push_sym!("APT",  "Aptos",                "layer1");
+    push_sym!("INJ",  "Injective",            "layer1");
+    push_sym!("SUI",  "Sui",                  "layer1");
+    push_sym!("TON",  "Toncoin",              "layer1");
+    push_sym!("TRX",  "Tron",                 "layer1");
+    // ── DeFi / DEX / Lending (18) ──
+    push_sym!("UNI",  "Uniswap",              "defi");
+    push_sym!("AAVE", "Aave",                 "defi");
+    push_sym!("CRV",  "Curve DAO",            "defi");
+    push_sym!("CAKE", "PancakeSwap",          "defi");
+    push_sym!("SUSHI","SushiSwap",            "defi");
+    push_sym!("COMP", "Compound",             "defi");
+    push_sym!("MKR",  "Maker",                "defi");
+    push_sym!("SNX",  "Synthetix",            "defi");
+    push_sym!("BAL",  "Balancer",             "defi");
+    push_sym!("YFI",  "Yearn Finance",        "defi");
+    push_sym!("LDO",  "Lido DAO",             "defi");
+    push_sym!("RPL",  "Rocket Pool",          "defi");
+    push_sym!("FXS",  "Frax Share",           "defi");
+    push_sym!("CVX",  "Convex Finance",       "defi");
+    push_sym!("GMX",  "GMX",                  "defi");
+    push_sym!("GNS",  "Gains Network",        "defi");
+    push_sym!("JOE",  "Trader Joe",           "defi");
+    push_sym!("VELO", "Velodrome",            "defi");
+    // ── Oracles / Infrastructure (6) ──
+    push_sym!("LINK", "Chainlink",            "oracle");
+    push_sym!("GRT",  "The Graph",            "infra");
+    push_sym!("BAND", "Band Protocol",        "oracle");
+    push_sym!("API3", "API3",                 "oracle");
+    push_sym!("TRB",  "Tellor",               "oracle");
+    push_sym!("UMA",  "UMA",                  "oracle");
+    // ── Payments / Currency / Privacy (7) ──
+    push_sym!("XRP",  "XRP",                  "payments");
+    push_sym!("LTC",  "Litecoin",             "payments");
+    push_sym!("XLM",  "Stellar",              "payments");
+    push_sym!("DASH", "Dash",                 "payments");
+    push_sym!("ZEC",  "Zcash",                "privacy");
+    push_sym!("XMR",  "Monero",               "privacy");
+    push_sym!("NANO", "Nano",                 "payments");
+    // ── Gaming / Metaverse (10) ──
+    push_sym!("AXS",  "Axie Infinity",        "gaming");
+    push_sym!("SAND", "The Sandbox",          "metaverse");
+    push_sym!("MANA", "Decentraland",         "metaverse");
+    push_sym!("GALA", "Gala",                 "gaming");
+    push_sym!("ENJ",  "Enjin Coin",           "gaming");
+    push_sym!("CHZ",  "Chiliz",               "gaming");
+    push_sym!("ILV",  "Illuvium",             "gaming");
+    push_sym!("YGG",  "Yield Guild Games",    "gaming");
+    push_sym!("IMX",  "Immutable",            "gaming");
+    push_sym!("RON",  "Ronin",                "gaming");
+    // ── Meme / Community (8) ──
+    push_sym!("DOGE", "Dogecoin",             "meme");
+    push_sym!("SHIB", "Shiba Inu",            "meme");
+    push_sym!("PEPE", "Pepe",                 "meme");
+    push_sym!("WIF",  "dogwifhat",            "meme");
+    push_sym!("BONK", "Bonk",                 "meme");
+    push_sym!("FLOKI","Floki",                "meme");
+    push_sym!("BABYDOGE","Baby Doge Coin",   "meme");
+    push_sym!("ELON", "Dogelon Mars",         "meme");
+    // ── Layer2 / Scaling (6) ──
+    push_sym!("ARB",  "Arbitrum",             "layer2");
+    push_sym!("OP",   "Optimism",             "layer2");
+    push_sym!("LRC",  "Loopring",             "layer2");
+    push_sym!("BOBA", "Boba Network",         "layer2");
+    push_sym!("METIS","Metis",                "layer2");
+    push_sym!("CTSI", "Cartesi",              "layer2");
+    // ── Storage / Compute / Data (4) ──
+    push_sym!("FIL",  "Filecoin",             "storage");
+    push_sym!("AR",   "Arweave",              "storage");
+    push_sym!("STORJ","Storj",                "storage");
+    push_sym!("AKT",  "Akash Network",        "compute");
+    // ── Exchange / Platform Tokens (5) ──
+    push_sym!("CRO",  "Cronos",               "exchange");
+    push_sym!("OKB",  "OKB",                  "exchange");
+    push_sym!("KCS",  "KuCoin Token",         "exchange");
+    push_sym!("LEO",  "LEO Token",            "exchange");
+    push_sym!("HT",   "Huobi Token",          "exchange");
+    // ── AI / Data / Emerging (10) ──
+    push_sym!("FET",  "Fetch.ai",             "ai");
+    push_sym!("AGIX", "SingularityNET",       "ai");
+    push_sym!("OCEAN","Ocean Protocol",       "data");
+    push_sym!("RNDR", "Render Network",       "ai");
+    push_sym!("TAO",  "Bittensor",            "ai");
+    push_sym!("ARKM", "Arkham",               "data");
+    push_sym!("NMR",  "Numeraire",            "ai");
+    push_sym!("TRAC", "OriginTrail",          "data");
+    push_sym!("ORAI", "Oraichain",            "ai");
+    push_sym!("MDT",  "Measurable Data",      "data");
+
+    Json(symbols)
 }
 
 #[derive(serde::Deserialize)]
@@ -1261,7 +1355,7 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<WebState>) -> Resp
             .await;
 
         // Subscribe to state updates for live COT/prices/signals (connects pipelines to clients)
-        let mut rx = state.orchestrator.state.update_tx.subscribe();
+        let mut rx = state.orchestrator.state.io.update_tx.subscribe();
         loop {
             tokio::select! {
                 msg = rx.recv() => {
@@ -1288,13 +1382,13 @@ async fn get_broker_status(State(state): State<WebState>) -> impl axum::response
     let mode = state
         .orchestrator
         .state
-        .broker_registry
+        .portfolio_store.broker_registry
         .current_mode()
         .await;
     let broker_name = state
         .orchestrator
         .state
-        .broker_registry
+        .portfolio_store.broker_registry
         .current_broker_name()
         .await;
 
@@ -1302,7 +1396,7 @@ async fn get_broker_status(State(state): State<WebState>) -> impl axum::response
         "mode": mode,
         "broker": broker_name,
         "connected": true, // the registry always has paper; live status via broker
-        "paper_balance": state.orchestrator.state.config.initial_balance,
+        "paper_balance": state.orchestrator.state.io.config.initial_balance,
     }))
 }
 
@@ -1334,7 +1428,7 @@ async fn switch_broker_mode(
     match state
         .orchestrator
         .state
-        .broker_registry
+        .portfolio_store.broker_registry
         .set_mode(new_mode)
         .await
     {
@@ -1342,7 +1436,7 @@ async fn switch_broker_mode(
             let broker_name = state
                 .orchestrator
                 .state
-                .broker_registry
+                .portfolio_store.broker_registry
                 .current_broker_name()
                 .await;
             let msg = format!("Switched to {} mode via {}", req.mode, broker_name);
@@ -1392,7 +1486,7 @@ async fn get_all_prices(State(state): State<WebState>) -> impl axum::response::I
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
-    let symbols = state.orchestrator.state.watchlist.read().await.clone();
+    let symbols = state.orchestrator.state.market_data.watchlist.read().await.clone();
     let mut results = serde_json::Map::new();
 
     // Split into crypto and non-crypto
@@ -1628,7 +1722,7 @@ async fn get_policy_cache(State(state): State<WebState>) -> impl axum::response:
 
 async fn get_news(State(state): State<WebState>) -> impl axum::response::IntoResponse {
     let client = reqwest::Client::new();
-    let fetcher = rat_core::NewsFetcher::new(client, (*state.orchestrator.state.config).clone()); // free news APIs + keys (research: Alpha Vantage, Finnhub etc.)
+    let fetcher = rat_core::NewsFetcher::new(client, (*state.orchestrator.state.io.config).clone()); // free news APIs + keys (research: Alpha Vantage, Finnhub etc.)
                                                                                                     // Fetch for a default symbol; in prod could take query param for active symbol
     let items = fetcher.fetch_headlines("NIFTY").await.unwrap_or_default();
     Json(serde_json::json!({ "symbol": "NIFTY", "items": items }))
@@ -1636,13 +1730,13 @@ async fn get_news(State(state): State<WebState>) -> impl axum::response::IntoRes
 
 /// Broadcast the current watchlist to all WebSocket clients.
 async fn broadcast_watchlist(state: &WebState) {
-    let wl = state.orchestrator.state.watchlist.read().await;
+    let wl = state.orchestrator.state.market_data.watchlist.read().await;
     let msg = serde_json::json!({
         "type": "watchlist",
         "symbols": wl.clone(),
     })
     .to_string();
-    let _ = state.orchestrator.state.update_tx.send(msg);
+    let _ = state.orchestrator.state.io.update_tx.send(msg);
 }
 
 // ── Main ────────────────────────────────────────────────────────────────────
@@ -1747,9 +1841,9 @@ async fn main() {
 
     // === NEW: Initialize the global OutcomeProcessor for self-evolution ===
     {
-        let db_for_meta = (*orchestrator.state.episode_store).clone();
+        let db_for_meta = (*orchestrator.state.agent_memory.episode_store).clone();
         rat_autonomous::execution_coordinator::init_outcome_processor(
-            (*orchestrator.state.episode_store).clone(),
+            (*orchestrator.state.agent_memory.episode_store).clone(),
             db_for_meta,
         )
         .await;
@@ -1772,43 +1866,45 @@ async fn main() {
     restore_watchlist(&orchestrator.state).await;
 
     {
-        let mut wl = orchestrator.state.watchlist.write().await;
+        let mut wl = orchestrator.state.market_data.watchlist.write().await;
         if wl.is_empty() {
-            *wl = vec![
-                "BTC".to_string(),
-                "ETH".to_string(),
-                "SOL".to_string(),
-                "BNB".to_string(),
-                "XRP".to_string(),
-                "ADA".to_string(),
-                "DOGE".to_string(),
-                "AVAX".to_string(),
-                "MATIC".to_string(),
-                "LINK".to_string(),
-                "DOT".to_string(),
-                "ATOM".to_string(),
-                "LTC".to_string(),
-                "UNI".to_string(),
-                "AAVE".to_string(),
-                "NEAR".to_string(),
-                "APT".to_string(),
-                "ARB".to_string(),
-                "OP".to_string(),
-                "SUI".to_string(),
-                "INJ".to_string(),
-                "TON".to_string(),
-                "TRX".to_string(),
-                "XLM".to_string(),
-                "PEPE".to_string(),
-                "SHIB".to_string(),
-                "NIFTY".to_string(),
-                "RELIANCE".to_string(),
+            let symbols = vec![
+                // ── Layer1 / Smart Contract Platforms (24) ──
+                "BTC","ETH","SOL","BNB","ADA","AVAX","DOT","MATIC","NEAR","ATOM",
+                "FTM","ALGO","HBAR","ICP","XTZ","EGLD","FLOW","MINA","KSM","SEI","APT","INJ","SUI","TON","TRX",
+                // ── DeFi / DEX / Lending (18) ──
+                "UNI","AAVE","CRV","CAKE","SUSHI","COMP","MKR","SNX","BAL","YFI",
+                "LDO","RPL","FXS","CVX","GMX","GNS","JOE","VELO",
+                // ── Oracles / Infrastructure (6) ──
+                "LINK","GRT","BAND","API3","TRB","UMA",
+                // ── Payments / Currency / Privacy (7) ──
+                "XRP","LTC","XLM","DASH","ZEC","XMR","NANO",
+                // ── Gaming / Metaverse (10) ──
+                "AXS","SAND","MANA","GALA","ENJ","CHZ","ILV","YGG","IMX","RON",
+                // ── Meme / Community (8) ──
+                "DOGE","SHIB","PEPE","WIF","BONK","FLOKI","BABYDOGE","ELON",
+                // ── Layer2 / Scaling (6) ──
+                "ARB","OP","LRC","BOBA","METIS","CTSI",
+                // ── Storage / Compute / Data (4) ──
+                "FIL","AR","STORJ","AKT",
+                // ── Exchange / Platform Tokens (5) ──
+                "CRO","OKB","KCS","LEO","HT",
+                // ── AI / Data / Emerging (10) ──
+                "FET","AGIX","OCEAN","RNDR","TAO","ARKM","NMR","TRAC","ORAI","MDT",
+                // ── Stocks (US) (10) ──
+                "AAPL","TSLA","NVDA","MSFT","AMZN","GOOGL","META","NFLX","AMD","INTC",
+                // ── ETFs (2) ──
+                "SPY","QQQ",
+                // ── Stocks (India) (10) ──
+                "RELIANCE","TCS","INFY","HDFCBANK","ICICIBANK","WIPRO","TATAMOTORS",
+                "ADANIENT","BAJFINANCE","SBIN",
             ];
+            *wl = symbols.into_iter().map(String::from).collect();
             info!(count = wl.len(), symbols = ?*wl, "Seeded default watchlist");
         }
     }
 
-    let assets = orchestrator.state.watchlist.read().await.clone();
+    let assets = orchestrator.state.market_data.watchlist.read().await.clone();
     schedule_data_feed_init(orchestrator.clone(), client.clone(), assets.clone());
 
     // ── Watchdog Heartbeat ──────────────────────────────────────────────
@@ -1853,6 +1949,73 @@ async fn main() {
         info!("Watchdog heartbeat sender started");
     }
 
+    // ── EventBus → WebSocket Bridge ───────────────────────────────────
+    // Subscribes to pipeline events from the **orchestrator's** EventBus
+    // (`state.io.event_bus`, created in `initialize_autonomous_system()`)
+    // and forwards them to the WebSocket broadcast channel (`update_tx`)
+    // so the TUI displays live pipeline lifecycle in real-time.
+    //
+    // IMPORTANT: We use the orchestrator's EventBus (not the main.rs one)
+    // because the pipeline publishes to `state.io.event_bus` which was
+    // wired during initialization in `initialize_autonomous_system()`.
+    {
+        let bus = orchestrator.state.io.event_bus.clone();
+        let tx = orchestrator.state.io.update_tx.clone();
+        tokio::spawn(async move {
+            let Some(bus) = bus else {
+                warn!("No EventBus found in orchestrator state — pipeline→TUI bridge disabled");
+                return;
+            };
+
+            // Subscribe to all signal events from the pipeline
+            let mut signal_stream = match bus
+                .subscribe(&event_subjects::all_signal_events())
+                .await
+            {
+                Ok(stream) => stream,
+                Err(e) => {
+                    warn!(error = %e, "Failed to subscribe to EventBus signal events");
+                    return;
+                }
+            };
+
+            info!("EventBus→WebSocket bridge started (forwarding pipeline events)");
+
+            loop {
+                match signal_stream.recv().await {
+                    Some((_subject, RatEvent::Signal(signal))) => {
+                        let json = serde_json::json!({
+                            "type": "pipeline_event",
+                            "action": signal.action,
+                            "symbol": signal.symbol,
+                            "entry_price": signal.entry_price,
+                            "stop_loss": signal.stop_loss,
+                            "take_profit": signal.take_profit,
+                            "confidence": signal.confidence,
+                            "reasoning": signal.reasoning,
+                            "source": signal.source,
+                            "timestamp": chrono::Utc::now().timestamp_micros(),
+                        })
+                        .to_string();
+                        let _ = tx.send(json);
+                    }
+                    Some((_subject, _)) => {
+                        // Ignore non-signal events
+                    }
+                    None => {
+                        warn!("EventBus signal stream ended — restarting subscription");
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        match bus.subscribe(&event_subjects::all_signal_events()).await {
+                            Ok(new_stream) => signal_stream = new_stream,
+                            Err(e) => warn!(error = %e, "Failed to re-subscribe to EventBus"),
+                        }
+                    }
+                }
+            }
+        });
+        info!("EventBus→WebSocket bridge task spawned");
+    }
+
     // ── Metrics Client ─────────────────────────────────────────────────
     // Spawn background tasks that send system health and trade events to
     // the rat-metrics service (runs on port 9730 by default).
@@ -1875,9 +2038,9 @@ async fn main() {
                     .await
                     .is_ok();
 
-                let ollama_up = state_for_metrics.llm.is_ollama_running().await;
+                let ollama_up = state_for_metrics.io.llm.is_ollama_running().await;
                 let running = {
-                    let p = state_for_metrics.portfolio.read().await;
+                    let p = state_for_metrics.portfolio_store.portfolio.read().await;
                     p.trading_enabled
                 };
 
@@ -1936,13 +2099,13 @@ async fn main() {
 
                 // Only poll if in LIVE mode
                 let is_live =
-                    state_for_orders.broker_registry.current_mode().await == TradingMode::Live;
+                    state_for_orders.portfolio_store.broker_registry.current_mode().await == TradingMode::Live;
                 if !is_live {
                     continue;
                 }
 
                 let pending = match state_for_orders
-                    .live_order_manager
+                    .portfolio_store.live_order_manager
                     .get_pending_orders()
                     .await
                 {
@@ -1957,7 +2120,7 @@ async fn main() {
                     continue;
                 }
 
-                let broker = state_for_orders.broker_registry.active_broker().await;
+                let broker = state_for_orders.portfolio_store.broker_registry.active_broker().await;
 
                 for order in &pending {
                     // Check if order should time out (15 minutes max)
@@ -1965,7 +2128,7 @@ async fn main() {
                     if elapsed > 15 {
                         info!(order_id = %order.broker_order_id, minutes = elapsed, "Order timed out");
                         let _ = state_for_orders
-                            .live_order_manager
+                            .portfolio_store.live_order_manager
                             .update_status(
                                 &order.broker_order_id,
                                 rat_core::paper_engine::OrderStatus::Expired,
@@ -1999,7 +2162,7 @@ async fn main() {
                                     0
                                 };
                                 let _ = state_for_orders
-                                    .live_order_manager
+                                    .portfolio_store.live_order_manager
                                     .update_status(
                                         &order.broker_order_id,
                                         status,
@@ -2014,7 +2177,7 @@ async fn main() {
                         Err(e) => {
                             // Report connection drop to circuit breaker
                             state_for_orders
-                                .circuit_breaker
+                                .portfolio_store.circuit_breaker
                                 .report_connection_drop()
                                 .await;
                             warn!(order_id = %order.broker_order_id, error = %e, "Failed to poll order");
@@ -2034,7 +2197,7 @@ async fn main() {
                 tokio::time::sleep(Duration::from_secs(60)).await;
 
                 let is_live =
-                    state_for_recon.broker_registry.current_mode().await == TradingMode::Live;
+                    state_for_recon.portfolio_store.broker_registry.current_mode().await == TradingMode::Live;
                 if !is_live {
                     continue;
                 }
@@ -2062,8 +2225,8 @@ async fn main() {
                 }
 
                 // Update circuit breaker equity from latest portfolio snapshot
-                let equity = state_for_recon.portfolio.read().await.total_equity;
-                state_for_recon.circuit_breaker.update_equity(equity).await;
+                let equity = state_for_recon.portfolio_store.portfolio.read().await.total_equity;
+                state_for_recon.portfolio_store.circuit_breaker.update_equity(equity).await;
             }
         });
         info!("Reconciliation loop started (60s cadence in LIVE mode)");
@@ -2086,7 +2249,7 @@ async fn main() {
                 rat_broker_zerodha::create_zerodha_broker(api_key, api_secret, request_token);
             orchestrator
                 .state
-                .broker_registry
+                .portfolio_store.broker_registry
                 .register_live_broker(live_broker)
                 .await;
 
@@ -2114,7 +2277,7 @@ async fn main() {
                 rat_broker_upstox::create_upstox_broker(cid, cs, &redirect_uri, token);
             orchestrator
                 .state
-                .broker_registry
+                .portfolio_store.broker_registry
                 .register_live_broker(live_broker)
                 .await;
             info!("Upstox broker registered");
@@ -2134,7 +2297,7 @@ async fn main() {
             let live_broker = rat_broker_angelone::create_angelone_broker(ak, ci, p, totp_secret);
             orchestrator
                 .state
-                .broker_registry
+                .portfolio_store.broker_registry
                 .register_live_broker(live_broker)
                 .await;
             info!("Angel One broker registered");
@@ -2156,7 +2319,7 @@ async fn main() {
             let live_broker = rat_broker_5paisa::create_fivepaisa_broker(ak, ek, ui, cc);
             orchestrator
                 .state
-                .broker_registry
+                .portfolio_store.broker_registry
                 .register_live_broker(live_broker)
                 .await;
             info!("5Paisa broker registered");
@@ -2177,7 +2340,7 @@ async fn main() {
             let live_broker = rat_broker_alpaca::create_alpaca_broker(api_key, api_secret, paper);
             orchestrator
                 .state
-                .broker_registry
+                .portfolio_store.broker_registry
                 .register_live_broker(live_broker)
                 .await;
             let mode = if paper { "paper" } else { "live" };

@@ -109,7 +109,13 @@ async fn run_self_evolution(
     );
 
     let orchestrator = initialize_autonomous_system().await?;
-    let validator = SelfEvolutionValidator::new(orchestrator);
+
+    // Must init_rat() before running pipeline — otherwise the orchestrator
+    // panics with "Rat not initialized — call init_rat() after construction".
+    let mut orch = orchestrator;
+    orch.init_rat();
+
+    let validator = SelfEvolutionValidator::new(orch);
     // run_extended_validation already prints the full summary on completion.
     let _report = validator
         .run_extended_validation(&symbols, cycles, induce)

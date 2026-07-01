@@ -68,18 +68,18 @@ impl MarketIntelligenceAgent {
             + (onchain - 0.5) * 0.10;
         // (news_score and meter_conf are added to extra_score after skills vec runs below)
 
-        let rules = self.state.rules.read().await;
+        let rules = self.state.rule_engine.rules.read().await;
 
         let high = price * 1.015;
         let low = price * 0.985;
         let prev_close = price * 0.998;
 
         // --- Kronos Forecast Service ---
-        let kronos_client = KronosForecastTool::new(self.state.config.kronos_service_url.clone());
+        let kronos_client = KronosForecastTool::new(self.state.io.config.kronos_service_url.clone());
 
         // Read real OHLCV history from SharedState (fetched by orchestrator from Binance/Yahoo)
         let ohlcv_for_kronos: Vec<OhlcvBar> = {
-            let history = self.state.ohlcv_history.read().await;
+            let history = self.state.market_data.ohlcv_history.read().await;
             history.get(symbol).cloned().unwrap_or_default()
         };
 
@@ -158,7 +158,7 @@ impl MarketIntelligenceAgent {
 
                 // Store full forecast JSON for Phase 5 (StrategyDecisionAgent)
                 {
-                    let mut last = self.state.last_forecast.write().await;
+                    let mut last = self.state.market_data.last_forecast.write().await;
                     *last = Some(serde_json::json!({
                         "symbol": symbol,
                         "forecasts": resp.forecasts,
@@ -199,7 +199,7 @@ impl MarketIntelligenceAgent {
                     "[MarketIntelligence] Kronos call failed: {}. Defaulting to Neutral.",
                     e
                 );
-                let mut last = self.state.last_forecast.write().await;
+                let mut last = self.state.market_data.last_forecast.write().await;
                 *last = None;
                 // Track Kronos failure in communication log
                 self.state
@@ -224,7 +224,7 @@ impl MarketIntelligenceAgent {
 
         // Read real portfolio equity for accurate drawdown calculations
         let equity = {
-            let portfolio = self.state.portfolio.read().await;
+            let portfolio = self.state.portfolio_store.portfolio.read().await;
             portfolio.total_equity
         };
 
@@ -282,7 +282,7 @@ impl MarketIntelligenceAgent {
             Box::new(crate::news_analyser::NewsAnalyser::new(self.state.clone())),
             // TrainedMemorySkill can be added here too for unified pluggable recall execution.
         ];
-        let rules_snapshot = self.state.rules.read().await;
+        let rules_snapshot = self.state.rule_engine.rules.read().await;
         let mut skill_results: Vec<String> = vec![];
         let mut votes: Vec<SkillVote> = vec![];
         let mut skill_outputs: Vec<rat_core::AgentOutput> = vec![];
@@ -324,7 +324,7 @@ impl MarketIntelligenceAgent {
         }
         // Store votes for OutcomeProcessor to consume when trade closes
         {
-            let mut last = self.state.last_skill_votes.write().await;
+            let mut last = self.state.agent_memory.last_skill_votes.write().await;
             *last = votes;
         }
 
@@ -332,7 +332,7 @@ impl MarketIntelligenceAgent {
         let aggregated = rat_core::SkillAggregator::aggregate(&skill_outputs);
         // Store for use in strategy decision (real integration of ensemble, not just COT)
         {
-            let mut last_agg = self.state.last_aggregated_signal.write().await;
+            let mut last_agg = self.state.agent_memory.last_aggregated_signal.write().await;
             *last_agg = Some(aggregated.clone());
         }
         let agg_summary = if !skill_outputs.is_empty() {
@@ -428,7 +428,7 @@ impl MarketIntelligenceAgent {
 
         // ── Candlestick Pattern Detection (Single-TF on 1m) ─────────────────
         let detected_patterns = {
-            let history = self.state.ohlcv_history.read().await;
+            let history = self.state.market_data.ohlcv_history.read().await;
             let bars = history.get(symbol).cloned().unwrap_or_default();
             if bars.len() >= 2 {
                 let pats = detect_patterns(&bars);
@@ -451,19 +451,19 @@ impl MarketIntelligenceAgent {
 
         // Store detected patterns in SharedState for episode capture
         {
-            let mut stored = self.state.last_patterns.write().await;
+            let mut stored = self.state.market_data.last_patterns.write().await;
             stored.insert(symbol.to_string(), detected_patterns);
         }
 
         // ── Multi-Timeframe Pattern Detection & Confirmation ────────────────
         let mtf_patterns = {
-            let mtf_data = self.state.multi_timeframe_data.read().await;
+            let mtf_data = self.state.market_data.multi_timeframe_data.read().await;
             let data = mtf_data.get(symbol);
             if let Some(tf_data) = data {
                 if tf_data.len() >= 2 {
                     // Build (&str, &[OhlcvBar]) pairs for all available timeframes including 1m
                     let bars_1m_owned: Vec<OhlcvBar> = {
-                        let history = self.state.ohlcv_history.read().await;
+                        let history = self.state.market_data.ohlcv_history.read().await;
                         history.get(symbol).cloned().unwrap_or_default()
                     };
 
@@ -495,13 +495,13 @@ impl MarketIntelligenceAgent {
 
         // Store multi-TF pattern confirmation
         {
-            let mut stored = self.state.last_mtf_patterns.write().await;
+            let mut stored = self.state.market_data.last_mtf_patterns.write().await;
             stored.insert(symbol.to_string(), mtf_patterns);
         }
 
         // ── Advanced chart patterns (H&S, double tops, wedges, flags) ───────
         let advanced_patterns_context = {
-            let history = self.state.ohlcv_history.read().await;
+            let history = self.state.market_data.ohlcv_history.read().await;
             let bars = history.get(symbol).cloned().unwrap_or_default();
             if bars.len() >= 20 {
                 let adv = detect_advanced_patterns(&bars);
@@ -512,7 +512,7 @@ impl MarketIntelligenceAgent {
                         format_advanced_patterns(&adv)
                     );
                 }
-                let mut stored = self.state.last_advanced_patterns.write().await;
+                let mut stored = self.state.market_data.last_advanced_patterns.write().await;
                 stored.insert(symbol.to_string(), adv.clone());
                 format_advanced_patterns(&adv)
             } else {
@@ -520,7 +520,7 @@ impl MarketIntelligenceAgent {
             }
         };
 
-        let _ = self.state.memory.store_decision(
+        let _ = self.state.agent_memory.memory.store_decision(
             &format!("market/{}/{}", symbol, Utc::now().timestamp()),
             &format!(
                 "price={:.2},confluence={:.3},trend={:?},patterns={},advanced={}",
@@ -529,7 +529,7 @@ impl MarketIntelligenceAgent {
         );
 
         {
-            let mut regime = self.state.market_regime.write().await;
+            let mut regime = self.state.market_data.market_regime.write().await;
             *regime = Some(if confluence > 0.7 {
                 crate::types::MarketRegime::TrendingBull
             } else if confluence < 0.4 {
@@ -564,7 +564,7 @@ impl Agent for MarketIntelligenceAgent {
                 Ok(AgentOutput::ConfluenceResult(confluence))
             }
             Some(AgentInput::PivotRequest { high, low, close }) => {
-                let rules = self.state.rules.read().await;
+                let rules = self.state.rule_engine.rules.read().await;
                 let pivots = calculate_pivot_points(high, low, close, rules.pivot_method);
                 println!("[MarketIntelligence] Pivot levels calculated on request");
                 Ok(AgentOutput::PivotResult(pivots))

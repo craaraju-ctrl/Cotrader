@@ -208,9 +208,9 @@ impl ProposerAgent {
         // Pull additional context from state for richer evidence
         let regime_str = format!("{:?}", regime);
         let (confluence, rsi, patterns_count) = {
-            let agg = self.state.last_aggregated_signal.read().await;
-            let metrics = self.state.latest_metrics.read().await;
-            let patterns = self.state.last_patterns.read().await;
+            let agg = self.state.agent_memory.last_aggregated_signal.read().await;
+            let metrics = self.state.market_data.latest_metrics.read().await;
+            let patterns = self.state.market_data.last_patterns.read().await;
             let m = metrics.get(&ctx.symbol);
             let pats = patterns.get(&ctx.symbol).map(|p| p.len()).unwrap_or(0);
             let conf = agg.as_ref().map(|a| a.conviction).unwrap_or(0.5);
@@ -359,7 +359,7 @@ impl CriticAgent {
 
         // === MULTI-FACTOR CRITIQUE ===
         let regime_str = format!("{:?}", {
-            let r = self.state.market_regime.read().await;
+            let r = self.state.market_data.market_regime.read().await;
             *r.as_ref().unwrap_or(&crate::types::MarketRegime::Ranging)
         });
 
@@ -384,7 +384,7 @@ impl CriticAgent {
 
         // 2. Volume-price divergence check
         let bars = {
-            let hist = self.state.ohlcv_history.read().await;
+            let hist = self.state.market_data.ohlcv_history.read().await;
             hist.get(&ctx.symbol).cloned().unwrap_or_default()
         };
         if bars.len() >= 10 {
@@ -436,7 +436,7 @@ impl CriticAgent {
 
         // 4. RSI exhaustion check
         let rsi = {
-            let m = self.state.latest_metrics.read().await;
+            let m = self.state.market_data.latest_metrics.read().await;
             m.get(&ctx.symbol).map(|m| m.rsi_14).unwrap_or(50.0)
         };
         if proposal == "BUY" && rsi > 75.0 {
@@ -529,7 +529,7 @@ impl RiskAgent {
             .await;
 
         let regime_str = format!("{:?}", {
-            let r = self.state.market_regime.read().await;
+            let r = self.state.market_data.market_regime.read().await;
             *r.as_ref().unwrap_or(&crate::types::MarketRegime::Ranging)
         });
 
@@ -568,7 +568,7 @@ impl RiskAgent {
         }
 
         // 3. Portfolio heat (how much risk is already deployed)
-        let portfolio = self.state.portfolio.read().await;
+        let portfolio = self.state.portfolio_store.portfolio.read().await;
         let portfolio_heat = {
             let total_risk: f64 = portfolio.open_positions.iter().map(|p| p.risk_amount).sum();
             if portfolio.total_equity > 0.0 {
@@ -702,21 +702,21 @@ impl HistorianAgent {
         };
 
         let regime_str = format!("{:?}", {
-            let r = self.state.market_regime.read().await;
+            let r = self.state.market_data.market_regime.read().await;
             *r.as_ref().unwrap_or(&crate::types::MarketRegime::Ranging)
         });
 
         // === VECTOR MEMORY SEARCH ===
         let mut similar_episodes = Vec::new();
         {
-            let vm = self.state.vector_memory.read().await;
+            let vm = self.state.agent_memory.vector_memory.read().await;
             if !vm.is_empty() {
                 let query = format!(
                     "{} {} price={:.2}",
                     ctx.symbol, "historical outcome", ctx.current_price
                 );
-                let llm_for_search = (*self.state.llm).clone();
-                if let Ok(results) = vm.search(&query, 3, &llm_for_search).await {
+                let llm_for_search = (*self.state.io.llm).clone();
+                if let Ok(results) = vm.search(&query, 3).await {
                     similar_episodes = results;
                 }
             }

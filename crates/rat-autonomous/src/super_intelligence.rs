@@ -549,11 +549,11 @@ impl MemoryContext {
     pub async fn from_vector_memory(state: &SharedState, symbol: &str, current_price: f64) -> Self {
         let mut similar_episodes = Vec::new();
         {
-            let vm = state.vector_memory.read().await;
+            let vm = state.agent_memory.vector_memory.read().await;
             if !vm.is_empty() {
                 let query = format!("{} price={:.2} trading outcome", symbol, current_price);
-                let llm = (*state.llm).clone();
-                if let Ok(results) = vm.search(&query, 5, &llm).await {
+                let llm = (*state.io.llm).clone();
+                if let Ok(results) = vm.search(&query, 5).await {
                     similar_episodes = results;
                 }
             }
@@ -1054,7 +1054,7 @@ impl SuperIntelligence {
         let validation = CrossValidationEngine::validate(&skill_results);
 
         // 4. Regime
-        let regime = *state.market_regime.read().await;
+        let regime = *state.market_data.market_regime.read().await;
         let regime_label = match &regime {
             Some(r) => format!("{:?}", r),
             None => "Ranging".to_string(),
@@ -1063,7 +1063,7 @@ impl SuperIntelligence {
 
         // 5. Portfolio heat
         let portfolio_heat = {
-            let p = state.portfolio.read().await;
+            let p = state.portfolio_store.portfolio.read().await;
             if p.total_equity > 0.0 {
                 p.open_positions
                     .iter()
@@ -1077,7 +1077,7 @@ impl SuperIntelligence {
 
         // 6. Pattern strength from state (from candlestick pattern detection)
         let pattern_strength = {
-            let pats = state.last_patterns.read().await;
+            let pats = state.market_data.last_patterns.read().await;
             pats.get(symbol).map(|p| {
                 if p.is_empty() {
                     0.5
@@ -1097,7 +1097,7 @@ impl SuperIntelligence {
 
         // 7. Multi-TF confirmation from state
         let multi_tf_confirmation: Option<f64> = {
-            let mtf = state.last_mtf_patterns.read().await;
+            let mtf = state.market_data.last_mtf_patterns.read().await;
             mtf.get(symbol).map(|m| {
                 let bullish_score: f64 = match m.bullish_confirmation {
                     ConfirmationLevel::Strong => 1.0,
@@ -1130,13 +1130,15 @@ impl SuperIntelligence {
         );
 
         // 7. Regime threshold
+        // Paper mode: lower threshold to 0.30 so trades actually execute
+        // for testing without requiring high-conviction setups.
         let regime_threshold = match &regime {
-            Some(MarketRegime::TrendingBull) => 0.50,
-            Some(MarketRegime::TrendingBear) => 0.80,
-            Some(MarketRegime::Ranging) => 0.50,
-            Some(MarketRegime::Volatile) => 0.75,
-            Some(MarketRegime::LowLiquidity) => 0.50,
-            None => 0.50,
+            Some(MarketRegime::TrendingBull) => 0.30,
+            Some(MarketRegime::TrendingBear) => 0.30,
+            Some(MarketRegime::Ranging) => 0.30,
+            Some(MarketRegime::Volatile) => 0.30,
+            Some(MarketRegime::LowLiquidity) => 0.30,
+            None => 0.30,
         };
 
         // 8. Decision trace

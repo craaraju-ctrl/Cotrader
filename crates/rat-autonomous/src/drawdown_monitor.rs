@@ -28,7 +28,7 @@ impl DrawdownMonitorAgent {
     }
 
     async fn check_drawdown(&self) -> (f64, f64, bool) {
-        let portfolio = self.state.portfolio.read().await;
+        let portfolio = self.state.portfolio_store.portfolio.read().await;
         let current_dd = portfolio.max_drawdown_today;
         let halted = !portfolio.trading_enabled;
 
@@ -82,7 +82,7 @@ impl Agent for DrawdownMonitorAgent {
 
         // At CRITICAL level, actually halt trading to enforce the precision limit
         if ratio >= WARNING_80_PCT && !halted {
-            let mut portfolio = self.state.portfolio.write().await;
+            let mut portfolio = self.state.portfolio_store.portfolio.write().await;
             portfolio.trading_enabled = false;
             println!(
                 "[DrawdownMonitor] 🛑 TRADING HALTED at {:.2}% — {}% of hard limit consumed.",

@@ -41,7 +41,7 @@ impl ActiveLearner {
         if price <= 0.0 {
             return None;
         }
-        let equity = self.state.portfolio.read().await.total_equity;
+        let equity = self.state.portfolio_store.portfolio.read().await.total_equity;
         let max_probe = equity * self.exploration_budget_pct;
         if max_probe <= 0.0 {
             return None;
@@ -72,7 +72,7 @@ impl ActiveLearner {
             return known_unc;
         }
         // Compute from price volatility: high ATR% = high uncertainty
-        let bars = self.state.ohlcv_history.read().await;
+        let bars = self.state.market_data.ohlcv_history.read().await;
         if let Some(b) = bars.get(symbol) {
             if b.len() >= 14 {
                 let highs: Vec<f64> = b.iter().map(|x| x.high).collect();
@@ -99,6 +99,7 @@ impl ActiveLearner {
 
     async fn get_current_price(&self, symbol: &str) -> f64 {
         self.state
+            .market_data
             .ohlcv_history
             .read()
             .await

@@ -248,10 +248,11 @@ impl PolicyCache {
     /// This is the "feature engineering" step — it reads live state and
     /// buckets it into coarsely-grained categories.
     pub async fn extract_features(&self, symbol: &str) -> MarketFeatures {
-        let history = self.state.ohlcv_history.read().await;
+        let history = self.state.market_data.ohlcv_history.read().await;
         let regime = format!(
             "{:?}",
             self.state
+                .market_data
                 .market_regime
                 .read()
                 .await
@@ -387,7 +388,7 @@ impl PolicyCache {
     ///
     /// Called once at startup to bootstrap the cache from past experience.
     pub async fn seed_from_history(&self) -> usize {
-        let store = &self.state.episode_store;
+        let store = &self.state.agent_memory.episode_store;
         let trades = match store.load_recent_closed_trades(500, None) {
             Ok(t) => t,
             Err(_) => return 0,

@@ -30,6 +30,240 @@ const COT_FLUSH_INTERVAL: usize = 100;
 /// Auto-prune COT entries older than this many days from SQLite.
 const COT_PRUNE_DAYS: u64 = 7;
 
+// ═══════════════════════════════════════════════════════════════════════
+// Domain-Specific Stores
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Portfolio & Risk — positions, P&L, broker, circuit breaker, psychology.
+#[derive(Debug, Clone)]
+pub struct PortfolioStore {
+    pub portfolio: Arc<RwLock<PortfolioState>>,
+    pub trading_goals: Arc<RwLock<TradingGoals>>,
+    pub behavioral_psychology: Arc<RwLock<BehavioralPsychologyEngine>>,
+    pub broker_registry: Arc<BrokerRegistry>,
+    pub circuit_breaker: Arc<CircuitBreaker>,
+    pub live_order_manager: Arc<LiveOrderManager>,
+    pub memory_integration: Arc<MemoryIntegration>,
+}
+
+impl PortfolioStore {
+    pub fn new(config: &Config) -> Self {
+        Self {
+            portfolio: Arc::new(RwLock::new(PortfolioState {
+                cash_balance: config.initial_balance,
+                total_equity: config.initial_balance,
+                daily_pnl: 0.0,
+                daily_pnl_pct: 0.0,
+                open_positions: Vec::new(),
+                total_trades_today: 0,
+                winning_trades_today: 0,
+                losing_trades_today: 0,
+                consecutive_losses: 0,
+                max_drawdown_today: 0.0,
+                last_trade_time: None,
+                last_trade_symbol: None,
+                last_trade_by_symbol: HashMap::new(),
+                trading_enabled: true,
+            })),
+            trading_goals: Arc::new(RwLock::new(TradingGoals::default())),
+            behavioral_psychology: Arc::new(RwLock::new(BehavioralPsychologyEngine::new())),
+            broker_registry: Arc::new(BrokerRegistry::new(PaperEngineConfig {
+                realistic_paper_enabled: std::env::var("RAT_REALISTIC_PAPER")
+                    .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+                    .unwrap_or(false),
+                ..PaperEngineConfig::default()
+            })),
+            circuit_breaker: Arc::new(CircuitBreaker::new(CircuitBreakerConfig::default())),
+            live_order_manager: Arc::new(
+                LiveOrderManager::open(Some("rat_orders.db")).unwrap_or_else(|e| {
+                    eprintln!("[LiveOrderManager] ⚠ Failed to open order DB: {}", e);
+                    LiveOrderManager::open(Some(":memory:")).expect("In-memory fallback failed")
+                }),
+            ),
+            memory_integration: Arc::new(MemoryIntegration::new()),
+        }
+    }
+}
+
+/// Market Data — OHLCV, metrics, patterns, regimes, calendar, watchlist.
+#[derive(Debug, Clone)]
+pub struct MarketDataStore {
+    pub ohlcv_history: Arc<RwLock<HashMap<String, Vec<OhlcvBar>>>>,
+    pub market_regime: Arc<RwLock<Option<MarketRegime>>>,
+    pub latest_metrics: Arc<RwLock<HashMap<String, crate::market_metrics_meter::MetricsSnapshot>>>,
+    pub last_forecast: Arc<RwLock<Option<serde_json::Value>>>,
+    pub multi_timeframe_data: Arc<RwLock<HashMap<String, Vec<TimeframeData>>>>,
+    pub multi_tf_analyses: Arc<RwLock<HashMap<String, HashMap<String, TimeframeAnalysis>>>>,
+    pub multi_tf_aggregate: Arc<RwLock<HashMap<String, MultiTfAggregate>>>,
+    pub last_patterns: Arc<RwLock<HashMap<String, Vec<CandlestickPattern>>>>,
+    pub last_mtf_patterns: Arc<RwLock<HashMap<String, MultiTfPatternConfirmation>>>,
+    pub last_advanced_patterns: Arc<RwLock<HashMap<String, Vec<AdvancedPattern>>>>,
+    pub last_tri_level_verdict:
+        Arc<RwLock<HashMap<String, crate::tri_level_validator::TriLevelVerdict>>>,
+    pub calendar_events: Arc<RwLock<Vec<CalendarEvent>>>,
+    pub watchlist: Arc<RwLock<Vec<String>>>,
+}
+
+impl MarketDataStore {
+    pub fn new() -> Self {
+        Self {
+            ohlcv_history: Arc::new(RwLock::new(HashMap::new())),
+            market_regime: Arc::new(RwLock::new(None)),
+            latest_metrics: Arc::new(RwLock::new(HashMap::new())),
+            last_forecast: Arc::new(RwLock::new(None)),
+            multi_timeframe_data: Arc::new(RwLock::new(HashMap::new())),
+            multi_tf_analyses: Arc::new(RwLock::new(HashMap::new())),
+            multi_tf_aggregate: Arc::new(RwLock::new(HashMap::new())),
+            last_patterns: Arc::new(RwLock::new(HashMap::new())),
+            last_mtf_patterns: Arc::new(RwLock::new(HashMap::new())),
+            last_advanced_patterns: Arc::new(RwLock::new(HashMap::new())),
+            last_tri_level_verdict: Arc::new(RwLock::new(HashMap::new())),
+            calendar_events: Arc::new(RwLock::new(rat_core::generate_economic_calendar())),
+            watchlist: Arc::new(RwLock::new(Self::default_watchlist())),
+        }
+    }
+
+    fn default_watchlist() -> Vec<String> {
+        vec![
+            // ── Layer1 / Smart Contract Platforms (24) ──
+            "BTC","ETH","SOL","BNB","ADA","AVAX","DOT","MATIC","NEAR","ATOM",
+            "FTM","ALGO","HBAR","ICP","XTZ","EGLD","FLOW","MINA","KSM","SEI","APT","INJ","SUI","TON","TRX",
+            // ── DeFi / DEX / Lending (18) ──
+            "UNI","AAVE","CRV","CAKE","SUSHI","COMP","MKR","SNX","BAL","YFI",
+            "LDO","RPL","FXS","CVX","GMX","GNS","JOE","VELO",
+            // ── Oracles / Infrastructure (6) ──
+            "LINK","GRT","BAND","API3","TRB","UMA",
+            // ── Payments / Currency / Privacy (7) ──
+            "XRP","LTC","XLM","DASH","ZEC","XMR","NANO",
+            // ── Gaming / Metaverse (10) ──
+            "AXS","SAND","MANA","GALA","ENJ","CHZ","ILV","YGG","IMX","RON",
+            // ── Meme / Community (8) ──
+            "DOGE","SHIB","PEPE","WIF","BONK","FLOKI","BABYDOGE","ELON",
+            // ── Layer2 / Scaling (6) ──
+            "ARB","OP","LRC","BOBA","METIS","CTSI",
+            // ── Storage / Compute / Data (4) ──
+            "FIL","AR","STORJ","AKT",
+            // ── Exchange / Platform Tokens (5) ──
+            "CRO","OKB","KCS","LEO","HT",
+            // ── AI / Data / Emerging (10) ──
+            "FET","AGIX","OCEAN","RNDR","TAO","ARKM","NMR","TRAC","ORAI","MDT",
+            // ── Stocks (US) (10) ──
+            "AAPL","TSLA","NVDA","MSFT","AMZN","GOOGL","META","NFLX","AMD","INTC",
+            // ── ETFs (2) ──
+            "SPY","QQQ",
+            // ── Stocks (India) (10) ──
+            "RELIANCE","TCS","INFY","HDFCBANK","ICICIBANK","WIPRO","TATAMOTORS",
+            "ADANIENT","BAJFINANCE","SBIN",
+        ]
+        .into_iter().map(String::from).collect()
+    }
+}
+
+impl Default for MarketDataStore {
+    fn default() -> Self { Self::new() }
+}
+
+/// Rule Engine — discipline rules, signals, LLM reasoning, layer weights.
+#[derive(Debug, Clone)]
+pub struct RuleEngine {
+    pub rules: Arc<RwLock<DisciplineRules>>,
+    pub last_signals: Arc<RwLock<Vec<TradeSignal>>>,
+    pub layer_trust_weights: Arc<RwLock<crate::tri_level_validator::LayerTrustWeights>>,
+    pub last_llm_reason: Arc<RwLock<String>>,
+}
+
+impl RuleEngine {
+    pub fn new(rules: DisciplineRules) -> Self {
+        Self {
+            rules: Arc::new(RwLock::new(rules)),
+            last_signals: Arc::new(RwLock::new(Vec::new())),
+            layer_trust_weights: Arc::new(RwLock::new(
+                crate::tri_level_validator::LayerTrustWeights::default(),
+            )),
+            last_llm_reason: Arc::new(RwLock::new(String::new())),
+        }
+    }
+}
+
+/// Agent Memory — episode store, vector memory, knowledge graph, COT.
+#[derive(Debug, Clone)]
+pub struct AgentMemoryStore {
+    pub memory: Arc<MemoryStore>,
+    pub episode_store: Arc<EpisodeStore>,
+    pub vector_memory: Arc<tokio::sync::RwLock<rat_core::VectorMemory>>,
+    pub knowledge_graph: Arc<RwLock<KnowledgeGraph>>,
+    pub latest_episode: Arc<RwLock<HashMap<String, String>>>,
+    pub latest_news: Arc<RwLock<HashMap<String, NewsContext>>>,
+    pub last_skill_votes: Arc<RwLock<Vec<SkillVote>>>,
+    pub last_aggregated_signal: Arc<RwLock<Option<rat_core::AggregatedSignal>>>,
+    pub cot_store: Arc<RwLock<Vec<CotEntry>>>,
+    pub cot_id_counter: Arc<AtomicU64>,
+    pub agent_market_summary: Arc<RwLock<String>>,
+}
+
+impl AgentMemoryStore {
+    pub fn new(memory: MemoryStore, episode_store: Arc<EpisodeStore>) -> Self {
+        Self {
+            memory: Arc::new(memory),
+            episode_store,
+            vector_memory: Arc::new(tokio::sync::RwLock::new(VectorMemory::new("rat_vectors.json"))),
+            knowledge_graph: Arc::new(RwLock::new(KnowledgeGraph::new())),
+            latest_episode: Arc::new(RwLock::new(HashMap::new())),
+            latest_news: Arc::new(RwLock::new(HashMap::new())),
+            last_skill_votes: Arc::new(RwLock::new(Vec::new())),
+            last_aggregated_signal: Arc::new(RwLock::new(None)),
+            cot_store: Arc::new(RwLock::new(Vec::new())),
+            cot_id_counter: Arc::new(AtomicU64::new(1)),
+            agent_market_summary: Arc::new(RwLock::new(String::new())),
+        }
+    }
+}
+
+/// IO & Infrastructure — broadcast channels, event bus, config, tasks.
+#[derive(Debug, Clone)]
+pub struct IoStore {
+    pub update_tx: Arc<tokio::sync::broadcast::Sender<String>>,
+    pub event_bus: Option<Arc<dyn rat_eventbus::EventBus>>,
+    pub service_manager: Arc<rat_core::ServiceManager>,
+    pub config: Arc<Config>,
+    pub llm: Arc<LlmExecutor>,
+    pub agent_tasks: Arc<RwLock<Vec<AgentTask>>>,
+    pub last_watchlist_scan: Arc<RwLock<Option<DateTime<Utc>>>>,
+    pub communication_log: Arc<RwLock<CommunicationLog>>,
+    pub pipeline_run_counter: Arc<AtomicU64>,
+}
+
+impl IoStore {
+    pub fn new(config: &Config) -> Self {
+        Self::with_event_bus(config, None)
+    }
+
+    pub fn with_event_bus(
+        config: &Config,
+        event_bus: Option<Arc<dyn rat_eventbus::EventBus>>,
+    ) -> Self {
+        let (update_tx, _) = tokio::sync::broadcast::channel(256);
+        Self {
+            update_tx: Arc::new(update_tx),
+            event_bus,
+            service_manager: Arc::new(ServiceManager::new()),
+            config: Arc::new(config.clone()),
+            llm: Arc::new(LlmExecutor::from_config(config)),
+            agent_tasks: Arc::new(RwLock::new(vec![
+                AgentTask::new("price_scan", 5),
+                AgentTask::new("position_monitor", 10),
+                AgentTask::new("market_scan", 300),
+                AgentTask::new("portfolio_review", 3600),
+                AgentTask::new("goal_review", 43200),
+                AgentTask::new("daily_reflection", 86400),
+            ])),
+            last_watchlist_scan: Arc::new(RwLock::new(None)),
+            communication_log: Arc::new(RwLock::new(CommunicationLog::new(0, ""))),
+            pipeline_run_counter: Arc::new(AtomicU64::new(1)),
+        }
+    }
+}
+
 /// Multi-timeframe market data for a single symbol
 #[derive(Debug, Clone)]
 pub struct TimeframeData {
@@ -104,133 +338,16 @@ impl AgentTask {
 
 #[derive(Debug, Clone)]
 pub struct SharedState {
-    pub portfolio: Arc<RwLock<PortfolioState>>,
-    pub memory: Arc<MemoryStore>,
-    pub rules: Arc<RwLock<DisciplineRules>>,
-    pub config: Arc<Config>,
-    pub last_signals: Arc<RwLock<Vec<TradeSignal>>>,
-    pub market_regime: Arc<RwLock<Option<MarketRegime>>>,
-    pub llm: Arc<LlmExecutor>,
-    /// Kronos forecast stored by MarketIntelligenceAgent (Phase 2) for use in StrategyDecisionAgent (Phase 5).
-    pub last_forecast: Arc<RwLock<Option<serde_json::Value>>>,
-    /// LLM reasoning from last cycle — stored for debugging / UI display.
-    pub last_llm_reason: Arc<RwLock<String>>,
-    /// Historical OHLCV data per symbol (1m) — capped at MAX_OHLCV_BARS per symbol.
-    pub ohlcv_history: Arc<RwLock<HashMap<String, Vec<OhlcvBar>>>>,
-
-    // ── 24/7 Agentic AI System Additions ──
-    /// Economic calendar — upcoming high-impact events the agent should know about.
-    pub calendar_events: Arc<RwLock<Vec<CalendarEvent>>>,
-    /// Trading goals — targets and behavior mode the agent references for decisions.
-    pub trading_goals: Arc<RwLock<TradingGoals>>,
-    /// Dynamic watchlist — symbols the agent is currently monitoring.
-    pub watchlist: Arc<RwLock<Vec<String>>>,
-    /// Multi-timeframe OHLCV data (15m, 1h, 1d) per symbol.
-    pub multi_timeframe_data: Arc<RwLock<HashMap<String, Vec<TimeframeData>>>>,
-    /// Scheduled agent tasks for different workflows.
-    pub agent_tasks: Arc<RwLock<Vec<AgentTask>>>,
-    /// Last full-scan timestamp for the watchlist scanner.
-    pub last_watchlist_scan: Arc<RwLock<Option<DateTime<Utc>>>>,
-    /// The agent's latest summary of market conditions (generated by LLM reflection).
-    pub agent_market_summary: Arc<RwLock<String>>,
-
-    /// Latest episode ID per symbol — used to update outcomes when trades close.
-    pub latest_episode: Arc<RwLock<HashMap<String, String>>>,
-
-    /// Latest news context per symbol — fetched by NewsFetcher, injected into LLM prompts.
-    pub latest_news: Arc<RwLock<HashMap<String, NewsContext>>>,
-
-    /// Vector memory for semantic similarity search across episodes (now LanceDB backed for production).
-    pub vector_memory: Arc<tokio::sync::RwLock<rat_core::VectorMemory>>,
-
-    /// Knowledge graph for relationship-based recall (symbol→regime→outcome).
-    /// Built lazily from closed episodes on first query, then cached.
-    pub knowledge_graph: Arc<RwLock<KnowledgeGraph>>,
-
-    /// Latest detected candlestick patterns per symbol — populated by MarketIntelligenceAgent.
-    pub last_patterns: Arc<RwLock<HashMap<String, Vec<CandlestickPattern>>>>,
-
-    /// Multi-timeframe pattern confirmation per symbol — cross-references patterns across timeframes.
-    pub last_mtf_patterns: Arc<RwLock<HashMap<String, MultiTfPatternConfirmation>>>,
-
-    /// Advanced chart patterns (H&S, double tops, wedges, flags) per symbol.
-    pub last_advanced_patterns: Arc<RwLock<HashMap<String, Vec<AdvancedPattern>>>>,
-
-    /// Latest tri-level parallel verdict (rules + LLM + Kronos) per symbol.
-    pub last_tri_level_verdict:
-        Arc<RwLock<HashMap<String, crate::tri_level_validator::TriLevelVerdict>>>,
-
-    /// Trust weights for tri-level layers — upgraded after each trade close.
-    pub layer_trust_weights: Arc<RwLock<crate::tri_level_validator::LayerTrustWeights>>,
-
-    /// Chain-of-thought store — capped at MAX_COT_RAM entries in RAM; older entries flushed to SQLite.
-    pub cot_store: Arc<RwLock<Vec<CotEntry>>>,
-    /// Atomic counter for generating unique COT entry IDs.
-    pub cot_id_counter: Arc<AtomicU64>,
-
-    /// Broadcast channel for real-time WS updates (COT, signals, prices, memory recalls) - connects TUI and clients.
-    pub update_tx: Arc<tokio::sync::broadcast::Sender<String>>,
-    /// SQLite-backed persistent store for closed trade episodes, regret events, COT logs.
-    pub episode_store: Arc<EpisodeStore>,
-    /// The most recent skill votes, captured by MarketIntelligenceAgent.
-    /// Consumed by OutcomeProcessor when a trade closes.
-    pub last_skill_votes: Arc<RwLock<Vec<SkillVote>>>,
-
-    /// The aggregated signal from skills (produced by SkillAggregator in MI).
-    /// Now wired into strategy decision for real use of ensemble (previously only in COT).
-    pub last_aggregated_signal: Arc<RwLock<Option<rat_core::AggregatedSignal>>>,
-
-    /// Latest rich metrics snapshot per symbol from MarketMetricsMeter tool (RSI/MACD/ATR/BB/Stoch/vol/regime/fib/confluence).
-    /// Connected to pipeline, debate, strategy (autonomous levels), aggregator (via skill), memory recall, WS price updates.
-    pub latest_metrics: Arc<RwLock<HashMap<String, crate::market_metrics_meter::MetricsSnapshot>>>,
-
-    /// Broker registry for live trading — routes orders through PaperBroker or Zerodha/other.
-    /// When mode is Live, trades are executed on the real exchange via the registered broker adapter.
-    pub broker_registry: Arc<BrokerRegistry>,
-
-    /// Behavioral Psychology Engine — tracks emotional state, detects biases,
-    /// and adjusts position sizing based on psychological health.
-    /// Thread-safe via Arc<RwLock<>>.
-    pub behavioral_psychology: Arc<RwLock<BehavioralPsychologyEngine>>,
-
-    /// Service Manager — monitors health of external servers (LLM, Kronos, etc.)
-    /// via periodic health checks. Status is broadcast via WebSocket for TUI display.
-    pub service_manager: Arc<rat_core::ServiceManager>,
-
-    /// Circuit Breaker — anomaly detection for live trading. Monitors rejections,
-    /// slippage, connection drops, and P&L drawdowns. Automatically halts trading
-    /// when thresholds are breached.
-    pub circuit_breaker: Arc<CircuitBreaker>,
-
-    /// Memory Integration — bridges trading with agentic-memory.
-    /// Provides ConcurrentPolicyCache for sub-ms risk lookups,
-    /// FinancialRegretScorer for post-trade analytics, and
-    /// volatility sync to TemporalEngine.
-    pub memory_integration: Arc<MemoryIntegration>,
-
-    /// Live Order Manager — SQLite-backed order lifecycle tracker. Persists every
-    /// live order placed through the broker for crash recovery, fill confirmation,
-    /// and rejection tracking.
-    pub live_order_manager: Arc<LiveOrderManager>,
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Multi-Timeframe Analysis (11 TFs: 1m/5m/15m/30m/1h/2h/4h/8h/12h/1d/1w)
-    // ═══════════════════════════════════════════════════════════════════════
-    /// Per-symbol, per-timeframe full analysis snapshots (all indicators + patterns)
-    pub multi_tf_analyses: Arc<RwLock<HashMap<String, HashMap<String, TimeframeAnalysis>>>>,
-
-    /// Per-symbol aggregated multi-timeframe signal (weighted across all 11 TFs)
-    pub multi_tf_aggregate: Arc<RwLock<HashMap<String, MultiTfAggregate>>>,
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // Agent Communication Log — transparent virtual communication layer.
-    // Every agent decision (block/hold/skip/pass/buy/sell/veto) is recorded
-    // here with structured reasons, creating a full audit trail.
-    // ═══════════════════════════════════════════════════════════════════════
-    /// Current pipeline run's communication log — collects all agent decisions.
-    pub communication_log: Arc<RwLock<CommunicationLog>>,
-    /// Atomic counter for generating unique pipeline run IDs.
-    pub pipeline_run_counter: Arc<AtomicU64>,
+    /// Portfolio & Risk — positions, P&L, broker, circuit breaker, psychology.
+    pub portfolio_store: PortfolioStore,
+    /// Market Data — OHLCV, metrics, patterns, regimes, calendar, watchlist.
+    pub market_data: MarketDataStore,
+    /// Rule Engine — discipline rules, signals, LLM reasoning, layer weights.
+    pub rule_engine: RuleEngine,
+    /// Agent Memory — episode store, vector memory, knowledge graph, COT.
+    pub agent_memory: AgentMemoryStore,
+    /// IO & Infrastructure — broadcast channels, event bus, config, tasks.
+    pub io: IoStore,
 }
 
 impl SharedState {
@@ -254,155 +371,30 @@ impl SharedState {
         config: Config,
         db_path: &str,
     ) -> Result<Self, rusqlite::Error> {
-        // Open (or create) SQLite history database (with built-in recovery for locks/WAL)
+        Self::with_event_bus(memory, rules, config, db_path, None)
+    }
+
+    pub fn with_event_bus(
+        memory: MemoryStore,
+        rules: DisciplineRules,
+        config: Config,
+        db_path: &str,
+        event_bus: Option<Arc<dyn rat_eventbus::EventBus>>,
+    ) -> Result<Self, rusqlite::Error> {
         let episode_store = Arc::new(EpisodeStore::open(db_path)?);
-        let portfolio = PortfolioState {
-            cash_balance: config.initial_balance,
-            total_equity: config.initial_balance,
-            daily_pnl: 0.0,
-            daily_pnl_pct: 0.0,
-            open_positions: Vec::new(),
-            total_trades_today: 0,
-            winning_trades_today: 0,
-            losing_trades_today: 0,
-            consecutive_losses: 0,
-            max_drawdown_today: 0.0,
-            last_trade_time: None,
-            last_trade_symbol: None,
-            last_trade_by_symbol: HashMap::new(),
-            trading_enabled: true,
-        };
 
-        // Generate economic calendar at startup
-        let calendar = rat_core::generate_economic_calendar();
-
-        // Default watchlist — used only when no WATCHLIST env var and no saved state is found.
-        // Priority: redb persisted state > WATCHLIST env var > these built-in defaults.
-        let default_watchlist: Vec<String> = vec![
-            // ── Crypto (Binance paper, no key needed) ──────────────────────
-            "BTC",
-            "ETH",
-            "SOL",
-            "BNB",
-            "XRP",
-            "ADA",
-            "DOGE",
-            "AVAX",
-            "LINK",
-            "DOT",
-            "MATIC",
-            "LTC",
-            "ATOM",
-            "UNI",
-            "NEAR",
-            // ── US Equities (Alpaca / Alpha Vantage) ───────────────────────
-            "AAPL",
-            "TSLA",
-            "NVDA",
-            "MSFT",
-            "AMZN",
-            "GOOGL",
-            "META",
-            "NFLX",
-            "AMD",
-            "INTC",
-            "COIN",
-            "SPY",
-            "QQQ",
-            // ── Indian Markets (NSE — requires live broker key) ─────────────
-            "RELIANCE",
-            "TCS",
-            "INFY",
-            "HDFCBANK",
-            "ICICIBANK",
-            "WIPRO",
-            "TATAMOTORS",
-            "ADANIENT",
-            "BAJFINANCE",
-            "SBIN",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect();
-
-        // Default agent tasks for 24/7 operation
-        let tasks = vec![
-            AgentTask::new("price_scan", 5),           // Every 5 seconds
-            AgentTask::new("position_monitor", 10),    // Every 10 seconds
-            AgentTask::new("market_scan", 300),        // Every 5 minutes
-            AgentTask::new("portfolio_review", 3600),  // Every hour
-            AgentTask::new("goal_review", 43200),      // Every 12 hours
-            AgentTask::new("daily_reflection", 86400), // Once per day
-        ];
-
-        let (update_tx, _) = tokio::sync::broadcast::channel(256);
-
-        let llm = LlmExecutor::from_config(&config);
+        let portfolio_store = PortfolioStore::new(&config);
+        let market_data = MarketDataStore::new();
+        let rule_engine = RuleEngine::new(rules);
+        let agent_memory = AgentMemoryStore::new(memory, episode_store);
+        let io = IoStore::with_event_bus(&config, event_bus);
 
         Ok(Self {
-            portfolio: Arc::new(RwLock::new(portfolio)),
-            memory: Arc::new(memory),
-            rules: Arc::new(RwLock::new(rules)),
-            config: Arc::new(config),
-            last_signals: Arc::new(RwLock::new(Vec::new())),
-            market_regime: Arc::new(RwLock::new(None)),
-            llm: Arc::new(llm),
-            last_forecast: Arc::new(RwLock::new(None)),
-            last_llm_reason: Arc::new(RwLock::new(String::new())),
-            ohlcv_history: Arc::new(RwLock::new(HashMap::new())),
-            calendar_events: Arc::new(RwLock::new(calendar)),
-            trading_goals: Arc::new(RwLock::new(TradingGoals::default())),
-            watchlist: Arc::new(RwLock::new(default_watchlist)),
-            multi_timeframe_data: Arc::new(RwLock::new(HashMap::new())),
-            agent_tasks: Arc::new(RwLock::new(tasks)),
-            last_watchlist_scan: Arc::new(RwLock::new(None)),
-            agent_market_summary: Arc::new(RwLock::new(String::new())),
-            latest_episode: Arc::new(RwLock::new(HashMap::new())),
-            latest_news: Arc::new(RwLock::new(HashMap::new())),
-            vector_memory: Arc::new(tokio::sync::RwLock::new(VectorMemory::new(
-                "rat_vectors.json",
-            ))), // With `lancedb` feature on rat-core, first store() lazily creates sibling rat_vectors.lance/ + migrates JSON (see vector_memory.rs)
-            knowledge_graph: Arc::new(RwLock::new(KnowledgeGraph::new())),
-            last_patterns: Arc::new(RwLock::new(HashMap::new())),
-            last_mtf_patterns: Arc::new(RwLock::new(HashMap::new())),
-            last_advanced_patterns: Arc::new(RwLock::new(HashMap::new())),
-            last_tri_level_verdict: Arc::new(RwLock::new(HashMap::new())),
-            layer_trust_weights: Arc::new(RwLock::new(
-                crate::tri_level_validator::LayerTrustWeights::default(),
-            )),
-            cot_store: Arc::new(RwLock::new(Vec::new())),
-            cot_id_counter: Arc::new(AtomicU64::new(1)),
-            episode_store,
-            last_skill_votes: Arc::new(RwLock::new(Vec::new())),
-            last_aggregated_signal: Arc::new(RwLock::new(None)),
-            latest_metrics: Arc::new(RwLock::new(HashMap::new())),
-            update_tx: Arc::new(update_tx),
-            circuit_breaker: Arc::new(CircuitBreaker::new(CircuitBreakerConfig::default())),
-            memory_integration: Arc::new(MemoryIntegration::new()),
-            live_order_manager: Arc::new(
-                LiveOrderManager::open(Some("rat_orders.db")).unwrap_or_else(|e| {
-                    eprintln!("[LiveOrderManager] ⚠ Failed to open order DB: {}", e);
-                    LiveOrderManager::open(Some(":memory:")).expect("In-memory fallback failed")
-                }),
-            ),
-            broker_registry: Arc::new(BrokerRegistry::new(PaperEngineConfig {
-                // Opt-in realistic Level2 fills (item 3a): when enabled, the fast
-                // loop feeds Binance depth into the order book and `place_order`
-                // walks it instead of using fixed slippage. Default off.
-                realistic_paper_enabled: std::env::var("RAT_REALISTIC_PAPER")
-                    .map(|v| {
-                        let v = v.trim().to_ascii_lowercase();
-                        matches!(v.as_str(), "1" | "true" | "yes" | "on")
-                    })
-                    .unwrap_or(false),
-                ..PaperEngineConfig::default()
-            })),
-            behavioral_psychology: Arc::new(RwLock::new(BehavioralPsychologyEngine::new())),
-            service_manager: Arc::new(ServiceManager::new()),
-            multi_tf_analyses: Arc::new(RwLock::new(HashMap::new())),
-            multi_tf_aggregate: Arc::new(RwLock::new(HashMap::new())),
-            communication_log: Arc::new(RwLock::new(CommunicationLog::new(0, ""))),
-            pipeline_run_counter: Arc::new(AtomicU64::new(1)),
+            portfolio_store,
+            market_data,
+            rule_engine,
+            agent_memory,
+            io,
         })
     }
 }
@@ -411,7 +403,7 @@ impl SharedState {
     /// Refresh economic calendar from live API (FMP/AlphaVantage) or built-in fallback.
     pub async fn refresh_calendar(&self) {
         let events = rat_core::fetch_economic_calendar_live().await;
-        *self.calendar_events.write().await = events;
+        *self.market_data.calendar_events.write().await = events;
     }
 
     /// Push a chain-of-thought entry into the store and return its unique ID.
@@ -451,7 +443,7 @@ impl SharedState {
         symbol: Option<String>,
         persist: bool,
     ) -> u64 {
-        let id = self.cot_id_counter.fetch_add(1, Ordering::Relaxed);
+        let id = self.agent_memory.cot_id_counter.fetch_add(1, Ordering::Relaxed);
         let entry = CotEntry {
             id,
             chain_id,
@@ -464,7 +456,7 @@ impl SharedState {
             timestamp: Utc::now().to_rfc3339(),
             symbol,
         };
-        let mut store = self.cot_store.write().await;
+        let mut store = self.agent_memory.cot_store.write().await;
         store.push(entry.clone());
         let store_len = store.len();
 
@@ -488,7 +480,7 @@ impl SharedState {
                     ts: e.timestamp.clone(),
                 })
                 .collect();
-            let _ = self.episode_store.flush_cot_batch(&rows);
+            let _ = self.agent_memory.episode_store.flush_cot_batch(&rows);
         }
 
         // Broadcast for WS real-time (connects to TUI/clients with debate/trained data)
@@ -507,7 +499,7 @@ impl SharedState {
             "symbol": entry.symbol
         })
         .to_string();
-        let _ = self.update_tx.send(update);
+        let _ = self.io.update_tx.send(update);
 
         id
     }
@@ -517,7 +509,7 @@ impl SharedState {
     pub async fn prune_old_cot_entries(&self) {
         use chrono::Duration;
         let cutoff = (Utc::now() - Duration::days(COT_PRUNE_DAYS as i64)).to_rfc3339();
-        match self.episode_store.prune_cot_entries(&cutoff) {
+        match self.agent_memory.episode_store.prune_cot_entries(&cutoff) {
             Ok(deleted) => {
                 if deleted > 0 {
                     println!(
@@ -545,7 +537,7 @@ impl SharedState {
 
         // Layer 1: Knowledge Graph (relationship-based recall — symbol→regime→outcome)
         {
-            let kg = self.knowledge_graph.read().await;
+            let kg = self.agent_memory.knowledge_graph.read().await;
             if kg.is_built() {
                 // Extract symbol and regime from query context for targeted graph traversal
                 let graph_result = self.graph_recall_from_context(&kg, query_context);
@@ -557,9 +549,9 @@ impl SharedState {
 
         // Layer 2: Local vector RAG (fast, in-process, recent episodes with regret/lessons)
         {
-            let vm = self.vector_memory.read().await;
+            let vm = self.agent_memory.vector_memory.read().await;
             if !vm.is_empty() {
-                match vm.search(query_context, top_k, &self.llm).await {
+                match vm.search(query_context, top_k).await {
                     Ok(results) if !results.is_empty() => {
                         parts.push("LOCAL VECTOR (recent trained episodes):".to_string());
                         for r in results {
@@ -611,7 +603,7 @@ impl SharedState {
     /// Build the knowledge graph from closed episode store data.
     /// Called lazily on first recall or explicitly on startup.
     pub async fn rebuild_knowledge_graph(&self) {
-        let episodes = match self.episode_store.fetch_closed_episodes_lite() {
+        let episodes = match self.agent_memory.episode_store.fetch_closed_episodes_lite() {
             Ok(ep) => ep,
             Err(e) => {
                 eprintln!("[GraphRAG] ⚠ Failed to fetch episodes for graph: {}", e);
@@ -621,7 +613,7 @@ impl SharedState {
         if episodes.is_empty() {
             return;
         }
-        let mut kg = self.knowledge_graph.write().await;
+        let mut kg = self.agent_memory.knowledge_graph.write().await;
         kg.build_from_episodes(&episodes);
     }
 
@@ -678,7 +670,7 @@ impl SharedState {
         reason: &str,
         confidence: f64,
     ) -> u64 {
-        let id = self.cot_id_counter.fetch_add(1, Ordering::Relaxed);
+        let id = self.agent_memory.cot_id_counter.fetch_add(1, Ordering::Relaxed);
         let entry = CotEntry {
             id,
             chain_id: id,
@@ -691,7 +683,7 @@ impl SharedState {
             timestamp: Utc::now().to_rfc3339(),
             symbol: None,
         };
-        let mut store = self.cot_store.write().await;
+        let mut store = self.agent_memory.cot_store.write().await;
         store.push(entry);
         let store_len = store.len();
         if store_len > MAX_COT_RAM + COT_FLUSH_INTERVAL {
@@ -709,7 +701,7 @@ impl SharedState {
                     ts: e.timestamp.clone(),
                 })
                 .collect();
-            let _ = self.episode_store.flush_cot_batch(&rows);
+            let _ = self.agent_memory.episode_store.flush_cot_batch(&rows);
         }
         id
     }
@@ -754,27 +746,27 @@ impl SharedState {
     /// and spawn the background health check loop with WS status broadcasts.
     pub async fn register_and_monitor_services(&self) {
         // Register LLM server
-        let llm_endpoint = self.config.llm_endpoint.clone();
-        let llm_name = format!("llm_{}", self.config.llm_provider);
-        self.service_manager
+        let llm_endpoint = self.io.config.llm_endpoint.clone();
+        let llm_name = format!("llm_{}", self.io.config.llm_provider);
+        self.io.service_manager
             .register_service(&llm_name, &llm_endpoint)
             .await;
 
         // Register Kronos forecast server
-        let kronos_endpoint = self.config.kronos_service_url.clone();
-        self.service_manager
+        let kronos_endpoint = self.io.config.kronos_service_url.clone();
+        self.io.service_manager
             .register_service("kronos", &kronos_endpoint)
             .await;
 
         // Register Broker API — determine endpoint from env vars
         let (broker_id, broker_endpoint) = detect_broker_endpoint();
-        self.service_manager
+        self.io.service_manager
             .register_service(&broker_id, &broker_endpoint)
             .await;
 
         // Clone the service manager and update_tx for the background loop
-        let mgr = self.service_manager.clone();
-        let tx = self.update_tx.clone();
+        let mgr = self.io.service_manager.clone();
+        let tx = self.io.update_tx.clone();
 
         // Spawn background health check loop (every 30 seconds)
         tokio::spawn(async move {
@@ -798,19 +790,19 @@ impl SharedState {
         });
 
         // Print initial status
-        self.service_manager.print_status_board().await;
+        self.io.service_manager.print_status_board().await;
     }
 
     /// Broadcast current service status via WebSocket.
     pub async fn broadcast_service_status(&self) {
-        let statuses = self.service_manager.get_all_statuses().await;
+        let statuses = self.io.service_manager.get_all_statuses().await;
         let msg = serde_json::json!({
             "type": "service_status",
             "services": statuses,
             "timestamp": chrono::Utc::now().to_rfc3339(),
         })
         .to_string();
-        let _ = self.update_tx.send(msg);
+        let _ = self.io.update_tx.send(msg);
     }
 
     /// Build a JSON portfolio snapshot for HTTP status and WebSocket clients.
@@ -836,12 +828,12 @@ impl SharedState {
 
     /// Push a portfolio snapshot to all WebSocket subscribers.
     pub async fn broadcast_portfolio_snapshot(&self) {
-        let portfolio = self.portfolio.read().await;
+        let portfolio = self.portfolio_store.portfolio.read().await;
         let mut snapshot = Self::portfolio_snapshot_json(&portfolio);
         if let Some(obj) = snapshot.as_object_mut() {
             obj.insert("type".to_string(), serde_json::json!("portfolio"));
         }
-        let _ = self.update_tx.send(snapshot.to_string());
+        let _ = self.io.update_tx.send(snapshot.to_string());
     }
 
     /// Add a step to an existing COT chain.
@@ -882,7 +874,7 @@ impl SharedState {
             false, // persist=false — real-time TUI display only, no SQLite
         )
         .await;
-        self.cot_id_counter.load(Ordering::Relaxed) - 1
+        self.agent_memory.cot_id_counter.load(Ordering::Relaxed) - 1
     }
 
     /// Legacy non-quiet wrapper — calls add_cot_step_quiet(quiet=false).
@@ -909,9 +901,9 @@ impl SharedState {
 
     /// Start a new pipeline run — creates a fresh CommunicationLog and returns the run ID.
     pub async fn start_pipeline_run(&self, symbol: &str) -> u64 {
-        let run_id = self.pipeline_run_counter.fetch_add(1, Ordering::Relaxed);
+        let run_id = self.io.pipeline_run_counter.fetch_add(1, Ordering::Relaxed);
         let log = CommunicationLog::new(run_id, symbol);
-        *self.communication_log.write().await = log;
+        *self.io.communication_log.write().await = log;
         run_id
     }
 
@@ -931,15 +923,15 @@ impl SharedState {
             "timestamp": decision.timestamp,
         })
         .to_string();
-        let _ = self.update_tx.send(update);
+        let _ = self.io.update_tx.send(update);
 
         // Store in communication log
-        self.communication_log.write().await.push(decision);
+        self.io.communication_log.write().await.push(decision);
     }
 
     /// Finalize the pipeline run — set the final verdict and summary.
     pub async fn finalize_pipeline_run(&self, final_verdict: &str, summary: &str) {
-        let mut log = self.communication_log.write().await;
+        let mut log = self.io.communication_log.write().await;
         log.final_verdict = final_verdict.to_string();
         log.summary = summary.to_string();
 
@@ -954,17 +946,17 @@ impl SharedState {
             "transcript": log.transcript(),
         })
         .to_string();
-        let _ = self.update_tx.send(update);
+        let _ = self.io.update_tx.send(update);
     }
 
     /// Get a snapshot of the current communication log transcript (for debugging/display).
     pub async fn get_communication_transcript(&self) -> String {
-        self.communication_log.read().await.transcript()
+        self.io.communication_log.read().await.transcript()
     }
 
     /// Get all blocking reasons from the current pipeline run.
     pub async fn get_blocking_reasons(&self) -> Vec<String> {
-        self.communication_log.read().await.blocking_reasons()
+        self.io.communication_log.read().await.blocking_reasons()
     }
 
     /// Broadcast a transient live agent communication event directly to the WebSocket channel.
@@ -988,7 +980,7 @@ impl SharedState {
             "symbol": symbol
         })
         .to_string();
-        let _ = self.update_tx.send(update);
+        let _ = self.io.update_tx.send(update);
     }
 }
 
@@ -1027,8 +1019,21 @@ pub async fn initialize_autonomous_system(
     let memory = MemoryStore::new("rat.redb")?;
     let rules = DisciplineRules::default();
     let config = Config::default();
-    let state = SharedState::new(memory, rules, config, "rat_history.db")
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
+
+    // Create and wire the internal EventBus so pipeline components can publish lifecycle events.
+    let event_bus: Arc<dyn rat_eventbus::EventBus> = {
+        let bus = rat_eventbus::InMemoryEventBus::new();
+        Arc::new(bus)
+    };
+
+    let state = SharedState::with_event_bus(
+        memory,
+        rules,
+        config,
+        "rat_history.db",
+        Some(event_bus),
+    )
+    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
 
     // Load live economic calendar (falls back to built-in events)
     state.refresh_calendar().await;

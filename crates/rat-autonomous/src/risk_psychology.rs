@@ -18,8 +18,8 @@ impl RiskPsychologyAgent {
         &self,
         _context: &MarketContext,
     ) -> Result<RiskAnalysis, Box<dyn Error + Send + Sync>> {
-        let portfolio = self.state.portfolio.read().await;
-        let rules = self.state.rules.read().await;
+        let portfolio = self.state.portfolio_store.portfolio.read().await;
+        let rules = self.state.rule_engine.rules.read().await;
 
         let total_risk: f64 = portfolio.open_positions.iter().map(|p| p.risk_amount).sum();
         let portfolio_heat = if portfolio.total_equity > 0.0 {
@@ -109,7 +109,7 @@ impl Agent for RiskPsychologyAgent {
     ) -> Result<AgentOutput, Box<dyn Error + Send + Sync>> {
         // Read real portfolio equity for accurate drawdown limit checks
         let portfolio_equity = {
-            let portfolio = self.state.portfolio.read().await;
+            let portfolio = self.state.portfolio_store.portfolio.read().await;
             portfolio.total_equity
         };
         let ctx = match input {
@@ -130,7 +130,7 @@ impl Agent for RiskPsychologyAgent {
         };
 
         let analysis = self.analyze_risk(&ctx).await?;
-        let mut final_check = check_risk_limits(&ctx, &*self.state.rules.read().await);
+        let mut final_check = check_risk_limits(&ctx, &*self.state.rule_engine.rules.read().await);
 
         if analysis.recommendation == RiskRecommendation::Halt {
             final_check.passed = false;

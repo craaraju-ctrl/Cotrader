@@ -13,11 +13,11 @@ readme.workspace = true
 rat-core = { path = "../rat-core" }
 rat-autonomous = { path = "../rat-autonomous" }
 rat-runtime = { path = "../rat-runtime" }
-rat-broker-zerodha = { path = "../rat-broker-zerodha" }
-rat-broker-alpaca = { path = "../rat-broker-alpaca" }
-rat-broker-upstox = { path = "../rat-broker-upstox" }
-rat-broker-angelone = { path = "../rat-broker-angelone" }
-rat-broker-5paisa = { path = "../rat-broker-5paisa" }
+rat-broker-zerodha = { path = "../rat-broker/rat-broker-zerodha" }
+rat-broker-alpaca = { path = "../rat-broker/rat-broker-alpaca" }
+rat-broker-upstox = { path = "../rat-broker/rat-broker-upstox" }
+rat-broker-angelone = { path = "../rat-broker/rat-broker-angelone" }
+rat-broker-5paisa = { path = "../rat-broker/rat-broker-5paisa" }
 rat-eventbus = { path = "../rat-eventbus" }
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"

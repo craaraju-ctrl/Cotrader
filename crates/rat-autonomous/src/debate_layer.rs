@@ -221,7 +221,7 @@ impl DebateLayer {
         identifier_confluence: Option<f64>,
     ) -> DebateContext {
         let bars = {
-            let hist = self.state.ohlcv_history.read().await;
+            let hist = self.state.market_data.ohlcv_history.read().await;
             hist.get(symbol).cloned().unwrap_or_default()
         };
 
@@ -238,7 +238,7 @@ impl DebateLayer {
         };
 
         let (portfolio_heat, consecutive_losses) = {
-            let p = self.state.portfolio.read().await;
+            let p = self.state.portfolio_store.portfolio.read().await;
             let heat = if p.total_equity > 0.0 {
                 p.open_positions
                     .iter()
@@ -251,7 +251,7 @@ impl DebateLayer {
             (heat, p.consecutive_losses)
         };
 
-        let regime = *self.state.market_regime.read().await;
+        let regime = *self.state.market_data.market_regime.read().await;
         let regime_label = match &regime {
             Some(MarketRegime::TrendingBull) => "TrendingBull",
             Some(MarketRegime::TrendingBear) => "TrendingBear",
@@ -268,16 +268,16 @@ impl DebateLayer {
         }
 
         let (news_available, patterns_count) = {
-            let news = self.state.latest_news.read().await;
-            let patterns = self.state.last_patterns.read().await;
+            let news = self.state.agent_memory.latest_news.read().await;
+            let patterns = self.state.market_data.last_patterns.read().await;
             let pc = patterns.get(symbol).map(|p| p.len()).unwrap_or(0);
             (news.contains_key(symbol), pc)
         };
 
         let (vector_memory_matches, skill_votes_bullish, skill_votes_bearish, skill_votes_neutral) = {
-            let vm = self.state.vector_memory.read().await;
+            let vm = self.state.agent_memory.vector_memory.read().await;
             let vm_count = if vm.is_empty() { 0 } else { 3 }; // approximate
-            let votes = self.state.last_skill_votes.read().await;
+            let votes = self.state.agent_memory.last_skill_votes.read().await;
             let (mut bull, mut bear, mut neut) = (0usize, 0usize, 0usize);
             for v in votes.iter() {
                 match v.direction {
@@ -290,13 +290,13 @@ impl DebateLayer {
         };
 
         let aggregated_signal = {
-            let agg = self.state.last_aggregated_signal.read().await;
+            let agg = self.state.agent_memory.last_aggregated_signal.read().await;
             agg.clone()
         };
 
         // Read new indicators from MarketMetricsMeter's latest_metrics snapshot
         let (obv_direction, adx, plus_di, minus_di, cci, williams_r, vwap, vwap_deviation) = {
-            let metrics = self.state.latest_metrics.read().await;
+            let metrics = self.state.market_data.latest_metrics.read().await;
             if let Some(snap) = metrics.get(symbol) {
                 (
                     snap.obv_direction,
@@ -1015,9 +1015,9 @@ impl DebateLayer {
         };
 
         // Use autonomous level computation (agent decides its own levels)
-        let rules = self.state.rules.read().await;
+        let rules = self.state.rule_engine.rules.read().await;
         let patterns_for_levels = {
-            let pats = self.state.last_patterns.read().await;
+            let pats = self.state.market_data.last_patterns.read().await;
             pats.get(&ctx.symbol).cloned().unwrap_or_default()
         };
 
@@ -1069,7 +1069,7 @@ impl DebateLayer {
 
         // Adaptive position sizing (risk from equity, size capped by available cash)
         let (equity, cash_available, effective_risk) = {
-            let portfolio = self.state.portfolio.read().await;
+            let portfolio = self.state.portfolio_store.portfolio.read().await;
             let eq = portfolio.cash_balance
                 + portfolio
                     .open_positions
@@ -1130,7 +1130,7 @@ impl DebateLayer {
 
         // Store reasoning
         {
-            let mut last_reason = self.state.last_llm_reason.write().await;
+            let mut last_reason = self.state.rule_engine.last_llm_reason.write().await;
             *last_reason = format!("DebateLayer: {}", verdict.reasoning);
         }
 

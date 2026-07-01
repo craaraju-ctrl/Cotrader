@@ -22,12 +22,16 @@
 
 use crate::episode_store::RuleChangeSnapshot;
 use crate::orchestrator_struct::AutonomousOrchestrator;
+use crate::state::SharedState;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 
 /// When set, validation induces regret by tightening stops to this percentage.
 const INDUCED_REGRET_SL_PCT: f64 = 0.5;
+
+/// Minimum number of closed trades needed for background trend analysis.
+const MIN_TRADES_FOR_ANALYSIS: usize = 15;
 
 /// BUCKET_SIZE episodes per statistical bucket (10 = every 10 episodes we compute averages)
 const BUCKET_SIZE: usize = 10;
@@ -287,12 +291,12 @@ impl SelfEvolutionValidator {
             for &symbol in symbols {
                 // Read current price from OHLCV history or portfolio
                 let _price = {
-                    let portfolio = self.orchestrator.state.portfolio.read().await;
+                    let portfolio = self.orchestrator.state.portfolio_store.portfolio.read().await;
                     let s = symbol.to_string();
                     if let Some(pos) = portfolio.open_positions.iter().find(|p| p.symbol == s) {
                         pos.current_price
                     } else {
-                        let history = self.orchestrator.state.ohlcv_history.read().await;
+                        let history = self.orchestrator.state.market_data.ohlcv_history.read().await;
                         history
                             .get(symbol)
                             .and_then(|h| h.last().map(|b| b.close))
@@ -302,7 +306,7 @@ impl SelfEvolutionValidator {
 
                 // Determine direction based on simple price momentum
                 let _direction = {
-                    let history = self.orchestrator.state.ohlcv_history.read().await;
+                    let history = self.orchestrator.state.market_data.ohlcv_history.read().await;
                     let has_bars = history.get(symbol).map(|h| h.len() >= 5).unwrap_or(false);
                     if has_bars {
                         let bars = history.get(symbol).unwrap();
@@ -335,7 +339,7 @@ impl SelfEvolutionValidator {
                 // Check if position was closed in this cycle
                 let (regret, outcome, exit_reason) = {
                     // Query the latest closed trade from SQLite
-                    let store = &self.orchestrator.state.episode_store;
+                    let store = &self.orchestrator.state.agent_memory.episode_store;
                     let recent = store.get_most_recent_closed(symbol).unwrap_or_else(|e| {
                         eprintln!(
                             "[SelfEvolutionValidator] DB error fetching closed trade: {}",
@@ -355,11 +359,11 @@ impl SelfEvolutionValidator {
 
                 // Snapshot current rules
                 let rules_snapshot =
-                    RulesSnapshot::from(&*self.orchestrator.state.rules.read().await);
+                    RulesSnapshot::from(&*self.orchestrator.state.rule_engine.rules.read().await);
 
                 // Track if a rule change just happened
                 let rule_change_this_cycle = {
-                    let store = &self.orchestrator.state.episode_store;
+                    let store = &self.orchestrator.state.agent_memory.episode_store;
                     let recent_changes = store.get_recent_rule_changes(1).unwrap_or_default();
                     !recent_changes.is_empty()
                 };
@@ -410,7 +414,7 @@ impl SelfEvolutionValidator {
 
         // Collect all rule changes from the run
         {
-            let store = &self.orchestrator.state.episode_store;
+            let store = &self.orchestrator.state.agent_memory.episode_store;
             if let Ok(changes) = store.get_all_rule_changes() {
                 rule_changes_all = changes;
             }
@@ -466,7 +470,7 @@ impl SelfEvolutionValidator {
         // Store report to redb for persistence
         if let Ok(json) = serde_json::to_string(&report) {
             let key = format!("evolution/report/{}", run_end.timestamp());
-            let _ = self.orchestrator.state.memory.store_state(&key, &json);
+            let _ = self.orchestrator.state.agent_memory.memory.store_state(&key, &json);
         } // Output to agentmemory for cross-session learning
         {
             let mem = rat_core::AgentMemoryClient::new();
@@ -704,6 +708,137 @@ impl SelfEvolutionValidator {
     }
 }
 
+/// Run a lightweight automated self-evolution analysis on existing closed trades.
+/// This is called from the slow loop (not from pipeline runs).
+/// It fetches recent closed trades, groups them into statistical buckets,
+/// and computes regret/win-rate trend for logging/monitoring.
+pub async fn run_background_validation(state: &SharedState) -> String {
+    let run_start = Utc::now();
+
+    // Fetch recent closed trades
+    let recent_trades = state
+        .agent_memory
+        .episode_store
+        .load_recent_closed_trades(50, None)
+        .unwrap_or_default();
+
+    if recent_trades.len() < MIN_TRADES_FOR_ANALYSIS {
+        return format!(
+            "[SelfEvolution] Skipping background validation — only {} closed trades (need {})",
+            recent_trades.len(),
+            MIN_TRADES_FOR_ANALYSIS
+        );
+    }
+
+    // Build CycleMetrics from closed trades
+    let cycles: Vec<CycleMetrics> = recent_trades
+        .into_iter()
+        .enumerate()
+        .map(|(i, trade)| {
+            let outcome = if trade.pnl > 0.0 {
+                Some("WIN".to_string())
+            } else if trade.pnl < 0.0 {
+                Some("LOSS".to_string())
+            } else {
+                Some("BREAKEVEN".to_string())
+            };
+            CycleMetrics {
+                cycle_number: i,
+                symbol: trade.symbol.clone(),
+                decision: String::new(),
+                confidence: 0.0,
+                confluence: 0.0,
+                regret_score: Some(trade.regret_score),
+                trade_outcome: outcome,
+                exit_reason: Some(trade.exit_reason.clone()),
+                rule_change_applied: false,
+                rules_snapshot: RulesSnapshot {
+                    max_risk_per_trade: 0.0,
+                    max_daily_drawdown: 0.0,
+                    max_consecutive_losses: 0,
+                    min_confluence_score: 0.0,
+                },
+                timestamp: chrono::DateTime::parse_from_rfc3339(&trade.entry_time)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+            }
+        })
+        .collect();
+
+    // Run trend analysis
+    let buckets = SelfEvolutionValidator::compute_buckets(&cycles);
+    let (regret_first, regret_second) = SelfEvolutionValidator::compute_half_regret(&buckets);
+    let (wr_first, wr_second) = SelfEvolutionValidator::compute_half_win_rates(&buckets);
+
+    let regret_trend = if regret_second < regret_first * 0.9 {
+        "DECREASING"
+    } else if regret_second > regret_first * 1.1 {
+        "INCREASING"
+    } else {
+        "STABLE"
+    };
+
+    // Fetch recent rule changes
+    let rule_changes = state
+        .agent_memory
+        .episode_store
+        .get_recent_rule_changes(10)
+        .unwrap_or_default();
+
+    let mut report = format!(
+        "[SelfEvolution] 🔬 Background analysis — {} trades, {} buckets, {} rule changes | ",
+        cycles.len(),
+        buckets.len(),
+        rule_changes.len()
+    );
+
+    report.push_str(&format!(
+        "regret {:.3} → {:.3} ({}) | WR {:.0}% → {:.0}%",
+        regret_first,
+        regret_second,
+        match regret_trend {
+            "DECREASING" => "📉 improving",
+            "INCREASING" => "📉 degrading",
+            _ => "➡️ stable",
+        },
+        wr_first * 100.0,
+        wr_second * 100.0
+    ));
+
+    if !rule_changes.is_empty() {
+        report.push_str(&format!(
+            " | changes: {}",
+            rule_changes
+                .iter()
+                .map(|c| format!("{}: {:.4}→{:.4}", c.rule_name, c.old_value, c.new_value))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+
+    // Store analysis result for dashboard rendering
+    let timestamp = run_start.timestamp();
+    let json = serde_json::json!({
+        "type": "self_evolution_report",
+        "timestamp": timestamp,
+        "total_trades": cycles.len(),
+        "buckets": buckets.len(),
+        "rule_changes": rule_changes.len(),
+        "regret_first_half": regret_first,
+        "regret_second_half": regret_second,
+        "regret_trend": regret_trend,
+        "wr_first_half": wr_first,
+        "wr_second_half": wr_second,
+        "text": report,
+    });
+    let _ = state
+        .agent_memory
+        .memory
+        .store_state(&format!("evolution/latest/{}", timestamp), &json.to_string());
+
+    report
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -798,5 +933,179 @@ mod tests {
         assert!(buckets.is_empty());
         let (rf, rs) = SelfEvolutionValidator::compute_half_regret(&buckets);
         assert_eq!((rf, rs), (0.0, 0.0));
+    }
+
+    // ── run_background_validation: integration tests ───────────────────────
+
+    /// Helper: create a SharedState with an in-memory SQLite EpisodeStore
+    /// seeded with `n` closed trades for testing `run_background_validation`.
+    async fn make_test_state_with_trades(
+        n: usize,
+        regret_score: f64,
+        pnl: f64,
+        outcome: &str,
+        include_rule_changes: bool,
+    ) -> SharedState {
+        let memory = rat_core::MemoryStore::new("test_se_bg_redb").expect("MemoryStore");
+        let rules = rat_core::DisciplineRules::default();
+        let config = rat_core::Config::default();
+        let state = SharedState::new(memory, rules, config, ":memory:")
+            .expect("SharedState init");
+
+        // Seed closed trades through the EpisodeStore directly.
+        // The SharedState's EpisodeStore owns the ":memory:" SQLite connection.
+        let store = state.agent_memory.episode_store.clone();
+        for i in 0..n {
+            let ts = chrono::Utc::now() - chrono::Duration::minutes(i as i64);
+            let ep = crate::episode_store::ClosedEpisode {
+                id: format!("trade_{}", i),
+                symbol: "BTC".to_string(),
+                direction: "Long".to_string(),
+                entry_price: 50000.0,
+                exit_price: 51000.0,
+                stop_loss: 49000.0,
+                take_profit: 53000.0,
+                position_size: 1.0,
+                pnl,
+                pnl_pct: if pnl > 0.0 { pnl } else { -pnl },
+                outcome: outcome.to_string(),
+                exit_reason: "stop_loss".to_string(),
+                regret_score,
+                lesson: "test".to_string(),
+                confluence_score: 0.6,
+                portfolio_heat: 0.05,
+                market_regime: "trending_bull".to_string(),
+                session: "regular".to_string(),
+                agent_reasoning: "test".to_string(),
+                consecutive_losses_at_entry: 0,
+                entry_time: ts.to_rfc3339(),
+                exit_time: ts.to_rfc3339(),
+                rule_version: 1,
+                was_correct: pnl > 0.0,
+            };
+            let _ = store.insert_closed_trade(&ep);
+        }
+
+        if include_rule_changes {
+            let _ = store.record_rule_change(
+                "max_risk_per_trade",
+                "0.015",
+                "High regret detected",
+                chrono::Utc::now().timestamp() as u64,
+            );
+        }
+
+        state
+    }
+
+    #[tokio::test]
+    async fn test_background_validation_skips_when_too_few_trades() {
+        let state = make_test_state_with_trades(5, 0.3, -50.0, "LOSS", false).await;
+        let report = run_background_validation(&state).await;
+        assert!(
+            report.contains("Skipping background validation"),
+            "Should skip when < {} trades: '{}'",
+            MIN_TRADES_FOR_ANALYSIS,
+            report
+        );
+        assert!(
+            report.contains("5"),
+            "Should mention trade count: '{}'",
+            report
+        );
+    }
+
+    #[tokio::test]
+    async fn test_background_validation_full_analysis_with_wins() {
+        // 20 trades — all wins with low regret
+        let state = make_test_state_with_trades(20, 0.1, 200.0, "WIN", false).await;
+        let report = run_background_validation(&state).await;
+
+        assert!(
+            !report.contains("Skipping"),
+            "Should run full analysis: '{}'",
+            report
+        );
+        assert!(report.contains("Background analysis"), "Should label as background analysis");
+        assert!(report.contains("trades"), "Should mention trades");
+        assert!(report.contains("buckets"), "Should mention buckets");
+        assert!(report.contains("regret"), "Should mention regret");
+        assert!(report.contains("WR"), "Should mention win rate");
+    }
+
+    #[tokio::test]
+    async fn test_background_validation_full_analysis_with_losses() {
+        // 30 trades — all losses with high regret
+        let state = make_test_state_with_trades(30, 0.8, -150.0, "LOSS", false).await;
+        let report = run_background_validation(&state).await;
+
+        assert!(
+            !report.contains("Skipping"),
+            "Should run full analysis: '{}'",
+            report
+        );
+        // Regret should be high (degrading)
+        assert!(
+            report.contains("degrading") || report.contains("stable"),
+            "High regret should be degrading or stable: '{}'",
+            report
+        );
+    }
+
+    #[tokio::test]
+    async fn test_background_validation_includes_rule_changes() {
+        let state = make_test_state_with_trades(30, 0.5, 100.0, "WIN", true).await;
+        let report = run_background_validation(&state).await;
+
+        assert!(
+            !report.contains("Skipping"),
+            "Should run full analysis: '{}'",
+            report
+        );
+        assert!(
+            report.contains("rule_changes") || report.contains("max_risk_per_trade") || report.contains("changes"),
+            "Should include rule changes data: '{}'",
+            report
+        );
+    }
+
+    #[tokio::test]
+    async fn test_background_validation_buckets_and_trend_detected() {
+        // 25 trades → should produce 3 buckets (10, 10, 5)
+        let state = make_test_state_with_trades(25, 0.4, 50.0, "WIN", false).await;
+        let report = run_background_validation(&state).await;
+
+        assert!(
+            report.contains("buckets"),
+            "Should mention buckets: '{}'",
+            report
+        );
+        // Should parse the bucket count from the report
+        assert!(
+            report.contains("stable") || report.contains("improving") || report.contains("degrading"),
+            "Should indicate a trend direction: '{}'",
+            report
+        );
+    }
+
+    #[tokio::test]
+    async fn test_report_format_is_parseable() {
+        let state = make_test_state_with_trades(18, 0.2, 150.0, "WIN", false).await;
+        let report = run_background_validation(&state).await;
+
+        // The report should be a well-formed line of text starting with [SelfEvolution]
+        assert!(
+            report.starts_with("[SelfEvolution]"),
+            "Report should start with [SelfEvolution]"
+        );
+        // Should contain key metric labels
+        assert!(report.contains("regret"), "Should mention regret: '{}'", report);
+        assert!(report.contains("WR"), "Should mention win rate: '{}'", report);
+        // Should separate sections with |
+        assert!(
+            report.matches('|').count() >= 2,
+            "Should have at least 2 | separators: '{}'",
+            report
+        );
     }
 }

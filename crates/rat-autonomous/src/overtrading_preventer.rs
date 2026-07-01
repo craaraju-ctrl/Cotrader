@@ -119,7 +119,7 @@ impl Agent for OvertradingPreventerAgent {
         };
 
         // Get portfolio state for basic checks
-        let portfolio = self.state.portfolio.read().await;
+        let portfolio = self.state.portfolio_store.portfolio.read().await;
         let total_trades_today = portfolio.total_trades_today;
         drop(portfolio);
 
@@ -140,7 +140,7 @@ impl Agent for OvertradingPreventerAgent {
         // Check per-symbol frequency if symbol is provided
         // Uses the same cooldown_secs from DisciplineRules as HardRulesGate for consistency
         let cooldown_secs = {
-            let rules = self.state.rules.read().await;
+            let rules = self.state.rule_engine.rules.read().await;
             rules.cooldown_secs
         };
         if let Some(ref sym) = symbol {

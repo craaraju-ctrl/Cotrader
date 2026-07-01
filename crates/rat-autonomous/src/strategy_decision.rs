@@ -23,6 +23,7 @@ use rat_core::{
     calculate_confluence_score, calculate_pivot_points, validate_trade_setup, AgentInput,
     LlmTradeDecision, MarketContext,
 };
+use rat_core::messages::LLMRequest;
 
 pub struct StrategyDecisionAgent {
     pub state: SharedState,
@@ -48,7 +49,7 @@ impl StrategyDecisionAgent {
         }
 
         let current_price = snapshot.last_close();
-        let sigma = self.state.memory_integration.get_volatility();
+        let sigma = self.state.portfolio_store.memory_integration.get_volatility();
 
         // 1. Code-level analysis: scan historical highs and lows
         let mut highest_resistance = current_price;
@@ -118,7 +119,7 @@ impl StrategyDecisionAgent {
         current_price: f64,
     ) -> Result<Option<TradeSignal>, Box<dyn Error + Send + Sync>> {
         let aggregated = {
-            let a = self.state.last_aggregated_signal.read().await;
+            let a = self.state.agent_memory.last_aggregated_signal.read().await;
             a.clone()
         };
         self.generate_signal_with_aggregation(symbol, current_price, aggregated.as_ref(), None)
@@ -134,7 +135,7 @@ impl StrategyDecisionAgent {
         prior_debate: &crate::debate_layer::DebateVerdict,
     ) -> Result<Option<TradeSignal>, Box<dyn Error + Send + Sync>> {
         let aggregated = {
-            let a = self.state.last_aggregated_signal.read().await;
+            let a = self.state.agent_memory.last_aggregated_signal.read().await;
             a.clone()
         };
         self.generate_signal_with_aggregation(symbol, current_price, aggregated.as_ref(), Some(prior_debate))
@@ -150,11 +151,11 @@ impl StrategyDecisionAgent {
         aggregated_signal: Option<&rat_core::AggregatedSignal>,
         prior_debate: Option<&crate::debate_layer::DebateVerdict>,
     ) -> Result<Option<TradeSignal>, Box<dyn Error + Send + Sync>> {
-        let rules = self.state.rules.read().await;
-        let portfolio = self.state.portfolio.read().await;
+        let rules = self.state.rule_engine.rules.read().await;
+        let portfolio = self.state.portfolio_store.portfolio.read().await;
 
         let bars = {
-            let hist = self.state.ohlcv_history.read().await;
+            let hist = self.state.market_data.ohlcv_history.read().await;
             hist.get(symbol).cloned().unwrap_or_default()
         };
 
@@ -190,7 +191,7 @@ impl StrategyDecisionAgent {
         let session = get_indian_session_info(Utc::now());
 
         let forecast_summary = {
-            let last = self.state.last_forecast.read().await;
+            let last = self.state.market_data.last_forecast.read().await;
             match last.as_ref() {
                 Some(v) => v["summary"]
                     .as_str()
@@ -200,7 +201,7 @@ impl StrategyDecisionAgent {
             }
         };
 
-        let market_regime = *self.state.market_regime.read().await;
+        let market_regime = *self.state.market_data.market_regime.read().await;
         let trend_label = match market_regime {
             Some(MarketRegime::TrendingBull) => "Bullish",
             Some(MarketRegime::TrendingBear) => "Bearish",
@@ -321,7 +322,7 @@ impl StrategyDecisionAgent {
 
         // Patterns & volume from MI
         let patterns_context = {
-            let pats = self.state.last_patterns.read().await;
+            let pats = self.state.market_data.last_patterns.read().await;
             match pats.get(symbol) {
                 Some(p) if !p.is_empty() => rat_core::format_patterns(p),
                 _ => String::new(),
@@ -329,14 +330,14 @@ impl StrategyDecisionAgent {
         };
 
         let patterns_for_levels: Vec<rat_core::CandlestickPattern> = {
-            let p = self.state.last_patterns.read().await;
+            let p = self.state.market_data.last_patterns.read().await;
             p.get(symbol).cloned().unwrap_or_default()
         };
 
         // Pull metrics snapshot
         let (news_ctx, meter) = {
-            let n = self.state.latest_news.read().await;
-            let m = self.state.latest_metrics.read().await;
+            let n = self.state.agent_memory.latest_news.read().await;
+            let m = self.state.market_data.latest_metrics.read().await;
             (n.get(symbol).cloned(), m.get(symbol).cloned())
         };
         let meter_atr = meter.as_ref().map(|m| m.atr_pct).unwrap_or(atr_pct);
@@ -453,7 +454,7 @@ impl StrategyDecisionAgent {
 
         // ═══ STEP 3: Debate result (from prior debate_layer or fallback) ════════
         let aggregated_signal = {
-            let agg = self.state.last_aggregated_signal.read().await;
+            let agg = self.state.agent_memory.last_aggregated_signal.read().await;
             agg.clone()
         };
 
@@ -568,13 +569,13 @@ impl StrategyDecisionAgent {
 
         // Vector memory context
         let vector_context = {
-            let vm = self.state.vector_memory.read().await;
+            let vm = self.state.agent_memory.vector_memory.read().await;
             if !vm.is_empty() {
                 let query = format!(
                     "{} regime={} confluence={:.2} price={:.2}",
                     symbol, trend_label, reliance, current_price
                 );
-                match vm.search(&query, 3, &self.state.llm).await {
+                match vm.search(&query, 3, ).await {
                     Ok(results) if !results.is_empty() => {
                         let mut lines = vec!["Vector memory regime matches:".to_string()];
                         for r in &results {
@@ -644,7 +645,7 @@ impl StrategyDecisionAgent {
             };
             // Apply psychology sizing
             let (equity, _fresh_heat, _fresh_consecutive_losses) = {
-                let p = self.state.portfolio.read().await;
+                let p = self.state.portfolio_store.portfolio.read().await;
                 (
                     p.cash_balance
                         + p.open_positions
@@ -656,7 +657,7 @@ impl StrategyDecisionAgent {
                 )
             };
             let effective_risk = (rules.max_risk_per_trade * 1.0).max(0.002);
-            let kelly_stats = self.state.episode_store.kelly_trade_stats(50);
+            let kelly_stats = self.state.agent_memory.episode_store.kelly_trade_stats(50);
             let (position_size, _kelly_half) = crate::helpers::kelly_capped_position_size(
                 equity,
                 effective_risk,
@@ -664,9 +665,9 @@ impl StrategyDecisionAgent {
                 signal.stop_loss,
                 &kelly_stats,
             );
-            let cash_available = { self.state.portfolio.read().await.cash_balance };
+            let cash_available = { self.state.portfolio_store.portfolio.read().await.cash_balance };
             // Paper mode: unlimited-like (95% of equity per symbol). Live: 4% cap.
-            let max_from_equity = if self.state.config.paper_mode {
+            let max_from_equity = if self.state.io.config.paper_mode {
                 equity * 0.95
             } else {
                 equity * 0.04
@@ -687,7 +688,7 @@ impl StrategyDecisionAgent {
                 return Ok(None);
             }
             // ═══ VOLATILITY-ADAPTIVE PARAMETER MODULATION ══════════════════
-            let sigma = self.state.memory_integration.get_volatility();
+            let sigma = self.state.portfolio_store.memory_integration.get_volatility();
             if sigma > 0.030 {
                 println!("[StrategyDecision] High-stress sigma ({:.4}) — adjusting SL/TP", sigma);
                 // Widen SL by 30% to avoid premature noise exits
@@ -729,7 +730,7 @@ impl StrategyDecisionAgent {
             si_evidence.add("rsi", (50.0 - rsi) / 50.0, 0.15);
             si_evidence.add("macd", macd_hist * 5.0, 0.10);
             si_evidence.add("confluence", (reliance - 0.5) * 2.0, 0.20);
-            if let Some(ref reg) = *self.state.market_regime.read().await {
+            if let Some(ref reg) = *self.state.market_data.market_regime.read().await {
                 let reg_score = match reg {
                     MarketRegime::TrendingBull => 0.5,
                     MarketRegime::TrendingBear => -0.5,
@@ -773,7 +774,7 @@ impl StrategyDecisionAgent {
             // LLM is consulted but cannot override the deterministic + SI result.
             // It provides an opinion that is logged and factored into reasoning.
             let calendar_context = {
-                let cal = self.state.calendar_events.read().await;
+                let cal = self.state.market_data.calendar_events.read().await;
                 if cal.is_empty() {
                     "No high-impact events scheduled.".to_string()
                 } else {
@@ -791,7 +792,7 @@ impl StrategyDecisionAgent {
                 }
             };
             let (trading_mode, daily_goal_context) = {
-                let goals = self.state.trading_goals.read().await;
+                let goals = self.state.portfolio_store.trading_goals.read().await;
                 (
                     format!("{:?}", goals.mode),
                     format!(
@@ -803,7 +804,7 @@ impl StrategyDecisionAgent {
             };
             // Enhanced MTF context: now includes full analysis from all 11 timeframes
             let multi_tf_context = {
-                let mtf_agg = self.state.multi_tf_aggregate.read().await;
+                let mtf_agg = self.state.market_data.multi_tf_aggregate.read().await;
                 if let Some(agg) = mtf_agg.get(symbol) {
                     format!(
                         "MTF: {} (signal={:.3}, agree={:.0}%, tfs={}) | {}",
@@ -824,7 +825,7 @@ impl StrategyDecisionAgent {
                             .join(" | ")
                     )
                 } else {
-                    let mtf = self.state.multi_timeframe_data.read().await;
+                    let mtf = self.state.market_data.multi_timeframe_data.read().await;
                     if let Some(tf_data) = mtf.get(symbol) {
                         tf_data
                             .iter()
@@ -847,7 +848,7 @@ impl StrategyDecisionAgent {
                 }
             };
             let agent_market_summary = {
-                let s = self.state.agent_market_summary.read().await;
+                let s = self.state.agent_memory.agent_market_summary.read().await;
                 if s.is_empty() {
                     "No market summary yet.".to_string()
                 } else {
@@ -860,6 +861,34 @@ impl StrategyDecisionAgent {
             };
 
             // LLM decision (opinion only) — Fix #6: Hard 5-second timeout
+            // LLM is now stubbed in rat-core — pass a structured LLMRequest.
+            let llm_request = LLMRequest {
+                request_id: format!("strategy-{}-{}", symbol, Utc::now().timestamp_micros()),
+                agent_role: rat_core::role::AgentRole::StrategyDecision,
+                prompt: format!(
+                    "Cross-check opinion for {} @ {:.2}: confluence={:.2} trend={} pivot={:.2}",
+                    symbol, current_price, reliance, trend_label, pivots.pivot
+                ),
+                context: serde_json::json!({
+                    "symbol": symbol,
+                    "price": current_price,
+                    "confluence": reliance,
+                    "trend": trend_label,
+                    "pivot": pivots.pivot,
+                    "r1": pivots.r1,
+                    "s1": pivots.s1,
+                    "heat": portfolio_heat,
+                    "session": session.market_open,
+                    "losses": consecutive_losses,
+                    "forecast": forecast_summary,
+                    "mtf": multi_tf_context,
+                    "news": news_context,
+                    "patterns": patterns_context,
+                }),
+                max_tokens: 256,
+                temperature: 0.3,
+            };
+
             let llm_decision: Option<LlmTradeDecision> = {
                 self.state
                     .push_live_comm(
@@ -868,52 +897,25 @@ impl StrategyDecisionAgent {
                         "QUERY",
                         &format!(
                             "Requesting LLM opinion for {} @ {:.2} (Model: {})",
-                            symbol, current_price, self.state.config.llm_model
+                            symbol, current_price, self.state.io.config.llm_model
                         ),
                         Some(symbol.to_string()),
                     )
                     .await;
 
-                let llm_future = self.state.llm.ask_for_trade_decision(
-                    symbol,
-                    current_price,
-                    reliance,
-                    trend_label,
-                    pivots.pivot,
-                    pivots.r1,
-                    pivots.s1,
-                    &forecast_summary,
-                    portfolio_heat,
-                    session.market_open,
-                    consecutive_losses,
-                    &calendar_context,
-                    &trading_mode,
-                    &daily_goal_context,
-                    &multi_tf_context,
-                    &agent_market_summary,
-                    &news_context,
-                    &vector_context,
-                    &patterns_context,
-                );
-
                 // ═══ HARD 25-SECOND LLM TIMEOUT ════════════════════
-                // Prevent LLM from blocking the pipeline if it's slow or hung.
-                // If timeout elapses, fall through to deterministic path.
                 let decision = tokio::time::timeout(
                     std::time::Duration::from_secs(25),
-                    llm_future,
+                    self.state.io.llm.ask_for_trade_decision(llm_request),
                 )
                 .await
                 .unwrap_or_else(|_| {
                     println!("[Strategy] ⏱ LLM timed out after 25s for {} — using deterministic-only path", symbol);
-                    rat_core::LlmTradeDecision {
-                        action: "HOLD".to_string(),
-                        reason: "LLM timeout (25s)".to_string(),
-                        entry: 0.0,
-                        sl: 0.0,
-                        tp: 0.0,
-                    }
-                });
+                    Ok(LlmTradeDecision::default())
+                })
+                .unwrap_or_else(|_| LlmTradeDecision::default());
+
+                // Now `decision` is LlmTradeDecision (unwrapped from Result)
 
                 let available = decision.action != "HOLD"
                     && !decision.reason.contains("Parse failed")
@@ -947,7 +949,7 @@ impl StrategyDecisionAgent {
                         .push_agent_decision(
                             AgentDecision::new("LLM", symbol, llm_verdict)
                                 .with_evidence(vec![
-                                    format!("model: {}", self.state.config.llm_model),
+                                    format!("model: {}", self.state.io.config.llm_model),
                                     format!(
                                         "entry: {:.2} SL: {:.2} TP: {:.2}",
                                         decision.entry, decision.sl, decision.tp
@@ -984,7 +986,7 @@ impl StrategyDecisionAgent {
                                 },
                             )
                             .with_evidence(vec![
-                                format!("model: {}", self.state.config.llm_model),
+                                format!("model: {}", self.state.io.config.llm_model),
                                 format!("status: unavailable_or_hold"),
                             ])
                             .addressed_to("StrategyDecision"),
@@ -1021,7 +1023,7 @@ impl StrategyDecisionAgent {
         // If multiple timeframes agree on the same direction, boost the confidence.
         // If they disagree strongly, reduce confidence (more uncertainty).
         let (mtf_boost, mtf_agreement_pct) = {
-            let mtf_agg = self.state.multi_tf_aggregate.read().await;
+            let mtf_agg = self.state.market_data.multi_tf_aggregate.read().await;
             match mtf_agg.get(symbol) {
                 Some(agg) if agg.tf_count >= 3 => {
                     // Count how many TFs agree with the SI final direction
@@ -1081,7 +1083,7 @@ impl StrategyDecisionAgent {
 
         // Store final reasoning for UI display
         {
-            let mut last_reason = self.state.last_llm_reason.write().await;
+            let mut last_reason = self.state.rule_engine.last_llm_reason.write().await;
             *last_reason = final_reasoning.clone();
         }
 
@@ -1123,7 +1125,7 @@ impl StrategyDecisionAgent {
         // ═══ STEP 6: Behavioral Psychology Sizing Adjustment ═════════════════
         // Get psychology-adjusted position size multiplier
         let (equity, fresh_heat, fresh_consecutive_losses) = {
-            let p = self.state.portfolio.read().await;
+            let p = self.state.portfolio_store.portfolio.read().await;
             let eq = p.cash_balance
                 + p.open_positions
                     .iter()
@@ -1140,13 +1142,13 @@ impl StrategyDecisionAgent {
 
         // Record the decision in behavioral psychology engine
         {
-            let mut psych = self.state.behavioral_psychology.write().await;
+            let mut psych = self.state.portfolio_store.behavioral_psychology.write().await;
             psych.record_decision(&final_action, final_conf, signal_entry);
         }
 
         // Analyze psychological state
         let psych_snapshot = {
-            let psych = self.state.behavioral_psychology.read().await;
+            let psych = self.state.portfolio_store.behavioral_psychology.read().await;
             psych.analyze(
                 fresh_heat,
                 0.0, // drawdown_pct — pipeline doesn't track this directly, leave 0
@@ -1203,7 +1205,7 @@ impl StrategyDecisionAgent {
         // Apply BOTH adaptive risk AND psychological sizing
         let effective_risk =
             (rules.max_risk_per_trade * adaptive_risk_mult * psych_size_mult).max(0.002);
-        let kelly_stats = self.state.episode_store.kelly_trade_stats(50);
+        let kelly_stats = self.state.agent_memory.episode_store.kelly_trade_stats(50);
         let (position_size, kelly_half) = crate::helpers::kelly_capped_position_size(
             equity,
             effective_risk,
@@ -1221,9 +1223,9 @@ impl StrategyDecisionAgent {
         }
 
         // Validate against cash and 1/25 capital allocation rule
-        let cash_available = { self.state.portfolio.read().await.cash_balance };
+        let cash_available = { self.state.portfolio_store.portfolio.read().await.cash_balance };
         // Paper mode: unlimited-like (95% of equity per symbol). Live: 4% cap.
-        let max_from_equity = if self.state.config.paper_mode {
+        let max_from_equity = if self.state.io.config.paper_mode {
             equity * 0.95
         } else {
             equity * 0.04

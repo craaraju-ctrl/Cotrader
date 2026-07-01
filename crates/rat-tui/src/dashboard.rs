@@ -8,9 +8,6 @@ use crate::prelude::*;
 use crate::AppState;
 
 pub fn render_dashboard(f: &mut Frame, area: Rect, app: &mut AppState) {
-    // Clear clickable areas before re-rendering so stale rects don't persist
-    app.pipeline_layer_areas.clear();
-
     let status = app.status.as_ref();
 
     let equity = status
@@ -438,31 +435,35 @@ pub fn render_dashboard(f: &mut Frame, area: Rect, app: &mut AppState) {
         app.sparkline_card_areas.clear();
     }
 
-    // ── 5-Layer Pipeline Flow + Agent Comms + Judge Panel + Tech Indicators ──
+    // ── Pipeline Lifecycle + Agent Comms + Judge Panel + Tech Indicators ──
     let bottom_section = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Ratio(3, 10), // 5-Layer Flow
+            Constraint::Ratio(3, 10), // Pipeline Lifecycle (live EventBus events)
             Constraint::Ratio(3, 10), // Agent Communication
             Constraint::Ratio(2, 10), // Judge Decision
             Constraint::Ratio(2, 10), // Tech Indicators
         ])
         .split(chunks[9]);
 
-    render_pipeline_flow(f, bottom_section[0], app);
+    render_pipeline_lifecycle(f, bottom_section[0], app);
     render_agent_comms(f, bottom_section[1], app);
     render_judge_panel(f, bottom_section[2], app);
     render_indicators_panel(f, bottom_section[3], app);
 }
 
-// ── 5-Layer Pipeline Flow Visualization ─────────────────────────────────────
+// ── Pipeline Lifecycle Panel ────────────────────────────────────────────────
 
-/// Render the 5-layer pipeline flow as a horizontal diagram with status indicators.
-/// Each layer shows its name, status, and a brief description.
-fn render_pipeline_flow(f: &mut Frame, area: Rect, app: &mut AppState) {
+/// Render the dedicated pipeline lifecycle panel showing real-time events
+/// from the EventBus bridge (`pipeline_event` WebSocket messages).
+/// Shows a scrolling feed with per-event details: action, symbol, confidence, reasoning.
+fn render_pipeline_lifecycle(f: &mut Frame, area: Rect, app: &mut AppState) {
     let block = Block::default()
         .title(Span::styled(
-            "⚙️ 5-LAYER PIPELINE",
+            format!(
+                "⟳ PIPELINE ({} events)",
+                app.pipeline_events.len()
+            ),
             Style::default()
                 .fg(THEME.brand)
                 .add_modifier(Modifier::BOLD),
@@ -473,156 +474,65 @@ fn render_pipeline_flow(f: &mut Frame, area: Rect, app: &mut AppState) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // Determine layer statuses from latest COT entries
-    let cot = &app.cot;
-    let layer_statuses = determine_layer_statuses(cot);
+    let mut lines: Vec<Line> = Vec::new();
 
-    let layer_data = [
-        ("L1", "Gate", "Rules", layer_statuses[0]),
-        ("L2", "Ident", "Data", layer_statuses[1]),
-        ("L3", "Debate", "12v11", layer_statuses[2]),
-        ("L4", "Judge", "Quality", layer_statuses[3]),
-        ("L5", "Exec", "Trade", layer_statuses[4]),
-    ];
+    if app.pipeline_events.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  Waiting for pipeline events...",
+            Style::default().fg(THEME.muted),
+        )));
+        lines.push(Line::from(Span::styled(
+            "  Ensure EventBus bridge is active",
+            Style::default().fg(THEME.muted),
+        )));
+    } else {
+        // Show the last N events (fit to panel height)
+        let max_rows = inner.height.saturating_sub(1) as usize;
+        for event in app.pipeline_events.iter().take(max_rows) {
+            let action_color = match event.action.as_str() {
+                "TRADE_EXECUTED" | "BUY" | "SELL" => THEME.positive,
+                "JUDGE_VETO" | "EXECUTION_FAILED" => THEME.negative,
+                "HOLD" => THEME.muted,
+                _ => THEME.highlight,
+            };
 
-    // Layout: 5 layer boxes with arrows between them
-    let mut constraints = Vec::new();
-    for i in 0..5 {
-        constraints.push(Constraint::Ratio(1, 9));
-        if i < 4 {
-            constraints.push(Constraint::Length(3)); // arrow gap
+            let symbol_width = 6usize;
+            let action_width = 17usize;
+            let conf_width = 8usize;
+            let reason_width = inner.width.saturating_sub(symbol_width as u16 + action_width as u16 + conf_width as u16 + 4) as usize;
+
+            let sym = safe_truncate(&event.symbol, symbol_width);
+            let act = safe_truncate(&event.action, action_width);
+            let conf_str = format!("{:.0}%", event.confidence * 100.0);
+            let reason = safe_truncate(&event.reasoning, reason_width.max(10));
+
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {:<6}", sym),
+                    Style::default()
+                        .fg(THEME.highlight)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" {:<17}", act),
+                    Style::default()
+                        .fg(action_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" {:>7}", conf_str),
+                    Style::default().fg(action_color),
+                ),
+                Span::styled(
+                    format!(" {}", reason),
+                    Style::default().fg(THEME.muted),
+                ),
+            ]));
         }
     }
 
-    let flow_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(constraints)
-        .split(inner);
-
-    for (i, (id, name, desc, status)) in layer_data.iter().copied().enumerate() {
-        let (color, status_text) = match status {
-            LayerStatus::Passed => (THEME.positive, "● PASS"),
-            LayerStatus::Blocked => (THEME.negative, "● BLOCK"),
-            LayerStatus::Running => (THEME.warning, "◌ RUN"),
-            LayerStatus::Skipped => (THEME.muted, "○ SKIP"),
-            LayerStatus::Pending => (THEME.muted, "○ WAIT"),
-        };
-
-        let layer_block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(color));
-        let layer_inner = layer_block.inner(flow_chunks[i * 2]);
-        f.render_widget(layer_block, flow_chunks[i * 2]);
-
-        let lines = vec![
-            Line::from(Span::styled(
-                format!("{} {}", id, name),
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            )),
-            Line::from(Span::styled(status_text, Style::default().fg(color))),
-            Line::from(Span::styled(desc, Style::default().fg(THEME.muted))),
-        ];
-        let p = Paragraph::new(lines).alignment(Alignment::Center);
-        f.render_widget(p, layer_inner);
-
-        // Store clickable area for mouse navigation
-        app.pipeline_layer_areas.push(flow_chunks[i * 2]);
-
-        // Render arrow between layers
-        if i < 4 {
-            let arrow = Paragraph::new(Line::from(Span::styled(
-                " → ",
-                Style::default().fg(THEME.highlight),
-            )))
-            .alignment(Alignment::Center);
-            f.render_widget(arrow, flow_chunks[i * 2 + 1]);
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum LayerStatus {
-    Passed,
-    Blocked,
-    Running,
-    Skipped,
-    Pending,
-}
-
-/// Determine the status of each pipeline layer from COT entries.
-fn determine_layer_statuses(cot: &[serde_json::Value]) -> [LayerStatus; 5] {
-    let mut statuses = [LayerStatus::Pending; 5];
-
-    // Look at the most recent COT entries to determine layer statuses
-    for entry in cot.iter().rev().take(20) {
-        let agent = entry.get("agent").and_then(|a| a.as_str()).unwrap_or("");
-        let action = entry.get("action").and_then(|a| a.as_str()).unwrap_or("");
-
-        match agent {
-            a if a.contains("HardRules") || a == "Gate" => {
-                if statuses[0] == LayerStatus::Pending {
-                    statuses[0] = if action == "BLOCKED" || action == "REJECT" {
-                        LayerStatus::Blocked
-                    } else if action == "PASSED" || action == "PASS" {
-                        LayerStatus::Passed
-                    } else {
-                        LayerStatus::Running
-                    };
-                }
-            }
-            a if a.contains("Identifier") || a.contains("Verifier") => {
-                if statuses[1] == LayerStatus::Pending {
-                    statuses[1] = if action == "ANALYZED" || action == "PASS" {
-                        LayerStatus::Passed
-                    } else if action == "SKIP" {
-                        LayerStatus::Skipped
-                    } else {
-                        LayerStatus::Running
-                    };
-                }
-            }
-            a if a.contains("Debate") => {
-                if statuses[2] == LayerStatus::Pending {
-                    statuses[2] = if action == "BUY" || action == "SELL" || action == "HOLD" {
-                        LayerStatus::Passed
-                    } else {
-                        LayerStatus::Running
-                    };
-                }
-            }
-            a if a.contains("Judge") => {
-                if statuses[3] == LayerStatus::Pending {
-                    statuses[3] = if action == "APPROVE" {
-                        LayerStatus::Passed
-                    } else if action == "VETO" {
-                        LayerStatus::Blocked
-                    } else {
-                        LayerStatus::Running
-                    };
-                }
-            }
-            a if (a.contains("Execution") || a.contains("Exec"))
-                && statuses[4] == LayerStatus::Pending =>
-            {
-                statuses[4] = if action == "EXECUTED" || action == "FILLED" || action == "LOGGED" {
-                    LayerStatus::Passed
-                } else if action == "HOLD" || action == "SKIPPED" {
-                    LayerStatus::Skipped
-                } else if action == "REJECTED"
-                    || action == "BLOCKED"
-                    || action == "FAILED"
-                    || action == "EXECUTION_FAILED"
-                {
-                    LayerStatus::Blocked
-                } else {
-                    LayerStatus::Running
-                };
-            }
-            _ => {}
-        }
-    }
-
-    statuses
+    let p = Paragraph::new(lines).wrap(Wrap { trim: true });
+    f.render_widget(p, inner);
 }
 
 // ── Agent Communication Panel ───────────────────────────────────────────────

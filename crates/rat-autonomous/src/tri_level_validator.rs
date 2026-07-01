@@ -19,7 +19,6 @@
 //! After each trade close, `attribute_and_upgrade()` adjusts per-layer trust weights
 //! using a multiplicative update so layers that were correct gain more influence.
 
-use crate::hard_rules_gate::HardRulesGate;
 use crate::state::SharedState;
 use crate::types::{MarketRegime, OhlcvSnapshot, TradeSignal};
 use chrono::Utc;
@@ -202,11 +201,11 @@ impl TriLevelValidator {
         let trend = trend_label.to_string();
         let forecast = forecast_summary.to_string();
 
-        let weights = self.state.layer_trust_weights.read().await.clone();
+        let weights = self.state.rule_engine.layer_trust_weights.read().await.clone();
 
         // ── Pull real market context from SharedState for LLM ──────────────────
         let multi_tf_context = {
-            let mtf_agg = self.state.multi_tf_aggregate.read().await;
+            let mtf_agg = self.state.market_data.multi_tf_aggregate.read().await;
             if let Some(agg) = mtf_agg.get(symbol) {
                 format!(
                     "MTF({} TFs): dir={} signal={:.3} agree={:.0}% | {}",
@@ -232,7 +231,7 @@ impl TriLevelValidator {
         };
 
         let news_context = {
-            let news = self.state.latest_news.read().await;
+            let news = self.state.agent_memory.latest_news.read().await;
             match news.get(symbol) {
                 Some(ctx) => ctx.to_prompt_string(),
                 None => "No recent news for this symbol.".to_string(),
@@ -240,15 +239,15 @@ impl TriLevelValidator {
         };
 
         let vector_context = {
-            let vm = self.state.vector_memory.read().await;
+            let vm = self.state.agent_memory.vector_memory.read().await;
             if !vm.is_empty() {
                 let query = format!(
                     "{} regime={} confluence={:.2} price={:.2}",
                     symbol, trend_label, confluence, current_price
                 );
                 drop(vm);
-                let vm2 = self.state.vector_memory.read().await;
-                match vm2.search(&query, 3, &self.state.llm).await {
+                let vm2 = self.state.agent_memory.vector_memory.read().await;
+                match vm2.search(&query, 3).await {
                     Ok(results) if !results.is_empty() => results
                         .iter()
                         .map(|r| {
@@ -273,7 +272,7 @@ impl TriLevelValidator {
         };
 
         let patterns_context = {
-            let pats = self.state.last_patterns.read().await;
+            let pats = self.state.market_data.last_patterns.read().await;
             match pats.get(symbol) {
                 Some(p) if !p.is_empty() => rat_core::format_patterns(p),
                 _ => "No candlestick patterns detected.".to_string(),
@@ -281,7 +280,7 @@ impl TriLevelValidator {
         };
 
         let agent_summary = {
-            let s = self.state.agent_market_summary.read().await;
+            let s = self.state.agent_memory.agent_market_summary.read().await;
             if s.is_empty() {
                 "No agent market summary yet.".to_string()
             } else {
@@ -367,7 +366,7 @@ impl TriLevelValidator {
 
         Self::append_reasoning_log(&verdict);
         {
-            let mut store = self.state.last_tri_level_verdict.write().await;
+            let mut store = self.state.market_data.last_tri_level_verdict.write().await;
             store.insert(sym, verdict.clone());
         }
 
@@ -391,7 +390,11 @@ impl TriLevelValidator {
     }
 
     // ── Layer 1: Rules (uses the pipeline-wide OHLCV snapshot) ────────────────
-
+    // NOTE: HardRulesGate is NOT re-run here. The pipeline's Layer 1 already
+    // enforces all 17 hard rules (Critical/High/Medium/Low) and returns early
+    // if they fail. By the time we reach this function, rules have already passed.
+    // This avoids double-counting the same 17 rules on every pipeline cycle.
+    // We only compute the pivot/confluence signal for the 2-of-3 agreement gate.
     async fn check_rules_layer(
         state: SharedState,
         symbol: &str,
@@ -399,29 +402,6 @@ impl TriLevelValidator {
         confluence: f64,
         snapshot: &OhlcvSnapshot,
     ) -> LayerSignal {
-        // Run hard rules gate using the same snapshot as LLM and Kronos
-        let gate = HardRulesGate::new(state.clone());
-        let result = gate.evaluate_with_ohlcv(symbol, snapshot).await;
-
-        if !result.passed {
-            return LayerSignal {
-                layer: "rules".into(),
-                signal: 0.0,
-                action: "BLOCK".into(),
-                confidence: 1.0,
-                reasoning: format!(
-                    "Hard rules blocked: {}",
-                    result
-                        .failed_rules
-                        .iter()
-                        .map(|r| r.rule_name.clone())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-                available: true,
-            };
-        }
-
         // Use OHLCV snapshot bars for pivot calculation (same data as LLM and Kronos)
         let (real_high, real_low, real_close) = match snapshot.bars().last() {
             Some(bar) => (bar.high, bar.low, bar.close),
@@ -432,11 +412,11 @@ impl TriLevelValidator {
             ),
         };
 
-        let rules = state.rules.read().await;
+        let rules = state.rule_engine.rules.read().await;
         let pivots = calculate_pivot_points(real_high, real_low, real_close, rules.pivot_method);
         drop(rules);
 
-        let regime = *state.market_regime.read().await;
+        let regime = *state.market_data.market_regime.read().await;
         let regime_bias = match regime {
             Some(MarketRegime::TrendingBull) => 0.3,
             Some(MarketRegime::TrendingBear) => -0.3,
@@ -444,7 +424,7 @@ impl TriLevelValidator {
         };
 
         let (portfolio_equity, portfolio_daily_pnl, portfolio_consec_losses) = {
-            let portfolio = state.portfolio.read().await;
+            let portfolio = state.portfolio_store.portfolio.read().await;
             let equity = portfolio.cash_balance
                 + portfolio.open_positions.iter()
                     .map(|p| p.current_price * p.quantity)
@@ -475,7 +455,7 @@ impl TriLevelValidator {
             action: signal_to_action(clamped),
             confidence: conf_score.clamp(0.0, 1.0),
             reasoning: format!(
-                "Rules PASS | real_high={:.2} real_low={:.2} pivot={:.2} | confluence={:.2} conf_score={:.2} regime_bias={:.2}",
+                "Rules signal | real_high={:.2} real_low={:.2} pivot={:.2} | confluence={:.2} conf_score={:.2} regime_bias={:.2}",
                 real_high, real_low, pivots.pivot, confluence, conf_score, regime_bias
             ),
             available: true,
@@ -503,7 +483,7 @@ impl TriLevelValidator {
         patterns_context: &str,
         snapshot: &OhlcvSnapshot,
     ) -> LayerSignal {
-        let rules = state.rules.read().await;
+        let rules = state.rule_engine.rules.read().await;
         // Use snapshot bars for pivot (same data as rules and Kronos layers)
         let (real_high, real_low, real_close) = match snapshot.bars().last() {
             Some(bar) => (bar.high, bar.low, bar.close),
@@ -523,7 +503,7 @@ impl TriLevelValidator {
                 "QUERY",
                 &format!(
                     "Requesting trade decision for {} @ {:.2} (Model: {})",
-                    symbol, current_price, state.config.llm_model
+                    symbol, current_price, state.io.config.llm_model
                 ),
                 Some(symbol.to_string()),
             )
@@ -531,30 +511,32 @@ impl TriLevelValidator {
 
         // ═══ HARD 25-SECOND LLM TIMEOUT ════════════════════════════
         // Prevent LLM from blocking the tri-level validator if slow.
+        // LLM is now stubbed in rat-core — this always returns Ok(default).
+        let llm_request = rat_core::LLMRequest {
+            request_id: format!("trilevel-{}-{}", symbol, Utc::now().timestamp_micros()),
+            agent_role: rat_core::role::AgentRole::SubAgent,
+            prompt: format!(
+                "Tri-level LLM layer for {} @ {:.2}: confluence={:.2} trend={} pivot={:.2} forecast={}",
+                symbol, current_price, confluence, trend_label, pivots.pivot, forecast_summary
+            ),
+            context: serde_json::json!({
+                "symbol": symbol,
+                "price": current_price,
+                "confluence": confluence,
+                "trend": trend_label,
+                "pivot": pivots.pivot,
+                "r1": pivots.r1,
+                "s1": pivots.s1,
+                "heat": portfolio_heat,
+                "session": session_open,
+                "losses": consecutive_losses,
+            }),
+            max_tokens: 256,
+            temperature: 0.3,
+        };
         let decision: LlmTradeDecision = tokio::time::timeout(
             std::time::Duration::from_secs(25),
-            state.llm.ask_for_trade_decision(
-                symbol,
-                current_price,
-                confluence,
-                trend_label,
-                pivots.pivot,
-                pivots.r1,
-                pivots.s1,
-                forecast_summary,
-                portfolio_heat,
-                session_open,
-                consecutive_losses,
-                "Tri-level parallel check",
-                "paper",
-                "Live paper trading validation",
-                // Real data — no more placeholder strings
-                multi_tf_context,
-                agent_market_summary,
-                news_context,
-                vector_context,
-                patterns_context,
-            ),
+            state.io.llm.ask_for_trade_decision(llm_request),
         )
         .await
         .unwrap_or_else(|_| {
@@ -562,14 +544,11 @@ impl TriLevelValidator {
                 "[TriLevel] ⏱ LLM timed out after 25s for {} — marking unavailable",
                 symbol
             );
-            LlmTradeDecision {
-                action: "HOLD".to_string(),
-                reason: "LLM timeout (25s)".to_string(),
-                entry: 0.0,
-                sl: 0.0,
-                tp: 0.0,
-            }
-        });
+            Ok(LlmTradeDecision::default())
+        })
+        .unwrap_or_else(|_| LlmTradeDecision::default());
+
+        // Now `decision` is LlmTradeDecision (unwrapped from Result)
 
         let available =
             !decision.reason.contains("Parse failed") && !decision.reason.contains("unavailable");
@@ -665,7 +644,7 @@ impl TriLevelValidator {
             };
         }
 
-        let client = KronosForecastTool::new(state.config.kronos_service_url.clone());
+        let client = KronosForecastTool::new(state.io.config.kronos_service_url.clone());
         let req = KronosForecastRequest {
             symbol: symbol.to_string(),
             ohlcv,
@@ -854,7 +833,7 @@ impl TriLevelValidator {
             _ => 0.0,
         };
 
-        let mut weights = state.layer_trust_weights.read().await.clone();
+        let mut weights = state.rule_engine.layer_trust_weights.read().await.clone();
         let lr = 0.05;
 
         for (layer, &pred) in layer_predictions {
@@ -884,7 +863,7 @@ impl TriLevelValidator {
         }
 
         weights.normalize();
-        *state.layer_trust_weights.write().await = weights.clone();
+        *state.rule_engine.layer_trust_weights.write().await = weights.clone();
 
         println!(
             "[TriLevel] {} attribution → rules={:.0}% llm={:.0}% kronos={:.0}% (pnl={:+.2}%)",

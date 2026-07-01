@@ -12,6 +12,8 @@ pub mod settings;
 pub mod help;
 pub mod footer;
 pub mod status_bar;
+pub mod command_palette;
+pub mod risk;
 
 use ratatui::layout::Rect;
 use ratatui::Frame;

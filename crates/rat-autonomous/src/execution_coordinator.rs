@@ -176,7 +176,7 @@ impl ExecutionCoordinatorAgent {
             open_positions_count,
             drawdown_pct,
         ) = {
-            let portfolio = self.state.portfolio.read().await;
+            let portfolio = self.state.portfolio_store.portfolio.read().await;
             let eq = portfolio.total_equity;
             let h = if eq > 0.0 {
                 portfolio
@@ -209,7 +209,7 @@ impl ExecutionCoordinatorAgent {
 
         // Read actual market price from OHLCV history (for price collar check)
         let current_price = {
-            let history = self.state.ohlcv_history.read().await;
+            let history = self.state.market_data.ohlcv_history.read().await;
             history
                 .get(&signal.symbol)
                 .and_then(|bars| bars.last().map(|b| b.close))
@@ -374,7 +374,7 @@ impl ExecutionCoordinatorAgent {
         }
 
         // Check current trading mode — route through live broker if LIVE
-        let mode = self.state.broker_registry.current_mode().await;
+        let mode = self.state.portfolio_store.broker_registry.current_mode().await;
 
         if mode == TradingMode::Live {
             return self.execute_live_trade(signal).await;
@@ -383,7 +383,7 @@ impl ExecutionCoordinatorAgent {
         // ── PAPER MODE (existing logic) ────────────────────────────────────
         // Volatility-adaptive slippage: wider tolerance in fast markets
         let base_slippage = 0.05;
-        let sigma = self.state.memory_integration.get_volatility();
+        let sigma = self.state.portfolio_store.memory_integration.get_volatility();
         let slippage_pct = base_slippage * (1.0 + sigma);
         let effective_entry = match signal.direction {
             rat_core::TradeDirection::Long => signal.entry_price * (1.0 + slippage_pct / 100.0),
@@ -490,7 +490,7 @@ impl ExecutionCoordinatorAgent {
         )
         .await;
 
-        let _ = self.state.memory.store_decision(
+        let _ = self.state.agent_memory.memory.store_decision(
             &format!("execution/{}/{}", signal.symbol, Utc::now().timestamp()),
             &exec_log,
         );
@@ -520,13 +520,13 @@ impl ExecutionCoordinatorAgent {
     ) {
         // Look up the latest episode for this symbol
         let ep_id = {
-            let latest = self.state.latest_episode.read().await;
+            let latest = self.state.agent_memory.latest_episode.read().await;
             latest.get(symbol).cloned()
         };
 
         if let Some(episode_id) = ep_id {
             // Load the episode from memory
-            match self.state.memory.load_episode(&episode_id) {
+            match self.state.agent_memory.memory.load_episode(&episode_id) {
                 Ok(Some(json)) => {
                     if let Ok(mut episode) = serde_json::from_str::<TradingEpisode>(&json) {
                         // Only update if outcome is not already set
@@ -552,7 +552,7 @@ impl ExecutionCoordinatorAgent {
 
                             // Save updated episode back to memory
                             if let Ok(updated_json) = serde_json::to_string(&episode) {
-                                let _ = self.state.memory.store_episode(&episode_id, &updated_json);
+                                let _ = self.state.agent_memory.memory.store_episode(&episode_id, &updated_json);
                                 println!("[OutcomeUpdate] 📝 Episode {} updated with outcome: {} {:.2} (P&L: ${:.2})",
                                     episode_id, exit_reason, exit_price, pnl);
 
@@ -568,8 +568,8 @@ impl ExecutionCoordinatorAgent {
                                     exit_reason
                                 );
                                 let regret = episode.reflection.as_ref().map(|r| r.regret_score);
-                                let vm = self.state.vector_memory.clone();
-                                let llm_clone = self.state.llm.clone();
+                                let vm = self.state.agent_memory.vector_memory.clone();
+                                let llm_clone = self.state.io.llm.clone();
                                 let sym_clone = episode.symbol.clone();
                                 tokio::spawn(async move {
                                     let mut vm_write = vm.write().await;
@@ -579,7 +579,6 @@ impl ExecutionCoordinatorAgent {
                                             &sym_clone,
                                             &summary,
                                             regret,
-                                            &llm_clone,
                                         )
                                         .await;
                                 });
@@ -621,7 +620,7 @@ impl ExecutionCoordinatorAgent {
     /// Without this, positions stall with stale prices and SL/TP never triggers.
     pub async fn refresh_position_prices(&self) {
         let symbols: Vec<String> = {
-            let portfolio = self.state.portfolio.read().await;
+            let portfolio = self.state.portfolio_store.portfolio.read().await;
             portfolio
                 .open_positions
                 .iter()
@@ -633,8 +632,8 @@ impl ExecutionCoordinatorAgent {
             return;
         }
 
-        let history = self.state.ohlcv_history.read().await;
-        let mut portfolio = self.state.portfolio.write().await;
+        let history = self.state.market_data.ohlcv_history.read().await;
+        let mut portfolio = self.state.portfolio_store.portfolio.write().await;
 
         for pos in &mut portfolio.open_positions {
             if let Some(bars) = history.get(&pos.symbol) {
@@ -696,8 +695,8 @@ impl ExecutionCoordinatorAgent {
         signal: &TradeSignal,
     ) -> Result<String, Box<dyn Error + Send + Sync>> {
         // ── Circuit Breaker Check ────────────────────────────────────────
-        if !self.state.circuit_breaker.is_trading_allowed().await {
-            let reason = self.state.circuit_breaker.halt_reason().await;
+        if !self.state.portfolio_store.circuit_breaker.is_trading_allowed().await {
+            let reason = self.state.portfolio_store.circuit_breaker.halt_reason().await;
             let msg = format!("LIVE TRADE BLOCKED by CircuitBreaker: {:?}", reason);
             eprintln!("[ExecutionCoordinator] {}", msg);
             self.state
@@ -724,7 +723,7 @@ impl ExecutionCoordinatorAgent {
             return Err(msg.into());
         }
 
-        let broker = self.state.broker_registry.active_broker().await;
+        let broker = self.state.portfolio_store.broker_registry.active_broker().await;
 
         // Build a market order request from the trade signal
         let order_req = OrderRequest {
@@ -763,7 +762,7 @@ impl ExecutionCoordinatorAgent {
                 // ── Register order with LiveOrderManager ─────────────────
                 let _ = self
                     .state
-                    .live_order_manager
+                    .portfolio_store.live_order_manager
                     .register_order(
                         &order_id,
                         &signal.symbol,
@@ -778,7 +777,7 @@ impl ExecutionCoordinatorAgent {
                     .await;
 
                 // ── Report fill to CircuitBreaker ─────────────────────────
-                self.state.circuit_breaker.report_fill().await;
+                self.state.portfolio_store.circuit_breaker.report_fill().await;
 
                 let exec_log = format!(
                     "LIVE EXECUTED: {} {} qty={} @ {:.2} | Order: {} | SL: {:.2} | TP: {:.2}",
@@ -831,7 +830,7 @@ impl ExecutionCoordinatorAgent {
                     format!("REJ-{}-{}", signal.symbol, Utc::now().timestamp_micros());
                 let _ = self
                     .state
-                    .live_order_manager
+                    .portfolio_store.live_order_manager
                     .register_order(
                         &synth_order_id,
                         &signal.symbol,
@@ -846,7 +845,7 @@ impl ExecutionCoordinatorAgent {
                     .await;
                 let _ = self
                     .state
-                    .live_order_manager
+                    .portfolio_store.live_order_manager
                     .update_status(
                         &synth_order_id,
                         OrderStatus::Rejected {
@@ -861,13 +860,13 @@ impl ExecutionCoordinatorAgent {
                 // ── Report rejection to CircuitBreaker ───────────────────
                 let rejection_count = self
                     .state
-                    .live_order_manager
+                    .portfolio_store.live_order_manager
                     .get_rejection_stats()
                     .await
                     .consecutive_rejections;
                 let _ = self
                     .state
-                    .circuit_breaker
+                    .portfolio_store.circuit_breaker
                     .report_rejection(rejection_count)
                     .await;
 
@@ -893,14 +892,14 @@ impl ExecutionCoordinatorAgent {
     }
 
     async fn check_and_exit_positions(&self) -> Result<Vec<String>, Box<dyn Error + Send + Sync>> {
-        let mode = self.state.broker_registry.current_mode().await;
+        let mode = self.state.portfolio_store.broker_registry.current_mode().await;
         if mode == TradingMode::Live {
-            let broker = self.state.broker_registry.active_broker().await;
+            let broker = self.state.portfolio_store.broker_registry.active_broker().await;
             let broker_positions = broker.get_positions().await.unwrap_or_default();
             let mut exits = Vec::new();
 
             let local_positions = {
-                let portfolio = self.state.portfolio.read().await;
+                let portfolio = self.state.portfolio_store.portfolio.read().await;
                 portfolio.open_positions.clone()
             };
 
@@ -952,14 +951,14 @@ impl ExecutionCoordinatorAgent {
                             .await;
 
                             // Auto-trigger deep reflection
-                            if let Ok(Some(json)) = self.state.memory.load_episode(&pos.symbol) {
+                            if let Ok(Some(json)) = self.state.agent_memory.memory.load_episode(&pos.symbol) {
                                 if let Ok(episode) =
                                     serde_json::from_str::<rat_core::TradingEpisode>(&json)
                                 {
-                                    let llm = (*self.state.llm).clone();
+                                    let llm = (*self.state.io.llm).clone();
                                     let reflector =
                                         crate::reflector::ReflectorAgent::new(self.state.clone());
-                                    let _ = reflector.deep_reflect_on_episode(&episode, &llm).await;
+                                    let _ = reflector.deep_reflect_on_episode(&episode).await;
                                 }
                             }
 
@@ -983,7 +982,7 @@ impl ExecutionCoordinatorAgent {
                                 strategy: Some("debate_driven_live".to_string()),
                                 order_id: format!("live-{}", Utc::now().timestamp()),
                             };
-                            let _ = self.state.memory.store_decision(
+                            let _ = self.state.agent_memory.memory.store_decision(
                                 &format!("closed_trade/{}", closed.id),
                                 &serde_json::to_string(&closed).unwrap_or_default(),
                             );
@@ -1002,7 +1001,7 @@ impl ExecutionCoordinatorAgent {
                 } else {
                     // Update current price & P&L from broker
                     if let Some(bp) = broker_positions.iter().find(|bp| bp.symbol == pos.symbol) {
-                        let mut portfolio = self.state.portfolio.write().await;
+                        let mut portfolio = self.state.portfolio_store.portfolio.write().await;
                         if let Some(lp) = portfolio
                             .open_positions
                             .iter_mut()
@@ -1021,7 +1020,7 @@ impl ExecutionCoordinatorAgent {
         // Refresh position prices from latest OHLCV data so SL/TP can trigger
         self.refresh_position_prices().await;
 
-        let portfolio = self.state.portfolio.read().await;
+        let portfolio = self.state.portfolio_store.portfolio.read().await;
         let mut exits = Vec::new();
         let positions_snapshot = portfolio.open_positions.clone();
         drop(portfolio);
@@ -1079,14 +1078,13 @@ impl ExecutionCoordinatorAgent {
                             .await;
 
                         // Auto-trigger deep reflection for self-evolution (trained memory + regret)
-                        if let Ok(Some(json)) = self.state.memory.load_episode(&pos.symbol) {
+                        if let Ok(Some(json)) = self.state.agent_memory.memory.load_episode(&pos.symbol) {
                             if let Ok(episode) =
                                 serde_json::from_str::<rat_core::TradingEpisode>(&json)
                             {
-                                let llm = (*self.state.llm).clone();
+                                let llm = (*self.state.io.llm).clone();
                                 let reflector =
-                                    crate::reflector::ReflectorAgent::new(self.state.clone());
-                                let _ = reflector.deep_reflect_on_episode(&episode, &llm).await;
+                                    crate::reflector::ReflectorAgent::new(self.state.clone());                                    let _ = reflector.deep_reflect_on_episode(&episode).await;
                             }
                         }
                         // Record to full journal for better reflection data (self-evolution fuel)
@@ -1106,7 +1104,7 @@ impl ExecutionCoordinatorAgent {
                             strategy: Some("debate_driven".to_string()),
                             order_id: format!("paper-{}", Utc::now().timestamp()),
                         };
-                        let _ = self.state.memory.store_decision(
+                        let _ = self.state.agent_memory.memory.store_decision(
                             &format!("closed_trade/{}", closed.id),
                             &serde_json::to_string(&closed).unwrap_or_default(),
                         );
@@ -1159,14 +1157,13 @@ impl ExecutionCoordinatorAgent {
                         self.spawn_outcome_processing(episode_id, exit_price, pos.symbol.clone())
                             .await;
 
-                        if let Ok(Some(json)) = self.state.memory.load_episode(&pos.symbol) {
+                        if let Ok(Some(json)) = self.state.agent_memory.memory.load_episode(&pos.symbol) {
                             if let Ok(episode) =
                                 serde_json::from_str::<rat_core::TradingEpisode>(&json)
                             {
-                                let llm = (*self.state.llm).clone();
+                                let llm = (*self.state.io.llm).clone();
                                 let reflector =
-                                    crate::reflector::ReflectorAgent::new(self.state.clone());
-                                let _ = reflector.deep_reflect_on_episode(&episode, &llm).await;
+                                    crate::reflector::ReflectorAgent::new(self.state.clone());                                    let _ = reflector.deep_reflect_on_episode(&episode).await;
                             }
                         }
                         let closed = rat_core::ClosedTrade {
@@ -1185,7 +1182,7 @@ impl ExecutionCoordinatorAgent {
                             strategy: Some("debate_driven".to_string()),
                             order_id: format!("paper-{}", Utc::now().timestamp()),
                         };
-                        let _ = self.state.memory.store_decision(
+                        let _ = self.state.agent_memory.memory.store_decision(
                             &format!("closed_trade/{}", closed.id),
                             &serde_json::to_string(&closed).unwrap_or_default(),
                         );
@@ -1250,7 +1247,7 @@ impl ExecutionCoordinatorAgent {
                             strategy: Some("debate_driven".to_string()),
                             order_id: format!("time-{}", Utc::now().timestamp()),
                         };
-                        let _ = self.state.memory.store_decision(
+                        let _ = self.state.agent_memory.memory.store_decision(
                             &format!("closed_trade/{}", closed.id),
                             &serde_json::to_string(&closed).unwrap_or_default(),
                         );
@@ -1333,13 +1330,13 @@ async fn build_pre_trade_snapshot(
     signal: &TradeSignal,
 ) -> crate::outcome_processor::PreTradeSnapshot {
     // Reconstruct active weights from current DisciplineRules
-    let rules = state.rules.read().await;
+    let rules = state.rule_engine.rules.read().await;
     let active_weights: HashMap<String, f64> = rules.skill_weights.clone();
     drop(rules);
 
     // Reconstruct skill predictions from last_skill_votes
     let skill_predictions: HashMap<String, f64> = {
-        let votes = state.last_skill_votes.read().await;
+        let votes = state.agent_memory.last_skill_votes.read().await;
         votes
             .iter()
             .map(|v| (v.skill_name.clone(), v.score))
@@ -1352,7 +1349,7 @@ async fn build_pre_trade_snapshot(
     };
 
     let layer_predictions: HashMap<String, f64> = {
-        let verdicts = state.last_tri_level_verdict.read().await;
+        let verdicts = state.market_data.last_tri_level_verdict.read().await;
         verdicts
             .get(&signal.symbol)
             .map(crate::tri_level_validator::verdict_to_layer_predictions)
@@ -1430,7 +1427,7 @@ impl ExecutionCoordinatorAgent {
     async fn spawn_outcome_processing(&self, episode_id: String, exit_price: f64, symbol: String) {
         if let Some(processor) = get_outcome_processor() {
             let current_regime = {
-                let regime = self.state.market_regime.read().await;
+                let regime = self.state.market_data.market_regime.read().await;
                 match *regime {
                     Some(crate::types::MarketRegime::TrendingBull) => {
                         crate::regime_classifier::MarketRegime::TrendingBull
@@ -1469,7 +1466,7 @@ impl ExecutionCoordinatorAgent {
                     Ok((updated_weights, evolved_config)) => {
                         // === UPGRADE 3: Apply WeightTuner output to DisciplineRules ===
                         // Write the tuned skill weights back so they take effect on the next trade.
-                        let mut rules = state_clone.rules.write().await;
+                        let mut rules = state_clone.rule_engine.rules.write().await;
                         for (skill_name, weight) in &updated_weights {
                             rules.set_skill_weight(skill_name, *weight);
                         }
@@ -1500,7 +1497,7 @@ impl ExecutionCoordinatorAgent {
     }
 
     async fn check_emergency_meta_today(&self) {
-        let portfolio = self.state.portfolio.read().await;
+        let portfolio = self.state.portfolio_store.portfolio.read().await;
         let losing_today = portfolio.losing_trades_today;
         drop(portfolio);
 

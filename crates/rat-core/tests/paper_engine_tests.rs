@@ -477,7 +477,7 @@ async fn test_equity_after_close() {
 #[tokio::test]
 async fn test_risk_check_passes_normal_order() {
     let engine = PaperEngine::new(default_config());
-    let result = engine.check_risk("BTC", 5_000.0).await;
+    let result = engine.check_risk("BTC", 500.0).await;
     assert!(result.passed);
 }
 

@@ -45,7 +45,7 @@ fn setup_test_env(db_name: &str) -> (AutonomousOrchestrator, String) {
 /// Seed OHLCV history into shared state so the scanner and market intelligence
 /// have data to work with.
 async fn seed_ohlcv(state: &SharedState, symbol: &str, base_price: f64) {
-    let mut history = state.ohlcv_history.write().await;
+    let mut history = state.market_data.ohlcv_history.write().await;
     let mut bars = Vec::with_capacity(20);
     for i in 0..20 {
         let noise = (i as f64).sin() * base_price * 0.01;
@@ -63,12 +63,12 @@ async fn seed_ohlcv(state: &SharedState, symbol: &str, base_price: f64) {
 
 /// Count open positions in state.
 async fn count_positions(state: &SharedState) -> usize {
-    state.portfolio.read().await.open_positions.len()
+    state.portfolio_store.portfolio.read().await.open_positions.len()
 }
 
 /// Read portfolio equity.
 async fn get_equity(state: &SharedState) -> f64 {
-    state.portfolio.read().await.total_equity
+    state.portfolio_store.portfolio.read().await.total_equity
 }
 
 /// Helper to simulate the outcome recording path (OutcomeProcessor behavior).
@@ -76,7 +76,7 @@ async fn get_equity(state: &SharedState) -> f64 {
 /// without needing a full LLM-driven paper execution.
 /// This helps resolve "tests produce 0-row DBs for self-evolution data".
 fn simulate_outcome_recording(state: &SharedState, symbol: &str, pnl: f64, was_win: bool) {
-    let store = &state.episode_store;
+    let store = &state.agent_memory.episode_store;
     let episode_id = format!("sim-ep-{}", symbol);
 
     // Simulate some skill votes (as MI would have captured)
@@ -289,12 +289,12 @@ async fn test_rat_hierarchy_integrity() {
 
     // Verify state mutation propagates across groups (all share the same inner state)
     {
-        let mut portfolio = orch.state.portfolio.write().await;
+        let mut portfolio = orch.state.portfolio_store.portfolio.write().await;
         portfolio.daily_pnl = 1234.56;
     }
     {
         // Read back through Rat's scanner's state
-        let portfolio = rat.identifier.scanner.state.portfolio.read().await;
+        let portfolio = rat.identifier.scanner.state.portfolio_store.portfolio.read().await;
         assert!((portfolio.daily_pnl - 1234.56).abs() < f64::EPSILON,
             "State mutation via orchestrator should be visible through Rat. Got {}, expected 1234.56", portfolio.daily_pnl);
     }
@@ -367,14 +367,14 @@ async fn test_identifier_group() {
     );
 
     // Ensure state was updated (market regime should be set)
-    let regime = orch.state.market_regime.read().await;
+    let regime = orch.state.market_data.market_regime.read().await;
     assert!(
         regime.is_some(),
         "Market regime should be set after Identifier run"
     );
 
     // COT store should have entries
-    let cot_len = orch.state.cot_store.read().await.len();
+    let cot_len = orch.state.agent_memory.cot_store.read().await.len();
     // Initial entry from pipeline is not added here, but sub-agents may push COT entries
     // This just verifies no panics or state corruption
     println!("  COT entries after identifier: {}", cot_len);
@@ -537,7 +537,7 @@ async fn test_verifier_drawdown_halt() {
 
     // Simulate a portfolio that hit max drawdown by disabling trading
     {
-        let mut portfolio = orch.state.portfolio.write().await;
+        let mut portfolio = orch.state.portfolio_store.portfolio.write().await;
         portfolio.max_drawdown_today = 0.10; // 10%
         portfolio.daily_pnl = -10_000.0; // -₹10k
         portfolio.consecutive_losses = 5;
@@ -651,7 +651,7 @@ async fn test_state_sharing_across_groups() {
 
     // Modify state through one agent and verify it's visible through another
     {
-        let mut portfolio = orch.state.portfolio.write().await;
+        let mut portfolio = orch.state.portfolio_store.portfolio.write().await;
         portfolio.daily_pnl = -5_000.0;
         portfolio.consecutive_losses = 3;
     }
@@ -697,7 +697,7 @@ async fn test_pipeline_state_consistency() {
 
     // After identifier, state should be populated
     {
-        let regime = orch.state.market_regime.read().await;
+        let regime = orch.state.market_data.market_regime.read().await;
         assert!(regime.is_some(), "Market regime should be set");
         println!("  Post-identifier regime: {:?}", regime);
     }
@@ -816,7 +816,7 @@ async fn test_multiple_pipeline_runs() {
     }
 
     // State should have accumulated COT entries
-    let cot_count = orch.state.cot_store.read().await.len();
+    let cot_count = orch.state.agent_memory.cot_store.read().await.len();
     println!("  Total COT entries after {} runs: {}", 3, cot_count);
 
     // Simulate outcome recording so this test's DB gets skill_performance + closed_trades rows
@@ -836,7 +836,7 @@ async fn test_portfolio_management_via_rat() {
 
     // Verify initial portfolio state
     {
-        let portfolio = orch.state.portfolio.read().await;
+        let portfolio = orch.state.portfolio_store.portfolio.read().await;
         assert_eq!(portfolio.cash_balance, 100_000.0);
         assert!(portfolio.open_positions.is_empty());
         assert!(portfolio.trading_enabled);
@@ -869,7 +869,7 @@ async fn test_portfolio_management_via_rat() {
     // The agent alone produces the full TradeSignal with its own entry, stop_loss, take_profit.
     // If the agent says HOLD, we respect it – we do not inject our own prices.
     let aggregated_for_executer = {
-        let a = orch.state.last_aggregated_signal.read().await;
+        let a = orch.state.agent_memory.last_aggregated_signal.read().await;
         a.clone()
     };
 
@@ -904,7 +904,7 @@ async fn test_portfolio_management_via_rat() {
         // For verification of the full outcome path, simulate a close at the agent's own TP.
         // In a real system the fast loop / ExecutionCoordinator would do this when price hits the agent's SL/TP.
         {
-            let mut portfolio = orch.state.portfolio.write().await;
+            let mut portfolio = orch.state.portfolio_store.portfolio.write().await;
             if let Some(pos) = portfolio
                 .open_positions
                 .iter_mut()
@@ -916,7 +916,7 @@ async fn test_portfolio_management_via_rat() {
         }
 
         // Record trade outcome directly via EpisodeStore
-        let store = &orch.state.episode_store;
+        let store = &orch.state.agent_memory.episode_store;
         let outcome_ep = rat_autonomous::episode_store::ClosedEpisode {
             id: format!("ep-{}-{}", "NIFTY", Utc::now().timestamp()),
             symbol: "NIFTY".to_string(),
@@ -968,7 +968,7 @@ async fn test_portfolio_management_via_rat() {
 
     // Simulate price to TP and trigger real close path (calls close_episode with the real votes from MI)
     {
-        let mut portfolio = orch.state.portfolio.write().await;
+        let mut portfolio = orch.state.portfolio_store.portfolio.write().await;
         if let Some(pos) = portfolio
             .open_positions
             .iter_mut()
@@ -980,7 +980,7 @@ async fn test_portfolio_management_via_rat() {
 
     // === REAL DATA FLOW ===
     // Record trade outcome via EpisodeStore directly
-    let store = &orch.state.episode_store;
+    let store = &orch.state.agent_memory.episode_store;
     let outcome_ep = rat_autonomous::episode_store::ClosedEpisode {
         id: format!("ep-{}-{}", "NIFTY", Utc::now().timestamp()),
         symbol: "NIFTY".to_string(),
@@ -1015,7 +1015,7 @@ async fn test_portfolio_management_via_rat() {
 
     // Verify final state (tolerant for pure agentic HOLD path from NewsAnalyser+MetricsMeter)
     {
-        let portfolio = orch.state.portfolio.read().await;
+        let portfolio = orch.state.portfolio_store.portfolio.read().await;
         assert!(
             portfolio.open_positions.is_empty(),
             "All positions should be closed"

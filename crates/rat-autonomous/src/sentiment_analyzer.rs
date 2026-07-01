@@ -18,7 +18,7 @@ impl SentimentAnalyzer {
 
     /// Analyzes sentiment from latest news context.
     pub async fn analyze_sentiment(&self, symbol: &str) -> f64 {
-        let news = self.state.latest_news.read().await;
+        let news = self.state.agent_memory.latest_news.read().await;
         if let Some(ctx) = news.get(symbol) {
             let summary = &ctx.summary.to_lowercase();
             let pos = ["bull", "up", "gain", "positive", "rise", "buy"]

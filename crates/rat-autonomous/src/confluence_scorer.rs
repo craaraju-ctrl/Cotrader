@@ -45,7 +45,7 @@ impl Agent for ConfluenceScorerAgent {
             println!("[ConfluenceScorer smarter] {}\n(Trained memory for self-understanding in sub-agent.)", trained);
         }
         if let Some(AgentInput::ConfluenceRequest { context }) = input {
-            let rules = self.state.rules.read().await;
+            let rules = self.state.rule_engine.rules.read().await;
             let pivots = calculate_pivot_points(
                 context.high,
                 context.low,

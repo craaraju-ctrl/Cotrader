@@ -19,7 +19,7 @@ impl FundingRateSkill {
     }
 
     pub async fn analyze(&self, symbol: &str) -> (f64, &'static str) {
-        let history = self.state.ohlcv_history.read().await;
+        let history = self.state.market_data.ohlcv_history.read().await;
         if let Some(bars) = history.get(symbol) {
             if bars.len() >= 24 {
                 return compute_funding_rate_proxy(bars, symbol);

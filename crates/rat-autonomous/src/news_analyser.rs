@@ -27,7 +27,7 @@ impl NewsAnalyser {
     /// (Fetch itself happens in orchestrator loops for live WS cadence + rate respect; analyser is the "tool" layer on top.)
     pub async fn analyze_and_store(&self, symbol: &str) -> f64 {
         let headlines: Vec<NewsItem> = {
-            let ln = self.state.latest_news.read().await;
+            let ln = self.state.agent_memory.latest_news.read().await;
             ln.get(symbol)
                 .map(|ctx| ctx.headlines.clone())
                 .unwrap_or_default()
@@ -45,7 +45,7 @@ impl NewsAnalyser {
                 fetched_at: chrono::Utc::now(),
             };
             self.state
-                .latest_news
+                .agent_memory.latest_news
                 .write()
                 .await
                 .insert(symbol.to_string(), ctx);
@@ -110,7 +110,7 @@ impl NewsAnalyser {
             fetched_at: chrono::Utc::now(),
         };
         self.state
-            .latest_news
+            .agent_memory.latest_news
             .write()
             .await
             .insert(symbol.to_string(), ctx);

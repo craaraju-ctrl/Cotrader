@@ -43,7 +43,7 @@ impl RedFolderCheckerAgent {
 
     async fn calendar_red_folder_today(&self) -> Option<String> {
         let today = Self::ist_today();
-        let calendar = self.state.calendar_events.read().await;
+        let calendar = self.state.market_data.calendar_events.read().await;
         calendar
             .iter()
             .find(|e| e.date == today && e.impact == EventImpact::High)
@@ -70,7 +70,7 @@ impl RedFolderCheckerAgent {
             Utc::now().with_timezone(&chrono::FixedOffset::east_opt(5 * 3600 + 1800).unwrap());
         let today_naive = ist_now.date_naive();
 
-        let calendar = self.state.calendar_events.read().await;
+        let calendar = self.state.market_data.calendar_events.read().await;
         let mut upcoming: Vec<String> = calendar
             .iter()
             .filter_map(|event| {

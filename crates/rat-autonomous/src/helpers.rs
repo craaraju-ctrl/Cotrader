@@ -6,14 +6,14 @@ use rat_core::{DisciplineRules, OhlcvBar};
 /// Resolve the best available confluence score for a symbol (per-symbol metrics first).
 pub async fn resolve_symbol_confluence(state: &SharedState, symbol: &str) -> f64 {
     {
-        let metrics = state.latest_metrics.read().await;
+        let metrics = state.market_data.latest_metrics.read().await;
         if let Some(snap) = metrics.get(symbol) {
             if snap.confluence_hint > 0.0 {
                 return snap.confluence_hint;
             }
         }
     }
-    let agg = state.last_aggregated_signal.read().await;
+    let agg = state.agent_memory.last_aggregated_signal.read().await;
     agg.as_ref().map(|a| a.conviction).unwrap_or(0.5)
 }
 

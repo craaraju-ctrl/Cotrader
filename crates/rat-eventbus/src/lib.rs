@@ -185,7 +185,7 @@ pub struct CotEvent {
 ///
 /// Note: NOT `Clone` or `Send + Sync` on the trait — use `Arc<dyn EventBus>` for shared ownership.
 #[async_trait]
-pub trait EventBus: Send + Sync {
+pub trait EventBus: std::fmt::Debug + Send + Sync {
     /// Publish an event to a subject.
     async fn publish(
         &self,
@@ -228,7 +228,7 @@ pub trait EventStream: Send + Sync {
 
 /// Production event bus using NATS pub-sub.
 /// Services connect to a NATS server and communicate via subjects.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct NatsEventBus {
     client: async_nats::Client,
 }
@@ -315,6 +315,7 @@ impl EventBus for NatsEventBus {
     }
 }
 
+#[derive(Debug)]
 /// NATS subscription stream wrapper.
 pub struct NatsStream {
     inner: async_nats::Subscriber,
@@ -339,7 +340,7 @@ impl EventStream for NatsStream {
 /// In-memory event bus using tokio broadcast channels.
 /// Used for testing and single-process mode (no NATS server needed).
 /// Subscribers use client-side pattern filtering against a single broadcast channel.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct InMemoryEventBus {
     default_tx: broadcast::Sender<(String, RatEvent)>,
 }
@@ -452,6 +453,7 @@ impl EventBus for InMemoryEventBus {
     }
 }
 
+#[derive(Debug)]
 /// In-memory subscription stream wrapper.
 pub struct InMemoryStream {
     inner: mpsc::Receiver<(String, RatEvent)>,

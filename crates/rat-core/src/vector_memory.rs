@@ -1,4 +1,4 @@
-use crate::LlmExecutor;
+use crate::embeddings;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -55,12 +55,11 @@ impl VectorMemory {
         symbol: &str,
         summary_text: &str,
         regret_score: Option<f64>,
-        llm: &LlmExecutor,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if !self.is_online {
             return Ok(());
         }
-        let embedding_f32 = llm.embed_text(summary_text).await?;
+        let embedding_f32 = embeddings::embed_text(summary_text);
         let embedding_f64: Vec<f64> = embedding_f32.iter().map(|&x| x as f64).collect();
 
         let mut metadata = HashMap::new();
@@ -93,12 +92,11 @@ impl VectorMemory {
         &self,
         query_text: &str,
         top_k: usize,
-        llm: &LlmExecutor,
     ) -> Result<Vec<SimilarResult>, Box<dyn std::error::Error + Send + Sync>> {
         if !self.is_online {
             return Ok(vec![]);
         }
-        let query_embedding_f32 = llm.embed_text(query_text).await?;
+        let query_embedding_f32 = embeddings::embed_text(query_text);
         let query_embedding_f64: Vec<f64> = query_embedding_f32.iter().map(|&x| x as f64).collect();
         self.search_by_vector_async(query_embedding_f64.as_slice(), top_k)
             .await

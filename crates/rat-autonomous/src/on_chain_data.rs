@@ -54,7 +54,7 @@ impl OnChainData {
         }
 
         // === Tier 2: Local proxy (always available) ===
-        let history = self.state.ohlcv_history.read().await;
+        let history = self.state.market_data.ohlcv_history.read().await;
         let proxy_score = if let Some(bars) = history.get(symbol) {
             if bars.len() < 20 {
                 0.5

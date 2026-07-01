@@ -17,7 +17,7 @@ impl CorrelationChecker {
     }
 
     pub async fn check_correlation(&self, symbol: &str) -> f64 {
-        let history = self.state.ohlcv_history.read().await;
+        let history = self.state.market_data.ohlcv_history.read().await;
 
         // If we have history for major crypto pairs, compute a crude proxy correlation vs "BTC" or average.
         // Real version would keep aligned time-series and use Pearson.

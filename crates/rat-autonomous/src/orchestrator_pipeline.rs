@@ -1,6 +1,19 @@
 use crate::types::{AgentDecision, DecisionVerdict, OhlcvSnapshot, PipelineSummary, TradeSignal};
 use std::error::Error;
+use std::sync::atomic::{AtomicBool, Ordering};
 use rat_core::{Agent, TradeDirection};
+use rat_eventbus::EventBus;
+
+/// Track whether the metrics service has been confirmed reachable.
+/// Once set to true, errors are silently suppressed. If never reachable,
+/// only the first error per sender function is printed.
+static METRICS_HEALTHY: AtomicBool = AtomicBool::new(false);
+
+/// Suppress repeated "connection refused" noise by only logging the first
+/// error from each sender function. Returns true if this is the first failure.
+fn report_metrics_error_once() -> bool {
+    !METRICS_HEALTHY.swap(true, Ordering::Relaxed)
+}
 
 /// Send a pipeline run event to the rat-metrics service.
 /// Non-blocking: sends via HTTP POST in a background tokio task.
@@ -36,10 +49,12 @@ pub async fn send_pipeline_event_to_metrics(
             .await
         {
             Ok(_) => {}
-            Err(e) => eprintln!(
-                "[Metrics] Pipeline event send failed (metrics may not be running): {}",
-                e
-            ),
+            Err(_) if report_metrics_error_once() => {
+                eprintln!(
+                    "[Metrics] Pipeline event send failed (metrics may not be running on localhost:9730) — suppressing further errors"
+                );
+            }
+            Err(_) => {} // silenced
         }
     });
 }
@@ -86,7 +101,10 @@ pub async fn send_trade_outcome_to_metrics(
             .await
         {
             Ok(_) => {}
-            Err(e) => eprintln!("[Metrics] Trade outcome send failed: {}", e),
+            Err(_) if report_metrics_error_once() => {
+                eprintln!("[Metrics] Trade outcome send failed — metrics unavailable on localhost:9730 (suppressing further errors)");
+            }
+            Err(_) => {} // silenced
         }
     });
 }
@@ -113,7 +131,10 @@ pub async fn send_latency_to_metrics(component: &str, duration_ms: f64, symbol: 
             .await
         {
             Ok(_) => {}
-            Err(e) => eprintln!("[Metrics] Latency sample send failed: {}", e),
+            Err(_) if report_metrics_error_once() => {
+                eprintln!("[Metrics] Latency sample send failed — metrics unavailable on localhost:9730 (suppressing further errors)");
+            }
+            Err(_) => {} // silenced
         }
     });
 }
@@ -270,7 +291,7 @@ impl crate::orchestrator_struct::AutonomousOrchestrator {
 
         // ── Phase 0: Check if there is already an open position on this symbol ──
         {
-            let portfolio = self.state.portfolio.read().await;
+            let portfolio = self.state.portfolio_store.portfolio.read().await;
             if portfolio
                 .open_positions
                 .iter()
@@ -499,7 +520,7 @@ impl crate::orchestrator_struct::AutonomousOrchestrator {
         // Drawdown/overtrading checks are informational — the HardRulesGate enforced these.
         let t3_start = std::time::Instant::now();
         let equity = {
-            let portfolio = self.state.portfolio.read().await;
+            let portfolio = self.state.portfolio_store.portfolio.read().await;
             portfolio.total_equity
         };
         let risk = rat
@@ -533,13 +554,13 @@ impl crate::orchestrator_struct::AutonomousOrchestrator {
         // Lightweight spot-check on first trade of day: verify recent price action
         // is consistent with the declared regime.
         {
-            let portfolio = self.state.portfolio.read().await;
+            let portfolio = self.state.portfolio_store.portfolio.read().await;
             let total_trades = portfolio.total_trades_today;
             drop(portfolio);
 
             if total_trades == 0 {
                 let bars = {
-                    let hist = self.state.ohlcv_history.read().await;
+                    let hist = self.state.market_data.ohlcv_history.read().await;
                     hist.get(symbol).cloned().unwrap_or_default()
                 };
 
@@ -552,7 +573,7 @@ impl crate::orchestrator_struct::AutonomousOrchestrator {
                     } else {
                         0.0
                     };
-                    let regime = *self.state.market_regime.read().await;
+                    let regime = *self.state.market_data.market_regime.read().await;
 
                     let regime_consistent = match &regime {
                         Some(crate::types::MarketRegime::TrendingBull) => recent_trend > -0.005,
@@ -652,9 +673,9 @@ impl crate::orchestrator_struct::AutonomousOrchestrator {
         // execution. Emits a COT step so the layer is visible in the flow.
         let mut signal_opt = signal_opt;
         if !verdict.judge_veto {
-            let agg = self.state.last_aggregated_signal.read().await.clone();
+            let agg = self.state.agent_memory.last_aggregated_signal.read().await.clone();
             if let Some(agg_signal) = agg {
-                let regime_opt = *self.state.market_regime.read().await;
+                let regime_opt = *self.state.market_data.market_regime.read().await;
                 let regime_label: &str = match regime_opt {
                     Some(crate::types::MarketRegime::TrendingBull) => "trending_bull",
                     Some(crate::types::MarketRegime::TrendingBear) => "trending_bear",
@@ -909,7 +930,7 @@ impl crate::orchestrator_struct::AutonomousOrchestrator {
         // The latest close from OHLCV history is used for the entry price.
         let _t5_start = std::time::Instant::now();
         let execution_price = {
-            let history = self.state.ohlcv_history.read().await;
+            let history = self.state.market_data.ohlcv_history.read().await;
             history
                 .get(symbol)
                 .and_then(|bars| bars.last().map(|b| b.close))
@@ -1081,7 +1102,7 @@ impl crate::orchestrator_struct::AutonomousOrchestrator {
         // ── Finalize communication log ──────────────────────────────────
         let blocking_reasons = self.state.get_blocking_reasons().await;
         let total_decisions = {
-            let log = self.state.communication_log.read().await;
+            let log = self.state.io.communication_log.read().await;
             log.decisions.len()
         };
         let summary = format!(
@@ -1151,6 +1172,18 @@ impl crate::orchestrator_struct::AutonomousOrchestrator {
         self.state
             .push_summary_cot(chain_id, symbol, summary_layers, final_action, &exec_reason)
             .await;
+
+        // ── Publish pipeline result to EventBus (if wired) ────────────────
+        if let Some(ref event_bus) = self.state.io.event_bus {
+            crate::pipeline_runner::publish_pipeline_event(
+                &**event_bus,
+                symbol,
+                final_action,
+                total_ms as f64,
+                executed,
+            )
+            .await;
+        }
 
         // ── Send pipeline run event to metrics service (fire-and-forget) ──
         let layers = vec![

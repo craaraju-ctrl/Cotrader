@@ -994,10 +994,29 @@ body, .body-md {
   border-bottom: 1px solid rgba(43, 49, 57, 0.3);
   font-family: var(--font-mono);
   font-size: 11px;
+  transition: background var(--transition-fast);
 }
+
+.order-row:hover { background: var(--surface-elevated); }
 
 .order-row span { flex: 1; text-align: right; }
 .order-row span:first-child { text-align: left; }
+
+.order-header {
+  font-size: 10px !important;
+  font-weight: 700 !important;
+  color: var(--muted) !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.5px !important;
+  border-bottom: 1px solid var(--hairline-dark) !important;
+  padding: 8px var(--space-sm) !important;
+  background: var(--surface-elevated);
+}
+
+.order-header span {
+  color: var(--muted);
+  font-family: var(--font-display);
+}
 
 /* ── Options Page ──────────────────────────────────────────────────────── */
 .options-page {
@@ -1397,11 +1416,15 @@ body, .body-md {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.75);
-  display: flex;
+  display: none;
   align-items: center;
   justify-content: center;
   z-index: var(--z-modal);
   animation: fadeIn var(--transition-normal) ease;
+}
+
+.modal-overlay.active {
+  display: flex;
 }
 
 .modal-content {
@@ -1549,9 +1572,88 @@ body, .body-md {
   border-top-color: var(--primary);
   border-radius: var(--radius-full);
   animation: spin 0.6s linear infinite;
+  margin: 0 auto;
 }
 
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Order Form Validation ─────────────────────────────────────────────── */
+.trade-input-error {
+  border-color: var(--trading-down) !important;
+  box-shadow: 0 0 0 1px rgba(246, 70, 93, 0.3);
+}
+
+.trade-input-error:focus {
+  border-color: var(--trading-down) !important;
+  box-shadow: 0 0 0 2px rgba(246, 70, 93, 0.2);
+}
+
+.trade-field-error {
+  font-size: 11px;
+  color: var(--trading-down);
+  margin-top: 2px;
+  padding-left: 2px;
+  animation: slideUp 0.15s ease;
+}
+
+/* ── Order Confirmation Modal ──────────────────────────────────────────── */
+.confirm-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  background: var(--surface-elevated);
+  border-radius: var(--radius-lg);
+  padding: 2px 0;
+  margin-bottom: var(--space-md);
+}
+
+.confirm-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px var(--space-md);
+  font-size: 13px;
+}
+
+.confirm-row:nth-child(even) {
+  background: rgba(0, 0, 0, 0.15);
+}
+
+.confirm-label {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.confirm-value {
+  font-weight: 600;
+  color: var(--body);
+}
+
+.confirm-divider {
+  height: 1px;
+  background: var(--hairline-dark);
+  margin: 0 var(--space-md);
+}
+
+.confirm-total-row {
+  font-size: 14px;
+}
+
+.confirm-total-row .confirm-label {
+  font-weight: 600;
+  color: var(--body);
+}
+
+.confirm-total-row .confirm-value {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--primary);
+}
+
+.confirm-actions {
+  display: flex;
+  gap: var(--space-sm);
+}
 
 /* ── Footer ────────────────────────────────────────────────────────────── */
 .exchange-footer {

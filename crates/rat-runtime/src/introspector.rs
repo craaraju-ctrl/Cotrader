@@ -112,7 +112,7 @@ impl Introspector {
     }
 
     async fn assess_data_quality(&self) -> DataQuality {
-        let history = self.state.ohlcv_history.read().await;
+        let history = self.state.market_data.ohlcv_history.read().await;
         let mut staleness = Vec::new();
         for (_symbol, bars) in history.iter() {
             if let Some(last) = bars.last() {
@@ -139,7 +139,7 @@ impl Introspector {
 
     async fn identify_uncertainties(&self) -> Vec<Uncertainty> {
         let mut uncertainties = Vec::new();
-        let regime = *self.state.market_regime.read().await;
+        let regime = *self.state.market_data.market_regime.read().await;
         if let Some(r) = regime {
             if matches!(r, MarketRegime::Volatile) {
                 uncertainties.push(Uncertainty {
@@ -185,8 +185,8 @@ impl Introspector {
 
     async fn find_missing_data(&self) -> Vec<String> {
         let mut missing = Vec::new();
-        let history = self.state.ohlcv_history.read().await;
-        let watchlist = self.state.watchlist.read().await;
+        let history = self.state.market_data.ohlcv_history.read().await;
+        let watchlist = self.state.market_data.watchlist.read().await;
         for sym in watchlist.iter() {
             if !history.contains_key(sym) || history.get(sym).map(|b| b.is_empty()).unwrap_or(true)
             {

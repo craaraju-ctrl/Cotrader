@@ -27,7 +27,7 @@ impl Agent for PivotCalculatorAgent {
         input: Option<AgentInput>,
     ) -> Result<AgentOutput, Box<dyn Error + Send + Sync>> {
         if let Some(AgentInput::PivotRequest { high, low, close }) = input {
-            let rules = self.state.rules.read().await;
+            let rules = self.state.rule_engine.rules.read().await;
             let pivots = calculate_pivot_points(high, low, close, rules.pivot_method);
             Ok(AgentOutput::PivotResult(pivots))
         } else {

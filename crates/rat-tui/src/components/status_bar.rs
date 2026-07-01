@@ -18,34 +18,30 @@ impl Component for StatusBarComponent {
             Span::styled(" Services: ", Style::default().fg(THEME.text_dim)),
         ];
 
-        // LLM status
-        let llm_status = app.health.services.get("llm");
-        let llm_icon = match llm_status.map(|s| s.status.as_str()) {
-            Some("healthy") | Some("running") => Span::styled("● LLM ", Style::default().fg(THEME.positive)),
-            Some("error") | Some("down") => Span::styled("● LLM ", Style::default().fg(THEME.negative)),
-            _ => Span::styled("○ LLM ", Style::default().fg(THEME.muted)),
-        };
-        spans.push(llm_icon);
-        spans.push(Span::styled("│ ", Style::default().fg(THEME.border)));
-
-        // Kronos status
-        let kronos_status = app.health.services.get("kronos");
-        let kronos_icon = match kronos_status.map(|s| s.status.as_str()) {
-            Some("healthy") | Some("running") => Span::styled("● Kronos ", Style::default().fg(THEME.positive)),
-            Some("error") | Some("down") => Span::styled("● Kronos ", Style::default().fg(THEME.negative)),
-            _ => Span::styled("○ Kronos ", Style::default().fg(THEME.muted)),
-        };
-        spans.push(kronos_icon);
-        spans.push(Span::styled("│ ", Style::default().fg(THEME.border)));
-
-        // Memory status
-        let mem_status = app.health.services.get("memory");
-        let mem_icon = match mem_status.map(|s| s.status.as_str()) {
-            Some("healthy") | Some("running") => Span::styled("● Memory ", Style::default().fg(THEME.positive)),
-            Some("error") | Some("down") => Span::styled("● Memory ", Style::default().fg(THEME.negative)),
-            _ => Span::styled("○ Memory ", Style::default().fg(THEME.muted)),
-        };
-        spans.push(mem_icon);
+        // Health indicators from live service status (dynamic)
+        let service_keys: Vec<_> = app.health.services.keys().collect();
+        for (i, svc_name) in service_keys.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::styled("│ ", Style::default().fg(THEME.border)));
+            }
+            let status_str = app.health.services.get(*svc_name)
+                .map(|s| s.status.as_str())
+                .unwrap_or("unknown");
+            let color = match status_str {
+                "healthy" | "running" => THEME.positive,
+                "error" | "down" => THEME.negative,
+                _ => THEME.muted,
+            };
+            let icon = if matches!(status_str, "healthy" | "running" | "monitoring" | "connected") {
+                "●"
+            } else {
+                "○"
+            };
+            spans.push(Span::styled(
+                format!("{} {} ", icon, svc_name),
+                Style::default().fg(color),
+            ));
+        }
 
         let footer = Paragraph::new(Line::from(spans))
             .style(Style::default().bg(THEME.surface));

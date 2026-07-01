@@ -50,7 +50,7 @@ impl crate::orchestrator_struct::AutonomousOrchestrator {
     ) -> Result<crate::types::RiskAnalysis, Box<dyn Error + Send + Sync>> {
         println!("\n[PHASE 3] Risk Assessment");
         let equity = {
-            let portfolio = self.state.portfolio.read().await;
+            let portfolio = self.state.portfolio_store.portfolio.read().await;
             portfolio.total_equity
         };
         let analysis = self

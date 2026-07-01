@@ -24,7 +24,7 @@ impl VolatilityCalculator {
     }
 
     pub async fn compute_volatility(&self, symbol: &str, price: f64) -> (f64, bool) {
-        let history = self.state.ohlcv_history.read().await;
+        let history = self.state.market_data.ohlcv_history.read().await;
         if let Some(bars) = history.get(symbol) {
             if bars.len() < 15 {
                 return (0.01, false);
@@ -44,7 +44,7 @@ impl VolatilityCalculator {
 
     /// Check price direction over last 3 bars to determine breakout vs panic
     pub async fn price_direction(&self, symbol: &str) -> f64 {
-        let history = self.state.ohlcv_history.read().await;
+        let history = self.state.market_data.ohlcv_history.read().await;
         if let Some(bars) = history.get(symbol) {
             if bars.len() >= 4 {
                 let n = bars.len();

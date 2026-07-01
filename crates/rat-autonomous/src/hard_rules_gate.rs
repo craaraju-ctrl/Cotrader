@@ -127,7 +127,7 @@ impl HardRulesGate {
         let enabled = if let Some(ref mem) = self.memory {
             mem.check_policy("trading_enabled")
         } else {
-            self.state.portfolio.read().await.trading_enabled
+            self.state.portfolio_store.portfolio.read().await.trading_enabled
         };
         {
             let passed = enabled;
@@ -169,7 +169,7 @@ impl HardRulesGate {
         // 2. Daily drawdown limit (2% hard limit)
         total_checked += 1;
         {
-            let portfolio = self.state.portfolio.read().await;
+            let portfolio = self.state.portfolio_store.portfolio.read().await;
             let dd = portfolio.max_drawdown_today;
             let passed = dd <= 0.02;
             traces.push(RuleTrace {
@@ -210,10 +210,10 @@ impl HardRulesGate {
         // 3. Red folder discipline
         total_checked += 1;
         {
-            let rules = self.state.rules.read().await;
+            let rules = self.state.rule_engine.rules.read().await;
             let discipline_on = rules.red_folder_discipline;
             drop(rules);
-            let calendar = self.state.calendar_events.read().await;
+            let calendar = self.state.market_data.calendar_events.read().await;
             let today_str = Utc::now().format("%Y-%m-%d").to_string();
             let red_folder_count = calendar
                 .iter()
@@ -280,7 +280,7 @@ impl HardRulesGate {
             let is_crypto = rat_core::is_crypto_symbol(symbol);
             let mut in_session = true; // default: pass (crypto bypass)
             if !is_crypto {
-                let rules = self.state.rules.read().await;
+                let rules = self.state.rule_engine.rules.read().await;
                 if rules.respect_session_timing {
                     let now = Utc::now();
                     let indian_open = crate::helpers::get_indian_session_info(now).market_open;
@@ -342,7 +342,7 @@ impl HardRulesGate {
         // 5. Portfolio heat limit (10%)
         total_checked += 1;
         {
-            let portfolio = self.state.portfolio.read().await;
+            let portfolio = self.state.portfolio_store.portfolio.read().await;
             let heat = if portfolio.total_equity > 0.0 {
                 portfolio
                     .open_positions
@@ -400,7 +400,7 @@ impl HardRulesGate {
         // 6. Consecutive loss circuit breaker (4+)
         total_checked += 1;
         {
-            let portfolio = self.state.portfolio.read().await;
+            let portfolio = self.state.portfolio_store.portfolio.read().await;
             let losses = portfolio.consecutive_losses;
             let passed = losses < 4;
             traces.push(RuleTrace {
@@ -443,7 +443,7 @@ impl HardRulesGate {
         // 7. Max daily trades (8 total)
         total_checked += 1;
         {
-            let portfolio = self.state.portfolio.read().await;
+            let portfolio = self.state.portfolio_store.portfolio.read().await;
             let trades = portfolio.total_trades_today;
             let passed = trades < 8;
             traces.push(RuleTrace {
@@ -487,14 +487,14 @@ impl HardRulesGate {
         // Paper mode uses a shorter cooldown for observation/testing.
         total_checked += 1;
         {
-            let rules = self.state.rules.read().await;
+            let rules = self.state.rule_engine.rules.read().await;
             let mut cooldown = rules.cooldown_secs;
-            if self.state.config.paper_mode {
+            if self.state.io.config.paper_mode {
                 cooldown = cooldown.min(60);
             }
             drop(rules);
 
-            let portfolio = self.state.portfolio.read().await;
+            let portfolio = self.state.portfolio_store.portfolio.read().await;
             let last_trade_time =
                 portfolio
                     .last_trade_by_symbol
@@ -567,14 +567,14 @@ impl HardRulesGate {
         // preliminary regime from the OHLCV snapshot so the pipeline can proceed.
         // Uses the same snapshot data as LLM and Kronos — all 3 layers see identical data.
         {
-            let regime = *self.state.market_regime.read().await;
+            let regime = *self.state.market_data.market_regime.read().await;
             if regime.is_none() {
                 if snapshot.len() >= 50 {
                     let prices: Vec<f64> = snapshot.bars().iter().map(|b| b.close).collect();
                     let highs: Vec<f64> = snapshot.bars().iter().map(|b| b.high).collect();
                     let lows: Vec<f64> = snapshot.bars().iter().map(|b| b.low).collect();
                     let inferred = crate::helpers::estimate_market_regime(&prices, &highs, &lows);
-                    *self.state.market_regime.write().await = Some(inferred);
+                    *self.state.market_data.market_regime.write().await = Some(inferred);
                     println!(
                         "[HardRulesGate] 🧭 Auto-inferred regime for {}: {:?} (from {} snapshot bars)",
                         symbol,
@@ -596,10 +596,10 @@ impl HardRulesGate {
         // 9. Regime safety: no BUY in bear regime with low confluence
         total_checked += 1;
         {
-            let regime = *self.state.market_regime.read().await;
+            let regime = *self.state.market_data.market_regime.read().await;
             let is_bear = regime == Some(crate::types::MarketRegime::TrendingBear);
             let base_confluence = {
-                let rules = self.state.rules.read().await;
+                let rules = self.state.rule_engine.rules.read().await;
                 rules.min_confluence_score
             };
             let bear_threshold = base_confluence;
@@ -674,12 +674,12 @@ impl HardRulesGate {
         total_checked += 1;
         {
             let confluence = crate::helpers::resolve_symbol_confluence(&self.state, symbol).await;
-            let agg_is_none = self.state.last_aggregated_signal.read().await.is_none();
-            let regime = *self.state.market_regime.read().await;
+            let agg_is_none = self.state.agent_memory.last_aggregated_signal.read().await.is_none();
+            let regime = *self.state.market_data.market_regime.read().await;
             let bars_count = snapshot.len();
             let is_bootstrapping = bars_count < 100 || agg_is_none;
             let base_confluence = {
-                let rules = self.state.rules.read().await;
+                let rules = self.state.rule_engine.rules.read().await;
                 rules.min_confluence_score
             };
             let mut min_confluence = match &regime {
@@ -782,7 +782,7 @@ impl HardRulesGate {
         // 11. Open position check (max 3 per symbol)
         total_checked += 1;
         {
-            let portfolio = self.state.portfolio.read().await;
+            let portfolio = self.state.portfolio_store.portfolio.read().await;
             let sym_positions = portfolio
                 .open_positions
                 .iter()
@@ -834,7 +834,7 @@ impl HardRulesGate {
         // 12. Max total open positions (10)
         total_checked += 1;
         {
-            let portfolio = self.state.portfolio.read().await;
+            let portfolio = self.state.portfolio_store.portfolio.read().await;
             let total = portfolio.open_positions.len();
             let passed = total < 10;
             traces.push(RuleTrace {
@@ -879,8 +879,8 @@ impl HardRulesGate {
         //     Prevents over-sizing relative to historical edge.
         total_checked += 1;
         {
-            let kelly_stats = self.state.episode_store.kelly_trade_stats(50);
-            let portfolio = self.state.portfolio.read().await;
+            let kelly_stats = self.state.agent_memory.episode_store.kelly_trade_stats(50);
+            let portfolio = self.state.portfolio_store.portfolio.read().await;
             let equity = portfolio.total_equity;
             let has_enough_data = kelly_stats.trade_count >= 10
                 && kelly_stats.avg_win > 0.0
@@ -972,7 +972,7 @@ impl HardRulesGate {
         //     Prevents concentrated exposure to correlated assets.
         total_checked += 1;
         {
-            let portfolio = self.state.portfolio.read().await;
+            let portfolio = self.state.portfolio_store.portfolio.read().await;
             let positions = &portfolio.open_positions;
             let (passed, avg_corr, pos_count) = if positions.len() < 2 {
                 (true, 0.0, positions.len())
@@ -1072,7 +1072,7 @@ impl HardRulesGate {
         //     unrealised loss > 2× its original risk amount (stop should have triggered).
         total_checked += 1;
         {
-            let portfolio = self.state.portfolio.read().await;
+            let portfolio = self.state.portfolio_store.portfolio.read().await;
             let mut worst_mae_ratio = 0.0_f64;
             let mut worst_symbol = String::new();
             for pos in &portfolio.open_positions {
@@ -1221,7 +1221,7 @@ impl HardRulesGate {
         //     Prevents stops that are too tight for current volatility (whipsaw risk).
         total_checked += 1;
         {
-            let portfolio = self.state.portfolio.read().await;
+            let portfolio = self.state.portfolio_store.portfolio.read().await;
             let sym_positions: Vec<_> = portfolio
                 .open_positions
                 .iter()
@@ -1499,7 +1499,7 @@ mod tests {
         let rules = DisciplineRules::default();
         let state = SharedState::new(memory, rules, config, ":memory:").expect("SharedState init");
         // Clear calendar events so red_folder Critical rule doesn't fire in tests
-        *state.calendar_events.write().await = Vec::new();
+        *state.market_data.calendar_events.write().await = Vec::new();
         state
     }
 
@@ -1507,7 +1507,7 @@ mod tests {
     async fn setup_state_trading_disabled() -> SharedState {
         let state = setup_state().await;
         {
-            let mut portfolio = state.portfolio.write().await;
+            let mut portfolio = state.portfolio_store.portfolio.write().await;
             portfolio.trading_enabled = false;
         }
         state
@@ -1517,7 +1517,7 @@ mod tests {
     async fn setup_state_drawdown() -> SharedState {
         let state = setup_state().await;
         {
-            let mut portfolio = state.portfolio.write().await;
+            let mut portfolio = state.portfolio_store.portfolio.write().await;
             portfolio.max_drawdown_today = 0.025; // 2.5% > 2% limit
         }
         state
@@ -1527,7 +1527,7 @@ mod tests {
     async fn setup_state_high_heat() -> SharedState {
         let state = setup_state().await;
         {
-            let mut portfolio = state.portfolio.write().await;
+            let mut portfolio = state.portfolio_store.portfolio.write().await;
             portfolio.total_equity = 100_000.0;
             // Add positions with total risk = 12% of equity
             for i in 0..3 {
@@ -1553,7 +1553,7 @@ mod tests {
     async fn setup_state_consecutive_losses() -> SharedState {
         let state = setup_state().await;
         {
-            let mut portfolio = state.portfolio.write().await;
+            let mut portfolio = state.portfolio_store.portfolio.write().await;
             portfolio.consecutive_losses = 5;
         }
         state
@@ -1563,7 +1563,7 @@ mod tests {
     async fn setup_state_max_trades() -> SharedState {
         let state = setup_state().await;
         {
-            let mut portfolio = state.portfolio.write().await;
+            let mut portfolio = state.portfolio_store.portfolio.write().await;
             portfolio.total_trades_today = 9;
         }
         state
@@ -1574,7 +1574,7 @@ mod tests {
     async fn setup_state_cooldown() -> SharedState {
         let state = setup_state().await;
         {
-            let mut portfolio = state.portfolio.write().await;
+            let mut portfolio = state.portfolio_store.portfolio.write().await;
             let ts = Utc::now() - Duration::seconds(10);
             portfolio.last_trade_time = Some(ts);
             portfolio.last_trade_symbol = Some("BTC".to_string());
@@ -1588,7 +1588,7 @@ mod tests {
     async fn setup_state_bear_regime_low_confluence() -> SharedState {
         let state = setup_state().await;
         {
-            *state.market_regime.write().await = Some(MarketRegime::TrendingBear);
+            *state.market_data.market_regime.write().await = Some(MarketRegime::TrendingBear);
             let agg = rat_core::skill_aggregator::AggregatedSignal {
                 net_signal: -0.3,
                 bullish_strength: 0.2,
@@ -1600,7 +1600,7 @@ mod tests {
                 bearish_count: 2,
                 neutral_count: 0,
             };
-            *state.last_aggregated_signal.write().await = Some(agg);
+            *state.agent_memory.last_aggregated_signal.write().await = Some(agg);
         }
         state
     }
@@ -1609,7 +1609,7 @@ mod tests {
     async fn setup_state_high_confluence() -> SharedState {
         let state = setup_state().await;
         {
-            *state.market_regime.write().await = Some(MarketRegime::TrendingBull);
+            *state.market_data.market_regime.write().await = Some(MarketRegime::TrendingBull);
             // Seed high confluence so Medium rules pass
             let agg = rat_core::skill_aggregator::AggregatedSignal {
                 net_signal: 0.6,
@@ -1622,7 +1622,7 @@ mod tests {
                 bearish_count: 1,
                 neutral_count: 0,
             };
-            *state.last_aggregated_signal.write().await = Some(agg);
+            *state.agent_memory.last_aggregated_signal.write().await = Some(agg);
         }
         state
     }
@@ -1631,7 +1631,7 @@ mod tests {
     async fn setup_state_max_positions_per_symbol() -> SharedState {
         let state = setup_state().await;
         {
-            let mut portfolio = state.portfolio.write().await;
+            let mut portfolio = state.portfolio_store.portfolio.write().await;
             for i in 0..3 {
                 portfolio.open_positions.push(OpenPosition {
                     symbol: "BTC".to_string(),
@@ -1788,7 +1788,7 @@ mod tests {
         // Seed low conviction so bear regime safety rule triggers
         let state = setup_state_drawdown().await;
         {
-            *state.market_regime.write().await = Some(MarketRegime::TrendingBear);
+            *state.market_data.market_regime.write().await = Some(MarketRegime::TrendingBear);
             let agg = rat_core::skill_aggregator::AggregatedSignal {
                 net_signal: -0.3,
                 bullish_strength: 0.2,
@@ -1800,7 +1800,7 @@ mod tests {
                 bearish_count: 2,
                 neutral_count: 0,
             };
-            *state.last_aggregated_signal.write().await = Some(agg);
+            *state.agent_memory.last_aggregated_signal.write().await = Some(agg);
         }
         let gate = HardRulesGate::new(state);
         let result = gate.evaluate("BTC").await;
@@ -1828,7 +1828,7 @@ mod tests {
         // Set regime to TrendingBear for high threshold, and seed low conviction
         let state = setup_state_high_heat().await;
         {
-            *state.market_regime.write().await = Some(MarketRegime::TrendingBear);
+            *state.market_data.market_regime.write().await = Some(MarketRegime::TrendingBear);
             let agg = rat_core::skill_aggregator::AggregatedSignal {
                 net_signal: 0.1,
                 bullish_strength: 0.2,
@@ -1840,7 +1840,7 @@ mod tests {
                 bearish_count: 2,
                 neutral_count: 0,
             };
-            *state.last_aggregated_signal.write().await = Some(agg);
+            *state.agent_memory.last_aggregated_signal.write().await = Some(agg);
         }
         let gate = HardRulesGate::new(state);
         let result = gate.evaluate("BTC").await;
@@ -1873,8 +1873,8 @@ mod tests {
                 bearish_count: 1,
                 neutral_count: 0,
             };
-            *state.last_aggregated_signal.write().await = Some(agg);
-            *state.market_regime.write().await = Some(MarketRegime::TrendingBull);
+            *state.agent_memory.last_aggregated_signal.write().await = Some(agg);
+            *state.market_data.market_regime.write().await = Some(MarketRegime::TrendingBull);
         }
         let gate = HardRulesGate::new(state);
         let result = gate.evaluate("BTC").await;
@@ -1905,7 +1905,7 @@ mod tests {
     async fn test_critical_overrides_low() {
         let state = setup_state_drawdown().await;
         {
-            let mut portfolio = state.portfolio.write().await;
+            let mut portfolio = state.portfolio_store.portfolio.write().await;
             // Also add 3 positions on BTC (Low rule)
             for i in 0..3 {
                 portfolio.open_positions.push(OpenPosition {
@@ -1953,7 +1953,7 @@ mod tests {
     async fn test_multiple_high_rules() {
         let state = setup_state().await;
         {
-            let mut portfolio = state.portfolio.write().await;
+            let mut portfolio = state.portfolio_store.portfolio.write().await;
             portfolio.consecutive_losses = 5; // High
             portfolio.total_trades_today = 10; // High
         }
@@ -1982,7 +1982,7 @@ mod tests {
         // Must seed 101+ bars to bypass the bootstrap override (<100 bars skips failure)
         let state = setup_state().await;
         {
-            *state.market_regime.write().await = Some(MarketRegime::Ranging);
+            *state.market_data.market_regime.write().await = Some(MarketRegime::Ranging);
             let agg = rat_core::skill_aggregator::AggregatedSignal {
                 net_signal: 0.1,
                 bullish_strength: 0.2,
@@ -1994,7 +1994,7 @@ mod tests {
                 bearish_count: 2,
                 neutral_count: 0,
             };
-            *state.last_aggregated_signal.write().await = Some(agg);
+            *state.agent_memory.last_aggregated_signal.write().await = Some(agg);
             // Seed 101 bars so is_bootstrapping = false and actual threshold applies
             let bar = rat_core::OhlcvBar {
                 timestamp: "2026-01-01T00:00:00+00:00".to_string(),
@@ -2005,6 +2005,7 @@ mod tests {
                 volume: 1000.0,
             };
             state
+                .market_data
                 .ohlcv_history
                 .write()
                 .await
@@ -2164,8 +2165,8 @@ mod tests {
                 bearish_count: 1,
                 neutral_count: 0,
             };
-            *state.last_aggregated_signal.write().await = Some(agg);
-            *state.market_regime.write().await = Some(MarketRegime::TrendingBull);
+            *state.agent_memory.last_aggregated_signal.write().await = Some(agg);
+            *state.market_data.market_regime.write().await = Some(MarketRegime::TrendingBull);
         }
         let gate = HardRulesGate::new(state);
         let result = gate.evaluate("BTC").await;

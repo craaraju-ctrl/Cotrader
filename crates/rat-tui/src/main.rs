@@ -18,6 +18,7 @@
 mod app;
 mod theme;
 mod components;
+mod api_client;
 
 use std::io::{self, IsTerminal};
 use std::time::{Duration, Instant};
@@ -43,9 +44,12 @@ use components::settings::SettingsComponent;
 use components::help::HelpComponent;
 use components::footer::FooterComponent;
 use components::status_bar::StatusBarComponent;
+use api_client::{ApiMessage, StatusMsg, start_api_client};
 
 struct AppController {
     app: App,
+    rx: std::sync::mpsc::Receiver<ApiMessage>,
+    cmd_tx: std::sync::mpsc::Sender<StatusMsg>,
     header: Header,
     tabs: TabsComponent,
     dashboard: DashboardComponent,
@@ -62,8 +66,14 @@ struct AppController {
 
 impl AppController {
     fn new() -> Self {
+        // Determine orchestrator API base URL from env or default
+        let api_base = std::env::var("RAT_API_URL")
+            .unwrap_or_else(|_| "http://localhost:8080/api".to_string());
+        let (rx, cmd_tx) = start_api_client(&api_base);
         Self {
             app: App::new(),
+            rx,
+            cmd_tx,
             header: Header,
             tabs: TabsComponent,
             dashboard: DashboardComponent,
@@ -128,6 +138,9 @@ impl AppController {
                     Tab::PolicyCache => {}
                     Tab::Health => {}
                     Tab::Settings => {
+                        if key.code == KeyCode::Enter {
+                            let _ = self.cmd_tx.send(StatusMsg::ToggleMode);
+                        }
                         self.settings.handle_key(key, &mut self.app);
                     }
                     Tab::Help => {}
@@ -211,6 +224,11 @@ impl AppController {
     }
 
     fn update(&mut self) {
+        // Drain all pending API messages and update app state
+        while let Ok(msg) = self.rx.try_recv() {
+            api_client::process_message(msg, &mut self.app);
+        }
+
         // Update ticker animation
         self.app.ticker_offset = self.app.ticker_offset.wrapping_add(1);
 

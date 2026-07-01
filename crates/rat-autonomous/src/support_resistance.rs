@@ -23,7 +23,7 @@ impl SupportResistanceSkill {
     }
 
     pub async fn analyze(&self, symbol: &str) -> (Vec<f64>, Vec<f64>, f64, f64) {
-        let history = self.state.ohlcv_history.read().await;
+        let history = self.state.market_data.ohlcv_history.read().await;
         if let Some(bars) = history.get(symbol) {
             if bars.len() >= 30 {
                 let (supports, resistances) = compute_support_resistance(bars, 30);

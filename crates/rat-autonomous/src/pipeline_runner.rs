@@ -10,11 +10,37 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
+use rat_eventbus::EventBus;
 use rat_core::{OhlcvBar, TradeDirection};
 
 /// Global pipeline lock — allow up to 3 concurrent pipeline runs (was 1, caused 26-minute backlog).
 /// Each symbol runs independently; the semaphore prevents LLM/provider overload.
 static PIPELINE_SEM: Lazy<Arc<Semaphore>> = Lazy::new(|| Arc::new(Semaphore::new(3)));
+
+/// Publish a pipeline lifecycle event to the EventBus.
+/// Called from `orchestrator_pipeline.rs` when the pipeline completes for a symbol.
+pub async fn publish_pipeline_event(
+    event_bus: &dyn EventBus,
+    symbol: &str,
+    action: &str,
+    duration_ms: f64,
+    executed: bool,
+) {
+    let event = rat_eventbus::RatEvent::Signal(rat_eventbus::SignalEvent {
+        symbol: symbol.to_string(),
+        action: action.to_string(),
+        entry_price: 0.0,
+        stop_loss: 0.0,
+        take_profit: 0.0,
+        confidence: if executed { 0.8 } else { 0.0 },
+        reasoning: format!("Pipeline completed: {} ({}ms)", action, duration_ms as u64),
+        source: "pipeline".to_string(),
+        timestamp_micros: chrono::Utc::now().timestamp_micros(),
+    });
+    let _ = event_bus
+        .publish(&rat_eventbus::subjects::signal(symbol), &event)
+        .await;
+}
 
 /// Per-symbol cycle dedup: tracks which symbols have an in-flight pipeline run.
 /// If a symbol is already running, skip it instead of queuing (prevents backlog growth).
@@ -153,7 +179,7 @@ pub async fn ensure_market_data(
     let is_crypto = rat_core::is_crypto_symbol(&sym);
 
     let bar_count = {
-        let history = state.ohlcv_history.read().await;
+        let history = state.market_data.ohlcv_history.read().await;
         history.get(&sym).map(|b| b.len()).unwrap_or(0)
     };
 
@@ -171,7 +197,7 @@ pub async fn ensure_market_data(
             return Err(format!("No OHLCV bars returned for {sym}"));
         }
         let n = bars.len();
-        state.ohlcv_history.write().await.insert(sym.clone(), bars);
+        state.market_data.ohlcv_history.write().await.insert(sym.clone(), bars);
         println!("[PipelineRunner] Loaded {n} OHLCV bars for {sym}");
     }
 
@@ -205,7 +231,7 @@ pub async fn ensure_market_data(
     };
 
     {
-        let mut history = state.ohlcv_history.write().await;
+        let mut history = state.market_data.ohlcv_history.write().await;
         let hist = history.entry(sym.clone()).or_default();
         let now = Utc::now();
         if hist.is_empty() {
@@ -513,5 +539,215 @@ pub async fn run_whitelist_loop(
         trades_executed,
         total_duration_ms: started.elapsed().as_millis() as u64,
         results,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Tests
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── EventBus: publish_pipeline_event ───────────────────────────────────
+
+    #[tokio::test]
+    async fn test_publish_pipeline_event_sends_signal_event() {
+        let bus = rat_eventbus::InMemoryEventBus::new();
+        let mut sub = bus.subscribe("rat.signal.*").await.unwrap();
+
+        publish_pipeline_event(&bus, "BTC", "BUY", 150.0, true).await;
+
+        let (subject, event) = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            sub.recv(),
+        )
+        .await
+        .expect("Should receive event within timeout")
+        .expect("Should receive Some event");
+
+        assert_eq!(subject, "rat.signal.btc");
+        match event {
+            rat_eventbus::RatEvent::Signal(sig) => {
+                assert_eq!(sig.symbol, "BTC");
+                assert_eq!(sig.action, "BUY");
+                assert_eq!(sig.source, "pipeline");
+                assert!((sig.confidence - 0.8).abs() < 0.01, "executed=true → confidence=0.8");
+                assert!(sig.reasoning.contains("BUY"), "reasoning contains action");
+                assert!(sig.reasoning.contains("150"), "reasoning contains duration");
+            }
+            _ => panic!("Expected SignalEvent"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_publish_pipeline_event_subject_per_symbol() {
+        let bus = rat_eventbus::InMemoryEventBus::new();
+        let mut sub_btc = bus.subscribe("rat.signal.btc").await.unwrap();
+        let mut sub_eth = bus.subscribe("rat.signal.eth").await.unwrap();
+
+        publish_pipeline_event(&bus, "BTC", "HOLD", 80.0, false).await;
+        publish_pipeline_event(&bus, "ETH", "SELL", 200.0, true).await;
+
+        // BTC event goes to rat.signal.btc
+        let (btc_subj, btc_ev) = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            sub_btc.recv(),
+        )
+        .await
+        .expect("BTC event should arrive")
+        .expect("BTC event should be Some");
+        assert_eq!(btc_subj, "rat.signal.btc");
+        match btc_ev {
+            rat_eventbus::RatEvent::Signal(s) => {
+                assert_eq!(s.symbol, "BTC");
+                assert_eq!(s.action, "HOLD");
+            }
+            _ => panic!("Expected SignalEvent"),
+        }
+
+        // ETH event goes to rat.signal.eth
+        let (eth_subj, eth_ev) = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            sub_eth.recv(),
+        )
+        .await
+        .expect("ETH event should arrive")
+        .expect("ETH event should be Some");
+        assert_eq!(eth_subj, "rat.signal.eth");
+        match eth_ev {
+            rat_eventbus::RatEvent::Signal(s) => {
+                assert_eq!(s.symbol, "ETH");
+                assert_eq!(s.action, "SELL");
+            }
+            _ => panic!("Expected SignalEvent"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_publish_pipeline_event_confidence_reflects_execution() {
+        let bus = rat_eventbus::InMemoryEventBus::new();
+        let mut sub = bus.subscribe("rat.signal.*").await.unwrap();
+
+        // Not executed → confidence 0.0
+        publish_pipeline_event(&bus, "BTC", "HOLD", 100.0, false).await;
+        let (_, ev1) = sub.recv().await.expect("Should receive event");
+        match ev1 {
+            rat_eventbus::RatEvent::Signal(s) => {
+                assert!(
+                    (s.confidence - 0.0).abs() < 0.01,
+                    "Not executed should have 0.0 confidence"
+                );
+            }
+            _ => panic!("Expected SignalEvent"),
+        }
+
+        // Executed → confidence 0.8
+        publish_pipeline_event(&bus, "BTC", "BUY", 100.0, true).await;
+        let (_, ev2) = sub.recv().await.expect("Should receive event");
+        match ev2 {
+            rat_eventbus::RatEvent::Signal(s) => {
+                assert!(
+                    (s.confidence - 0.8).abs() < 0.01,
+                    "Executed should have 0.8 confidence"
+                );
+            }
+            _ => panic!("Expected SignalEvent"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_publish_pipeline_event_reasoning_includes_action_and_duration() {
+        let bus = rat_eventbus::InMemoryEventBus::new();
+        let mut sub = bus.subscribe("rat.signal.*").await.unwrap();
+
+        publish_pipeline_event(&bus, "ETH", "SELL", 512.0, true).await;
+
+        let (_, event) = sub
+            .recv()
+            .await
+            .expect("Should receive event");
+        match event {
+            rat_eventbus::RatEvent::Signal(s) => {
+                assert!(
+                    s.reasoning.contains("SELL"),
+                    "Reasoning should mention action: '{}'",
+                    s.reasoning
+                );
+                assert!(
+                    s.reasoning.contains("512ms"),
+                    "Reasoning should mention duration: '{}'",
+                    s.reasoning
+                );
+            }
+            _ => panic!("Expected SignalEvent"),
+        }
+    }
+
+    // ── SymbolCooldownTracker ──────────────────────────────────────────────
+
+    #[test]
+    fn test_cooldown_allowed_when_never_run() {
+        let tracker = SymbolCooldownTracker::new(300);
+        assert!(tracker.is_allowed("BTC"));
+        assert!(tracker.is_allowed("ETH"));
+    }
+
+    #[test]
+    fn test_cooldown_blocks_immediate_rerun() {
+        let mut tracker = SymbolCooldownTracker::new(300);
+        tracker.record_run("BTC");
+        assert!(!tracker.is_allowed("BTC"), "Should not be allowed immediately after run");
+    }
+
+    #[test]
+    fn test_cooldown_allows_different_symbols() {
+        let mut tracker = SymbolCooldownTracker::new(300);
+        tracker.record_run("BTC");
+        // ETH should still be allowed
+        assert!(tracker.is_allowed("ETH"));
+        // BTC should be blocked
+        assert!(!tracker.is_allowed("BTC"));
+    }
+
+    #[test]
+    fn test_cooldown_remaining_secs() {
+        // Use a large cooldown (3600s) so timing is robust even under load.
+        let mut tracker = SymbolCooldownTracker::new(3600);
+        // Never run → remaining = 0
+        assert_eq!(tracker.remaining_secs("BTC"), 0);
+
+        tracker.record_run("BTC");
+        // Just ran → remaining ≈ cooldown (close to 3600)
+        let rem = tracker.remaining_secs("BTC");
+        assert!(
+            rem > 3590,
+            "Should have nearly full cooldown remaining, got {}",
+            rem
+        );
+        assert!(
+            rem <= 3600,
+            "Should not exceed cooldown, got {}",
+            rem
+        );
+    }
+
+    #[test]
+    fn test_cooldown_resets_after_zero_second_cooldown() {
+        let mut tracker = SymbolCooldownTracker::new(0);
+        // Zero cooldown → always allowed
+        assert!(tracker.is_allowed("BTC"));
+        tracker.record_run("BTC");
+        // Zero cooldown → still allowed
+        assert!(tracker.is_allowed("BTC"));
+    }
+
+    #[test]
+    fn test_empty_cooldown_tracker_returns_zero_remaining() {
+        let tracker = SymbolCooldownTracker::new(300);
+        // No symbols recorded at all
+        assert_eq!(tracker.remaining_secs("NONEXISTENT"), 0);
+        assert!(tracker.is_allowed("NONEXISTENT"));
     }
 }
