@@ -322,6 +322,7 @@ async fn handle_start_all(
                 .args(["run", "--release", "-p", "rat-orchestrator"])
                 .current_dir(&root)
                 .env("MEMORY_API_URL", "http://localhost:3111")
+                .env("WEB_API_ADDR", "0.0.0.0:8082")
                 .env("RUST_LOG", "info")
                 .stdout(std::fs::File::create(&log_file).unwrap())
                 .stderr(std::fs::File::create(logs.join("orchestrator.err")).unwrap())
@@ -330,7 +331,7 @@ async fn handle_start_all(
                 .context("Failed to spawn rat-orchestrator")?;
             write_pid(&orchestrator_pid, child.id().unwrap_or(0));
             children.push(("orchestrator".into(), child));
-            wait_for_port(8082, "Orchestrator", 30).await;
+            wait_for_port(8081, "Orchestrator", 120).await;
         }
     }
 
