@@ -33,6 +33,14 @@ members = [
     "crates/rat-reasoning",
     "crates/rat-strategies",
     "crates/rat-risk",
+    "crates/rat-patterns",
+    "crates/rat-feeds",
+    "crates/rat-rules",
+    "crates/rat-skills",
+    "crates/rat-regime",
+    "crates/rat-sentiment",
+    "crates/rat-memory",
+    "crates/rat-indicators",
 ]
 
 [workspace.package]

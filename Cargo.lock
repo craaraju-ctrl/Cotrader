@@ -3971,6 +3971,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rat-feeds"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "rat-indicators"
 version = "0.1.0"
 dependencies = [
@@ -3995,6 +4006,17 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "rat-memory"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -4053,6 +4075,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rat-patterns"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "rat-pipeline"
 version = "0.1.0"
 dependencies = [
@@ -4081,6 +4114,17 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tracing",
+]
+
+[[package]]
+name = "rat-regime"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -4136,6 +4180,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rat-sentiment"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "rat-server"
 version = "0.1.0"
 dependencies = [
@@ -4151,6 +4206,19 @@ dependencies = [
  "tokio",
  "tower 0.4.13",
  "tower-http 0.5.2",
+]
+
+[[package]]
+name = "rat-skills"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "rat-autonomous",
+ "rat-core",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
