@@ -68,7 +68,7 @@ impl AppController {
     fn new() -> Self {
         // Determine orchestrator API base URL from env or default
         let api_base = std::env::var("RAT_API_URL")
-            .unwrap_or_else(|_| "http://localhost:8080/api".to_string());
+            .unwrap_or_else(|_| "http://localhost:8082/api".to_string());
         let (rx, cmd_tx) = start_api_client(&api_base);
         Self {
             app: App::new(),
@@ -125,8 +125,29 @@ impl AppController {
 
                 // Let active tab component handle
                 match self.app.selected_tab {
-                    Tab::Dashboard => {}
-                    Tab::Trading => {}
+                    Tab::Dashboard => {
+                        match key.code {
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                if self.app.selected_symbol_idx > 0 {
+                                    self.app.selected_symbol_idx -= 1;
+                                }
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                if self.app.selected_symbol_idx + 1 < self.app.watchlist.len() {
+                                    self.app.selected_symbol_idx += 1;
+                                }
+                            }
+                            KeyCode::Enter => {
+                                if let Some(sym) = self.app.watchlist.get(self.app.selected_symbol_idx) {
+                                    self.app.selected_symbol = sym.clone();
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    Tab::Trading => {
+                        self.positions.handle_key(key, &mut self.app);
+                    }
                     Tab::Orderbook => {}
                     Tab::Positions => {
                         self.positions.handle_key(key, &mut self.app);
@@ -134,9 +155,34 @@ impl AppController {
                     Tab::Agents => {
                         self.agents.handle_key(key, &mut self.app);
                     }
-                    Tab::Performance => {}
-                    Tab::PolicyCache => {}
-                    Tab::Health => {}
+                    Tab::Performance => {
+                        match key.code {
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                if self.app.scroll_offset > 0 { self.app.scroll_offset -= 1; }
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                self.app.scroll_offset += 1;
+                            }
+                            KeyCode::Home => { self.app.scroll_offset = 0; }
+                            _ => {}
+                        }
+                    }
+                    Tab::PolicyCache => {
+                        match key.code {
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                if self.app.scroll_offset > 0 { self.app.scroll_offset -= 1; }
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                self.app.scroll_offset += 1;
+                            }
+                            _ => {}
+                        }
+                    }
+                    Tab::Health => {
+                        if key.code == KeyCode::Char('r') {
+                            let _ = self.cmd_tx.send(StatusMsg::RefreshHealth);
+                        }
+                    }
                     Tab::Settings => {
                         if key.code == KeyCode::Enter {
                             let _ = self.cmd_tx.send(StatusMsg::ToggleMode);
@@ -194,12 +240,12 @@ impl AppController {
         // Render active tab content
         match self.app.selected_tab {
             Tab::Dashboard => self.dashboard.render(frame, chunks[2], &self.app),
-            Tab::Trading => self.orderbook.render(frame, chunks[2], &self.app),
+            Tab::Trading => self.positions.render(frame, chunks[2], &self.app),
             Tab::Orderbook => self.orderbook.render(frame, chunks[2], &self.app),
             Tab::Positions => self.positions.render(frame, chunks[2], &self.app),
             Tab::Agents => self.agents.render(frame, chunks[2], &self.app),
             Tab::Performance => self.performance.render(frame, chunks[2], &self.app),
-            Tab::PolicyCache => self.dashboard.render(frame, chunks[2], &self.app),
+            Tab::PolicyCache => self.performance.render(frame, chunks[2], &self.app),
             Tab::Health => self.health.render(frame, chunks[2], &self.app),
             Tab::Settings => self.settings.render(frame, chunks[2], &self.app),
             Tab::Help => self.help.render(frame, chunks[2], &self.app),

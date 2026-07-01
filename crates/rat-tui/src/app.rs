@@ -210,6 +210,7 @@ pub struct App {
     pub error: Option<String>,
 
     // Market data
+    pub selected_symbol_idx: usize,
     pub watchlist: Vec<String>,
     pub market_data: HashMap<String, MarketData>,
     pub selected_symbol: String,

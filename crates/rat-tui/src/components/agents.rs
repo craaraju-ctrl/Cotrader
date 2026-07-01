@@ -40,7 +40,7 @@ impl AgentsComponent {
                 _ => Span::styled("○ ", Style::default().fg(THEME.text_dim)),
             };
 
-            let prefix = if i == 0 { "├─ " } else if i == app.agents.len() - 1 { "└─ " } else { "├─ " };
+            let prefix = if app.agents.len() == 1 { "└─ " } else if i == 0 { "├─ " } else if i == app.agents.len() - 1 { "└─ " } else { "├─ " };
 
             let line = Line::from(vec![
                 Span::styled(prefix, Style::default().fg(THEME.border)),

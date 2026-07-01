@@ -139,7 +139,7 @@ impl CotLogComponent {
             }
 
             if !reason.is_empty() {
-                let display_reason = if reason.len() > 80 { &reason[..80] } else { reason };
+                let display_reason = if reason.len() > 80 { reason.chars().take(80).collect::<String>() } else { reason.to_string() };
                 spans.push(Span::styled(
                     display_reason.to_string(),
                     Style::default().fg(THEME.text_dim),
@@ -147,7 +147,7 @@ impl CotLogComponent {
             }
 
             if !timestamp.is_empty() {
-                let ts = if timestamp.len() > 19 { &timestamp[..19] } else { timestamp };
+                let ts = if timestamp.len() > 19 { timestamp.chars().take(19).collect::<String>() } else { timestamp.to_string() };
                 spans.push(Span::styled(
                     format!(" {}", ts),
                     Style::default().fg(THEME.muted),

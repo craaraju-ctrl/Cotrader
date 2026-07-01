@@ -38,6 +38,8 @@ const MAX_HISTORY_LEN: usize = 200;
 pub enum StatusMsg {
     /// Toggle between paper and live trading mode.
     ToggleMode,
+    /// Force-refresh health data.
+    RefreshHealth,
 }
 
 /// Messages sent from background threads to the main TUI loop.
@@ -537,6 +539,15 @@ fn command_listener(base_url: String, tx: mpsc::Sender<ApiMessage>, cmd_rx: mpsc
                             error: Some(format!("Toggle failed: {}", e)),
                             ..Default::default()
                         }));
+                    }
+                }
+            }
+            Ok(StatusMsg::RefreshHealth) => {
+                let health_url = format!("{}/health", base_url);
+                if let Ok(resp) = client.get(&health_url).send() {
+                    if let Ok(json) = resp.json::<Value>() {
+                        let health = parse_health(&json);
+                        let _ = tx.send(ApiMessage::Health(health));
                     }
                 }
             }

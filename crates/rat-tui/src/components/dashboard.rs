@@ -53,7 +53,7 @@ impl DashboardComponent {
         let equity_gauge = Gauge::default()
             .block(equity_block)
             .gauge_style(Style::default().fg(THEME.positive).bg(THEME.surface))
-            .ratio(equity_pct as f64 / 100.0)
+            .ratio((equity_pct as f64 / 100.0).clamp(0.0, 1.0))
             .label(Span::styled(
                 format!("{}% liquid", equity_pct),
                 Style::default().fg(THEME.text),
@@ -97,7 +97,7 @@ impl DashboardComponent {
         let wr_gauge = Gauge::default()
             .block(wr_block)
             .gauge_style(Style::default().fg(THEME.accent).bg(THEME.surface))
-            .ratio(win_rate / 100.0)
+            .ratio((win_rate / 100.0).clamp(0.0, 1.0))
             .label(Span::styled(
                 format!("{:.1}%", win_rate),
                 Style::default().fg(THEME.text),
