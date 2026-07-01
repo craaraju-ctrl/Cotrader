@@ -241,6 +241,7 @@ pub async fn medium_loop(
     _assets: Vec<String>,
     mut shutdown_rx: watch::Receiver<bool>,
     bus: Arc<dyn EventBus>,
+    max_concurrency: usize,
 ) {
     info!("MediumLoop started (30s cadence — accelerated for observation)");
 
@@ -358,7 +359,7 @@ pub async fn medium_loop(
         // pipeline_runner.rs prevent overload and re-entry. Each symbol runs
         // independently; the semaphore prevents LLM/provider overload.
         // Staggered start spreads the initial burst across ~1s.
-        let pipeline_limiter = Arc::new(Semaphore::new(3));
+        let pipeline_limiter = Arc::new(Semaphore::new(max_concurrency));
         let mut pipeline_handles = Vec::with_capacity(assets.len());
         for (i, symbol) in assets.iter().enumerate() {
             let sym = symbol.clone();

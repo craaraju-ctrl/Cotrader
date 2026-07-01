@@ -15,6 +15,40 @@ fn report_metrics_error_once() -> bool {
     !METRICS_HEALTHY.swap(true, Ordering::Relaxed)
 }
 
+/// Probe the metrics endpoint. If it responds, reset the healthy flag so
+/// subsequent errors are reported again (one-time re-notification).
+async fn check_metrics_health(endpoint: &str) {
+    let url = format!("{}/health", endpoint.trim_end_matches('/'));
+    match reqwest::Client::new()
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(3))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            let was_silenced = METRICS_HEALTHY.swap(false, Ordering::Relaxed);
+            if was_silenced {
+                eprintln!("[Metrics] Health check OK on {} — re-enabling error reporting", url);
+            }
+        }
+        _ => {} // still down, keep flag as-is
+    }
+}
+
+/// Run periodic metrics health checks in the background (every 60s).
+pub fn start_metrics_health_check_loop() {
+    let endpoint = std::env::var("METRICS_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:9730".to_string());
+    tokio::spawn(async move {
+        // Initial delay: let the system settle before first probe
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        loop {
+            check_metrics_health(&endpoint).await;
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        }
+    });
+}
+
 /// Send a pipeline run event to the rat-metrics service.
 /// Non-blocking: sends via HTTP POST in a background tokio task.
 /// Failures are logged but do not affect pipeline execution.

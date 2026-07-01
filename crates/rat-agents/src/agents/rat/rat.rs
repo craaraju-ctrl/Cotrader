@@ -1,31 +1,46 @@
-//! RAT — Chief Investment Officer (CIO)
-//!
-//! Top-level decision maker. Sets strategy, allocates capital across desks,
-//! approves large positions, and ensures the firm stays within risk limits.
-
 pub struct Rat;
 
 impl Rat {
     pub fn name() -> &'static str { "Rat" }
-    pub fn role() -> &'static str { "Chief Investment Officer" }
+    pub fn role() -> &'static str { "CIO — Chief Investment Officer" }
 
-    /// Set overall market view and strategy direction.
     pub fn set_market_view(&self, macro_context: &str) -> String {
-        todo!("Analyze macro environment, set directional bias, allocate capital across desks")
+        let bias = if macro_context.contains("bull") || macro_context.contains("growth") {
+            "RISK-ON — favor equities, crypto, high yield"
+        } else if macro_context.contains("bear") || macro_context.contains("recession") {
+            "RISK-OFF — favor bonds, gold, defensive sectors"
+        } else {
+            "NEUTRAL — balanced allocation, reduced position sizes"
+        };
+        format!("Market view: {} | Context: {}", bias, macro_context)
     }
 
-    /// Approve or reject a proposed trade based on firm-wide constraints.
     pub fn approve_trade(&self, proposal: &str, risk_budget: f64) -> String {
-        todo!("Evaluate if trade fits within firm mandate, risk budget, and current exposure")
+        if risk_budget < 0.01 {
+            "REJECTED — risk budget exhausted for the day".to_string()
+        } else if proposal.contains("leveraged") && risk_budget < 0.05 {
+            "REJECTED — leveraged trade requires >5% risk budget remaining".to_string()
+        } else {
+            format!("APPROVED — Trade: {} | Risk budget remaining: {:.1}%", proposal, risk_budget * 100.0)
+        }
     }
 
-    /// Allocate capital across trading desks based on performance.
     pub fn allocate_capital(&self, desk_performance: &[(String, f64)]) -> String {
-        todo!("Shift capital toward best-performing desks, reduce losing ones")
+        let total: f64 = desk_performance.iter().map(|(_, p)| p.max(0.01)).sum();
+        let allocations: Vec<String> = desk_performance.iter().map(|(name, perf)| {
+            let weight = (perf.max(0.01) / total * 100.0).min(50.0);
+            format!("  {}: {:.1}%", name, weight)
+        }).collect();
+        format!("Capital allocation (performance-weighted):\n{}", allocations.join("\n"))
     }
 
-    /// Override any decision if firm-level rules are violated.
     pub fn veto_check(&self, decision: &str) -> String {
-        todo!("Check against firm mandate, regulatory limits, and maximum drawdown")
+        if decision.contains("all-in") || decision.contains("100%") {
+            "VETOED — No single position can exceed 20% of portfolio".to_string()
+        } else if decision.contains("unhedged") && decision.contains("options") {
+            "VETOED — Options positions must have defined risk (no naked positions)".to_string()
+        } else {
+            format!("APPROVED — Decision: {}", decision)
+        }
     }
 }

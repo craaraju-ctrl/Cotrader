@@ -29,6 +29,10 @@ members = [
     "crates/rat-market-data",
     "crates/rat-metrics",
     "crates/rat-watchdog",
+    "crates/rat-ecosystem",
+    "crates/rat-reasoning",
+    "crates/rat-strategies",
+    "crates/rat-risk",
 ]
 
 [workspace.package]

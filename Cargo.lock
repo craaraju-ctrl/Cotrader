@@ -3926,6 +3926,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rat-ecosystem"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "rat-eventbus"
 version = "0.1.0"
 dependencies = [
@@ -4061,6 +4073,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "rat-reasoning"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
+name = "rat-risk"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "rat-rules"
 version = "0.1.0"
 dependencies = [
@@ -4117,6 +4151,17 @@ dependencies = [
  "tokio",
  "tower 0.4.13",
  "tower-http 0.5.2",
+]
+
+[[package]]
+name = "rat-strategies"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

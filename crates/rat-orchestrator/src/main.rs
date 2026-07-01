@@ -29,6 +29,7 @@ struct LoopManager {
     client: reqwest::Client,
     assets: Vec<String>,
     bus: Arc<dyn EventBus>,
+    max_concurrency: usize,
     shutdown_tx: Option<watch::Sender<bool>>,
     handles: Vec<tokio::task::JoinHandle<()>>,
 }
@@ -39,12 +40,14 @@ impl LoopManager {
         client: reqwest::Client,
         assets: Vec<String>,
         bus: Arc<dyn EventBus>,
+        max_concurrency: usize,
     ) -> Self {
         Self {
             orchestrator,
             client,
             assets,
             bus,
+            max_concurrency,
             shutdown_tx: None,
             handles: Vec::new(),
         }
@@ -69,6 +72,7 @@ impl LoopManager {
         let assets_medium = self.assets.clone();
         let rx_medium = rx.clone();
         let bus_medium = self.bus.clone();
+        let max_conc = self.max_concurrency;
 
         let orch_slow = self.orchestrator.clone();
         let state_slow = self.orchestrator.state.clone();
@@ -86,6 +90,7 @@ impl LoopManager {
                 assets_medium,
                 rx_medium,
                 bus_medium,
+                max_conc,
             )
             .await;
         });
@@ -2020,6 +2025,11 @@ async fn main() {
     // Spawn background tasks that send system health and trade events to
     // the rat-metrics service (runs on port 9730 by default).
     // If the metrics service is not running, events are silently dropped.
+
+    // Periodic health check that resets METRICS_HEALTHY when the service
+    // comes back online, so error reporting re-activates.
+    rat_autonomous::orchestrator_pipeline::start_metrics_health_check_loop();
+
     {
         let metrics_url =
             std::env::var("METRICS_URL").unwrap_or_else(|_| "http://127.0.0.1:9730".to_string());
@@ -2378,12 +2388,28 @@ async fn main() {
         info!("Published START system control event");
     }
 
+    // ── Parse CLI args ─────────────────────────────────────────────────
+    let max_concurrency = std::env::args()
+        .skip(1)
+        .collect::<Vec<_>>()
+        .windows(2)
+        .find(|w| w[0] == "--max-concurrency")
+        .and_then(|w| w[1].parse::<usize>().ok())
+        .or_else(|| {
+            std::env::var("RAT_MAX_CONCURRENCY")
+                .ok()
+                .and_then(|v| v.parse().ok())
+        })
+        .unwrap_or(3);
+    info!(max_concurrency = max_concurrency, "Pipeline concurrency limit");
+
     // Create background loop manager
     let loop_manager = Arc::new(TokioMutex::new(LoopManager::new(
         orchestrator.clone(),
         client.clone(),
         assets,
         event_bus.clone(),
+        max_concurrency,
     )));
 
     // ======================================================================

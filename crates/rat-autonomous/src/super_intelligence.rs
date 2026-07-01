@@ -20,6 +20,7 @@ use crate::state::SharedState;
 use crate::types::MarketRegime;
 use std::collections::HashMap;
 use rat_core::agent::SkillDirection;
+use rat_core::paper_engine::TradingMode;
 use rat_core::AggregatedSignal;
 use rat_core::ConfirmationLevel;
 
@@ -1129,16 +1130,31 @@ impl SuperIntelligence {
             cross_val_score,
         );
 
-        // 7. Regime threshold
-        // Paper mode: lower threshold to 0.30 so trades actually execute
-        // for testing without requiring high-conviction setups.
-        let regime_threshold = match &regime {
-            Some(MarketRegime::TrendingBull) => 0.30,
-            Some(MarketRegime::TrendingBear) => 0.30,
-            Some(MarketRegime::Ranging) => 0.30,
-            Some(MarketRegime::Volatile) => 0.30,
-            Some(MarketRegime::LowLiquidity) => 0.30,
-            None => 0.30,
+        // 7. Trading mode — relax thresholds in paper mode for testing
+        let is_paper =
+            state.portfolio_store.broker_registry.current_mode().await == TradingMode::Paper;
+
+        // 8. Regime threshold
+        let regime_threshold = if is_paper {
+            // Paper mode: relaxed — let trades through for testing
+            match &regime {
+                Some(MarketRegime::TrendingBull) => 0.30,
+                Some(MarketRegime::TrendingBear) => 0.30,
+                Some(MarketRegime::Ranging) => 0.30,
+                Some(MarketRegime::Volatile) => 0.30,
+                Some(MarketRegime::LowLiquidity) => 0.30,
+                None => 0.30,
+            }
+        } else {
+            // Live mode: strict — require high conviction
+            match &regime {
+                Some(MarketRegime::TrendingBull) => 0.50,
+                Some(MarketRegime::TrendingBear) => 0.80,
+                Some(MarketRegime::Ranging) => 0.50,
+                Some(MarketRegime::Volatile) => 0.75,
+                Some(MarketRegime::LowLiquidity) => 0.50,
+                None => 0.50,
+            }
         };
 
         // 8. Decision trace
@@ -1155,8 +1171,17 @@ impl SuperIntelligence {
         // 9. Adjust action + confidence
         // The SuperIntelligence can upgrade HOLD to BUY or downgrade BUY to HOLD
         // based on the full conviction stack + cross-validation
+        let (min_validation, min_confidence) = if is_paper {
+            // Paper mode: relaxed — validation ~0.25 with no skill pairs,
+            // confidence ~0.36 with sparse data
+            (0.15, 0.25)
+        } else {
+            // Live mode: strict — require properly validated signals
+            (0.40, 0.45)
+        };
+
         let should_buy = conviction.final_conviction >= regime_threshold
-            && validation.overall_validation_score >= 0.4;
+            && validation.overall_validation_score >= min_validation;
 
         let recommended_action = if proposed_action == "BUY" && should_buy {
             "BUY"
@@ -1175,7 +1200,7 @@ impl SuperIntelligence {
             proposed_confidence * 0.5 // Reduce confidence for HOLD
         };
 
-        let should_proceed = recommended_action == "BUY" && recommended_confidence >= 0.45;
+        let should_proceed = recommended_action == "BUY" && recommended_confidence >= min_confidence;
 
         println!(
             "[SuperIntelligence] 🔬 {} → {} (conf {:.1}%) | conviction={:.1}% validation={:.1}% memory={}ep | {}",
