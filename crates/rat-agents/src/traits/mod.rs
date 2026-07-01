@@ -16,7 +16,7 @@ pub trait AgentProcessor: Send + Sync {
     async fn process(&self, input: AgentInput) -> AgentOutput;
     
     /// Generate reasoning chain for the decision.
-    fn reason(&self, input: &AgentInput, output: &AgentOutput) -> ReasoningChain {
+    fn reason(&self, _input: &AgentInput, output: &AgentOutput) -> ReasoningChain {
         ReasoningChain {
             decision: output.action.clone(),
             steps: vec![],

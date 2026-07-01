@@ -57,7 +57,7 @@ impl AgentProcessor for MarketIntelligenceProcessor {
     fn role(&self) -> &str { "Aggregate market signals" }
     async fn process(&self, input: AgentInput) -> AgentOutput {
         match input {
-            AgentInput::MarketData { symbol, price, indicators } => {
+            AgentInput::MarketData { symbol, price: _, indicators } => {
                 let bullish_count = indicators.iter().filter(|(n, v)| *v > 0.6 && (n.contains("rsi") || n.contains("macd") || n.contains("trend") || n.contains("adx"))).count();
                 let bearish_count = indicators.iter().filter(|(n, v)| *v < 0.4 && (n.contains("rsi") || n.contains("macd") || n.contains("trend") || n.contains("adx"))).count();
                 let total = indicators.len().max(1) as f64;
@@ -148,7 +148,7 @@ impl AgentProcessor for ConfluenceScorerProcessor {
     fn role(&self) -> &str { "Score multi-factor confluence" }
     async fn process(&self, input: AgentInput) -> AgentOutput {
         match input {
-            AgentInput::Signal { symbol, action, confidence: signal_confidence, indicators } => {
+            AgentInput::Signal { symbol, action: _, confidence: signal_confidence, indicators } => {
                 if indicators.is_empty() {
                     return AgentOutput {
                         action: "SCORE".to_string(),
@@ -206,7 +206,7 @@ impl AgentProcessor for PatternRetrieverProcessor {
     fn role(&self) -> &str { "Match historical patterns" }
     async fn process(&self, input: AgentInput) -> AgentOutput {
         match input {
-            AgentInput::MarketData { symbol, price, indicators } => {
+            AgentInput::MarketData { symbol, price: _, indicators } => {
                 let momentum = indicators.iter().find(|(n, _)| n == "momentum").map(|(_, v)| *v).unwrap_or(0.5);
                 let volatility = indicators.iter().find(|(n, _)| n == "volatility").map(|(_, v)| *v).unwrap_or(0.5);
                 let trend = indicators.iter().find(|(n, _)| n == "trend").map(|(_, v)| *v).unwrap_or(0.5);

@@ -22,7 +22,7 @@ impl FeedbackFlow {
         lesson
     }
 
-    async fn extract_lesson(pnl: f64, entry: f64, exit: f64) -> String {
+    async fn extract_lesson(_pnl: f64, entry: f64, exit: f64) -> String {
         let pnl_pct = (exit - entry) / entry * 100.0;
 
         if pnl_pct > 5.0 {

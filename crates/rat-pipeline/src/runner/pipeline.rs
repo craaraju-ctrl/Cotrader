@@ -210,7 +210,7 @@ impl PipelineRunner {
         )
         .await;
 
-        let permit = match _permit_guard {
+        let _permit = match _permit_guard {
             Ok(Ok(p)) => p,
             _ => {
                 eprintln!("[RateLimit] ⚠ {} rate-limiter timeout — skipping cycle", symbol);
@@ -389,7 +389,7 @@ impl PipelineRunner {
                     prices.push(walk_price);
                     let base_vol = 100_000.0;
                     let spike = if i % 12 == 0 { 300_000.0 } else { 0.0 };
-                    let vol_noise = ((rng_state * 7.3) % 100_000.0);
+                    let vol_noise = (rng_state * 7.3) % 100_000.0;
                     vols.push(base_vol + spike + vol_noise);
                 }
                 prices.push(price);
@@ -408,7 +408,7 @@ impl PipelineRunner {
         let raw_rsi = rsi_values.last().copied().unwrap_or(50.0);
 
         // MACD(12,26,9)
-        let (macd_bullish, macd_usable) = if prices.len() >= 35 {
+        let (macd_bullish, _macd_usable) = if prices.len() >= 35 {
             let macd = rat_indicators::macd::MacdIndicator::new(12, 26, 9);
             let macd_result = macd.calculate(&prices);
             let bullish = if let (Some(&macd_val), Some(&signal_val)) =
@@ -470,8 +470,8 @@ impl PipelineRunner {
             "HOLD".to_string()
         };
 
-        let source = if use_real { "REAL" } else { "HIST" };
-        let bars = prices.len();
+        let _source = if use_real { "REAL" } else { "HIST" };
+        let _bars = prices.len();
         let reasoning = format!(
             "RSI:{:.0}({:.2}) Trend:{}({:.2}) MACD:{} Vol:{:.1}x({:.1}) | Score:{:.3} → {}",
             raw_rsi, momentum,
@@ -483,7 +483,7 @@ impl PipelineRunner {
         SignalOutput { action, confidence: avg_score, reasoning }
     }
 
-    async fn check_risk(symbol: &str, signal: &SignalOutput) -> RiskOutput {
+    async fn check_risk(_symbol: &str, signal: &SignalOutput) -> RiskOutput {
         let mut reasons = Vec::new();
 
         // Check HOLD signals — never trade when there's no directional bias
@@ -513,7 +513,7 @@ impl PipelineRunner {
 
     async fn execute_trade(
         symbol: &str,
-        signal: &SignalOutput,
+        _signal: &SignalOutput,
         client: &reqwest::Client,
         limiter: &tokio::sync::Semaphore,
         last_ts: &AtomicU64,

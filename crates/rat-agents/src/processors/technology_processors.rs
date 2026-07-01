@@ -163,7 +163,7 @@ impl AgentProcessor for SentimentAnalystProcessor {
     fn role(&self) -> &str { "News and social sentiment" }
     async fn process(&self, input: AgentInput) -> AgentOutput {
         match input {
-            AgentInput::MarketData { symbol, price, indicators } => {
+            AgentInput::MarketData { symbol, price: _, indicators } => {
                 let sentiment_score = indicators.iter().find(|(n, _)| n == "sentiment").map(|(_, v)| *v).unwrap_or(0.5);
                 let social_volume = indicators.iter().find(|(n, _)| n == "social_volume").map(|(_, v)| *v).unwrap_or(0.5);
                 let fear_greed = indicators.iter().find(|(n, _)| n == "fear_greed").map(|(_, v)| *v).unwrap_or(0.5);
@@ -268,7 +268,7 @@ impl AgentProcessor for MoneyManagerProcessor {
             AgentInput::RiskCheck { symbol, portfolio_state, .. } => {
                 let equity = portfolio_state.equity;
                 let drawdown = portfolio_state.drawdown;
-                let position_count = portfolio_state.positions.len() as f64;
+                let _position_count = portfolio_state.positions.len() as f64;
 
                 // Kelly criterion (simplified): assumes known win rate and payoff ratio
                 let win_rate = 0.55;

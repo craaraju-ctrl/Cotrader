@@ -76,7 +76,7 @@ impl AgentProcessor for RatProcessor {
                     data: None,
                 }
             }
-            AgentInput::MarketData { symbol, price, indicators } => {
+            AgentInput::MarketData { symbol, price: _, indicators } => {
                 let avg = indicators.iter().map(|(_, v)| v).sum::<f64>() / indicators.len().max(1) as f64;
                 let momentum = indicators.iter().find(|(n, _)| n == "momentum").map(|(_, v)| *v).unwrap_or(0.0);
                 let volatility = indicators.iter().find(|(n, _)| n == "volatility").map(|(_, v)| *v).unwrap_or(0.5);

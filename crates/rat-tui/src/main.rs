@@ -36,6 +36,7 @@ use components::header::Header;
 use components::tabs::TabsComponent;
 use components::dashboard::DashboardComponent;
 use components::positions::PositionsComponent;
+use components::command_palette::CommandPalette;
 use components::orderbook::OrderBookComponent;
 use components::agents::AgentsComponent;
 use components::performance::PerformanceComponent;
@@ -62,6 +63,7 @@ struct AppController {
     help: HelpComponent,
     footer: FooterComponent,
     status_bar: StatusBarComponent,
+    command_palette: CommandPalette,
 }
 
 impl AppController {
@@ -86,6 +88,7 @@ impl AppController {
             help: HelpComponent,
             footer: FooterComponent,
             status_bar: StatusBarComponent,
+    command_palette: components::command_palette::CommandPalette,
         }
     }
 
@@ -116,6 +119,19 @@ impl AppController {
                         self.app.show_help = false;
                     }
                     return false;
+                }
+
+                // Command palette (Ctrl+K)
+                if key.code == KeyCode::Char('k') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    self.app.show_command_palette = !self.app.show_command_palette;
+                    return false;
+                }
+
+                // Command palette handles keys when open
+                if self.app.show_command_palette {
+                    if self.command_palette.handle_key(key, &mut self.app) {
+                        return false;
+                    }
                 }
 
                 // Let tabs handle first
@@ -266,6 +282,17 @@ impl AppController {
                 height: size.height * 2 / 3,
             };
             self.help.render(frame, overlay_area, &self.app);
+        }
+
+        // Render command palette if active
+        if self.app.show_command_palette {
+            let palette_area = ratatui::layout::Rect {
+                x: size.width / 4,
+                y: size.height / 4,
+                width: size.width / 2,
+                height: size.height / 2,
+            };
+            self.command_palette.render(frame, palette_area, &self.app);
         }
     }
 

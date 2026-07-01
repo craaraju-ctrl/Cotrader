@@ -13,7 +13,7 @@ impl AgentProcessor for QuantResearcherProcessor {
     fn role(&self) -> &str { "Statistical models" }
     async fn process(&self, input: AgentInput) -> AgentOutput {
         match input {
-            AgentInput::MarketData { symbol, price, indicators } => {
+            AgentInput::MarketData { symbol, price: _, indicators } => {
                 let momentum = indicators.iter().find(|(n, _)| n == "momentum").map(|(_, v)| *v).unwrap_or(0.5);
                 let volatility = indicators.iter().find(|(n, _)| n == "volatility").map(|(_, v)| *v).unwrap_or(0.5);
                 let mean_reversion = indicators.iter().find(|(n, _)| n == "mean_reversion").map(|(_, v)| *v).unwrap_or(0.5);
@@ -70,7 +70,7 @@ impl AgentProcessor for TechnicalAnalystProcessor {
     fn role(&self) -> &str { "Charts and patterns" }
     async fn process(&self, input: AgentInput) -> AgentOutput {
         match input {
-            AgentInput::MarketData { symbol, price, indicators } => {
+            AgentInput::MarketData { symbol, price: _, indicators } => {
                 let rsi = indicators.iter().find(|(n, _)| n == "rsi").map(|(_, v)| *v).unwrap_or(0.5);
                 let macd = indicators.iter().find(|(n, _)| n == "macd").map(|(_, v)| *v).unwrap_or(0.0);
                 let ema_cross = indicators.iter().find(|(n, _)| n == "ema_cross").map(|(_, v)| *v).unwrap_or(0.5);
@@ -137,7 +137,7 @@ impl AgentProcessor for FundamentalAnalystProcessor {
     fn role(&self) -> &str { "Valuation and earnings" }
     async fn process(&self, input: AgentInput) -> AgentOutput {
         match input {
-            AgentInput::MarketData { symbol, price, indicators } => {
+            AgentInput::MarketData { symbol, price: _, indicators } => {
                 let pe_ratio = indicators.iter().find(|(n, _)| n == "pe_ratio").map(|(_, v)| *v).unwrap_or(0.5);
                 let earnings_growth = indicators.iter().find(|(n, _)| n == "earnings_growth").map(|(_, v)| *v).unwrap_or(0.5);
                 let debt_equity = indicators.iter().find(|(n, _)| n == "debt_equity").map(|(_, v)| *v).unwrap_or(0.5);

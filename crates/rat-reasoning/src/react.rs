@@ -1,5 +1,4 @@
 use crate::error::ReasoningError;
-use crate::chain::State;
 
 /// A trace entry for ReAct loops.
 #[derive(Debug, Clone)]

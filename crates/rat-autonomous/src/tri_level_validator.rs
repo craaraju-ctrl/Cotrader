@@ -477,10 +477,10 @@ impl TriLevelValidator {
         consecutive_losses: u32,
         // Real context from SharedState (NOT placeholder strings)
         multi_tf_context: &str,
-        agent_market_summary: &str,
-        news_context: &str,
-        vector_context: &str,
-        patterns_context: &str,
+        _agent_market_summary: &str,
+        _news_context: &str,
+        _vector_context: &str,
+        _patterns_context: &str,
         snapshot: &OhlcvSnapshot,
     ) -> LayerSignal {
         let rules = state.rule_engine.rules.read().await;

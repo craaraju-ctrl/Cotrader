@@ -376,7 +376,7 @@ async fn handle_start_all(
     // Optionally launch TUI
     if launch_tui {
         println!("  Launching TUI...");
-        let mut tui_child = tokio::process::Command::new("cargo")
+        let tui_child = tokio::process::Command::new("cargo")
             .args(["run", "--release", "-p", "rat-tui"])
             .current_dir(&root)
             .kill_on_drop(true)

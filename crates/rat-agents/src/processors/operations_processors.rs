@@ -14,10 +14,10 @@ impl AgentProcessor for PortfolioAdministratorProcessor {
         match input {
             AgentInput::Outcome { symbol, pnl, entry_price, exit_price } => {
                 let return_pct = if entry_price > 0.0 { (exit_price - entry_price) / entry_price * 100.0 } else { 0.0 };
-                let is_win = pnl > 0.0;
+                let _is_win = pnl > 0.0;
 
                 // Reconciliation checks
-                let price_diff = (exit_price - entry_price).abs();
+                let _price_diff = (exit_price - entry_price).abs();
                 let expected_pnl_direction = exit_price > entry_price;
                 let pnl_consistent = (pnl > 0.0) == expected_pnl_direction;
 
@@ -78,7 +78,7 @@ impl AgentProcessor for JournalKeeperProcessor {
     async fn process(&self, input: AgentInput) -> AgentOutput {
         match input {
             AgentInput::Review { trade_id, pnl, lessons } => {
-                let is_win = pnl > 0.0;
+                let _is_win = pnl > 0.0;
                 let lesson_count = lessons.len();
                 let has_actionable = lessons.iter().any(|l|
                     l.to_lowercase().contains("should") ||

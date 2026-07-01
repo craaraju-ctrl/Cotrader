@@ -44,7 +44,7 @@ impl BacktestEngine {
                             });
                         }
                     }
-                    Signal::Sell { size } => {
+                    Signal::Sell { size: _ } => {
                         if let Some(trade) = trades.last_mut() {
                             trade.exit = bar.close * (1.0 - self.slippage);
                             trade.pnl = (trade.exit - trade.entry) * trade.size - cost;

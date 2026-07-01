@@ -51,7 +51,7 @@ async fn main() -> anyhow::Result<()> {
     println!("[Pipeline] Pipeline running. Press Ctrl+C to stop.\n");
 
     let mut trade_count: HashMap<String, u32> = HashMap::new();
-    let mut start_time = std::time::Instant::now();
+    let start_time = std::time::Instant::now();
 
     loop {
         tokio::select! {

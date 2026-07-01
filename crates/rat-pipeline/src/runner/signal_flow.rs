@@ -7,11 +7,11 @@ pub struct SignalFlow;
 impl SignalFlow {
     /// Run all indicators and combine into a single signal.
     pub async fn generate_signal(
-        symbol: &str,
+        _symbol: &str,
         prices: &[f64],
         highs: &[f64],
         lows: &[f64],
-        volumes: &[f64],
+        _volumes: &[f64],
     ) -> super::pipeline::SignalOutput {
         let mut scores = Vec::new();
 
@@ -50,7 +50,7 @@ impl SignalFlow {
         if prices.len() >= 20 {
             let bollinger = rat_indicators::bollinger::BollingerIndicator::new(20, 2.0);
             let bands = bollinger.calculate(prices);
-            if let (Some(&upper), Some(&lower), Some(&middle)) = 
+            if let (Some(&upper), Some(&lower), Some(&_middle)) = 
                 (bands.upper.last(), bands.lower.last(), bands.middle.last()) {
                 let price = *prices.last().unwrap_or(&1.0);
                 let bb_score = if price < lower { 0.8 } else if price > upper { 0.2 } else { 0.5 };

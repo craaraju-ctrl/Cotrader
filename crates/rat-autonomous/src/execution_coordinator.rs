@@ -569,7 +569,7 @@ impl ExecutionCoordinatorAgent {
                                 );
                                 let regret = episode.reflection.as_ref().map(|r| r.regret_score);
                                 let vm = self.state.agent_memory.vector_memory.clone();
-                                let llm_clone = self.state.io.llm.clone();
+                                let _llm_clone = self.state.io.llm.clone();
                                 let sym_clone = episode.symbol.clone();
                                 tokio::spawn(async move {
                                     let mut vm_write = vm.write().await;
@@ -955,7 +955,7 @@ impl ExecutionCoordinatorAgent {
                                 if let Ok(episode) =
                                     serde_json::from_str::<rat_core::TradingEpisode>(&json)
                                 {
-                                    let llm = (*self.state.io.llm).clone();
+                                    let _llm = (*self.state.io.llm).clone();
                                     let reflector =
                                         crate::reflector::ReflectorAgent::new(self.state.clone());
                                     let _ = reflector.deep_reflect_on_episode(&episode).await;
@@ -1082,7 +1082,7 @@ impl ExecutionCoordinatorAgent {
                             if let Ok(episode) =
                                 serde_json::from_str::<rat_core::TradingEpisode>(&json)
                             {
-                                let llm = (*self.state.io.llm).clone();
+                                let _llm = (*self.state.io.llm).clone();
                                 let reflector =
                                     crate::reflector::ReflectorAgent::new(self.state.clone());                                    let _ = reflector.deep_reflect_on_episode(&episode).await;
                             }
@@ -1161,7 +1161,7 @@ impl ExecutionCoordinatorAgent {
                             if let Ok(episode) =
                                 serde_json::from_str::<rat_core::TradingEpisode>(&json)
                             {
-                                let llm = (*self.state.io.llm).clone();
+                                let _llm = (*self.state.io.llm).clone();
                                 let reflector =
                                     crate::reflector::ReflectorAgent::new(self.state.clone());                                    let _ = reflector.deep_reflect_on_episode(&episode).await;
                             }

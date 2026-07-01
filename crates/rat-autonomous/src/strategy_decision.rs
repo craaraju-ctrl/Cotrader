@@ -773,7 +773,7 @@ impl StrategyDecisionAgent {
             // ═══ STEP 5: LLM as cross-check opinion only ══════════════════
             // LLM is consulted but cannot override the deterministic + SI result.
             // It provides an opinion that is logged and factored into reasoning.
-            let calendar_context = {
+            let _calendar_context = {
                 let cal = self.state.market_data.calendar_events.read().await;
                 if cal.is_empty() {
                     "No high-impact events scheduled.".to_string()
@@ -847,7 +847,7 @@ impl StrategyDecisionAgent {
                     }
                 }
             };
-            let agent_market_summary = {
+            let _agent_market_summary = {
                 let s = self.state.agent_memory.agent_market_summary.read().await;
                 if s.is_empty() {
                     "No market summary yet.".to_string()

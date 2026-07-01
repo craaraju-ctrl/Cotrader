@@ -2,6 +2,7 @@
 
 use agentic_memory::client::MemoryClient;
 
+#[allow(non_camel_case_types)]
 pub struct MoneyManagerMemory {
     client: MemoryClient,
     namespace: String,

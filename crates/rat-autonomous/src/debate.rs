@@ -715,7 +715,7 @@ impl HistorianAgent {
                     "{} {} price={:.2}",
                     ctx.symbol, "historical outcome", ctx.current_price
                 );
-                let llm_for_search = (*self.state.io.llm).clone();
+                let _llm_for_search = (*self.state.io.llm).clone();
                 if let Ok(results) = vm.search(&query, 3).await {
                     similar_episodes = results;
                 }

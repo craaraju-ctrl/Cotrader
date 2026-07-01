@@ -148,7 +148,7 @@ pub fn build_trading_graph(
     // Aggregate into unified view
     let mut combined = State::new();
     combined.insert("factors_analyzed".into(), serde_json::json!(3));
-    let unified_id = graph.aggregate(&[macro_id, tech_id, sent_id], "unified_view", combined);
+    let _unified_id = graph.aggregate(&[macro_id, tech_id, sent_id], "unified_view", combined);
 
     // Refinement loop: if unified view has low confidence, refine each branch
     let mut refined_macro = State::new();

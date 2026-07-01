@@ -13,7 +13,7 @@ impl AgentProcessor for RiskPsychologyProcessor {
     fn role(&self) -> &str { "Evaluate emotional state" }
     async fn process(&self, input: AgentInput) -> AgentOutput {
         match input {
-            AgentInput::RiskCheck { portfolio_state, signal, .. } => {
+            AgentInput::RiskCheck { portfolio_state, signal: _, .. } => {
                 let drawdown = portfolio_state.drawdown;
                 let position_count = portfolio_state.positions.len() as f64;
                 let unrealized_pnl: f64 = portfolio_state.positions.iter().map(|p| p.unrealized_pnl).sum();
@@ -107,7 +107,7 @@ impl AgentProcessor for RiskCalculatorProcessor {
                 // Daily loss limit
                 let daily_loss_limit = equity * 0.03;
                 let daily_used = if daily_pnl < 0.0 { daily_pnl.abs() } else { 0.0 };
-                let daily_remaining = (daily_loss_limit - daily_used).max(0.0);
+                let _daily_remaining = (daily_loss_limit - daily_used).max(0.0);
 
                 // Kelly fraction (simplified): assumes 55% win rate, 1.5 reward/risk
                 let kelly = 0.55 - (0.45 / 1.5);

@@ -553,7 +553,7 @@ impl MemoryContext {
             let vm = state.agent_memory.vector_memory.read().await;
             if !vm.is_empty() {
                 let query = format!("{} price={:.2} trading outcome", symbol, current_price);
-                let llm = (*state.io.llm).clone();
+                let _llm = (*state.io.llm).clone();
                 if let Ok(results) = vm.search(&query, 5).await {
                     similar_episodes = results;
                 }
