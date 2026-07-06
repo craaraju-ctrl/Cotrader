@@ -76,7 +76,6 @@ printf "  %-22s  %-27s  PID %-8s  %-16s %b\n" "SERVICE" "ENDPOINT" "PID" "PROCES
 echo "  ─────────────────────────────────────────────────────────────────────────────────"
 
 check_http_service "Agentic Memory" "$MEMORY_PORT" "memory" "http://localhost:$MEMORY_PORT/health"
-check_http_service "Tredo Exchange" "$TREDO_PORT"  "tredo"  "http://localhost:$TREDO_PORT/api/v1/health"
 check_process_service "RAT" "rat" ""
 
 echo ""

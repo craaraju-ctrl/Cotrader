@@ -7,7 +7,7 @@ GREEN='\033[0;32m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-INSTALL_DIR="${RAT_INSTALL_DIR:-$HOME/.rat-agent}"
+INSTALL_DIR="${RAT_INSTALL_DIR:-$HOME/.cotrader-agent}"
 BIN_DIR="${HOME}/.local/bin"
 
 echo ""
@@ -20,7 +20,7 @@ if [ -f "$INSTALL_DIR/target/release/rat" ]; then
 fi
 
 # Remove binaries
-for bin in rat rat-pipeline rat-tui rat-cli rat-orchestrator rat-install; do
+for bin in rat cotrader-pipeline cotrader-tui cotrader-cli cotrader-orchestrator cotrader-install; do
     if [ -L "$BIN_DIR/$bin" ]; then
         rm -f "$BIN_DIR/$bin"
         echo -e "  ${GREEN}Removed${NC} $BIN_DIR/$bin"

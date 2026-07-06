@@ -1,0 +1,42 @@
+[package]
+name = "cotrader-ml"
+version.workspace = true
+description = "cotrader-ml — Machine learning models for signal quality, regime detection, position sizing, pattern recognition, and strategy selection"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[features]
+default = ["ml"]
+ml = ["dep:candle-core", "dep:candle-nn", "dep:linfa", "dep:linfa-trees"]
+
+[dependencies]
+cotrader-core = { path = "../cotrader-core" }
+
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = ">=0.4.35, <0.4.40"
+tracing = "0.1"
+thiserror = "1"
+ndarray = "0.15"
+async-trait = "0.1"
+rusqlite = { version = "0.39", features = ["bundled"] }
+rand = "0.8"
+
+# ML — Candle (neural networks: MLP, CNN)
+candle-core = { version = "0.8", optional = true }
+candle-nn = { version = "0.8", optional = true }
+
+# ML — Linfa (classical ML: GBT, RandomForest)
+linfa = { version = "0.7", optional = true }
+linfa-trees = { version = "0.7", optional = true }
+
+# Model serialization
+safetensors = "0.4"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }

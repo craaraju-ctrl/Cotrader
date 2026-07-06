@@ -1,0 +1,26 @@
+[package]
+name = "cotrader-orchestrator"
+version.workspace = true
+description = "cotrader-orchestrator — Service orchestration for trading system"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[dependencies]
+cotrader-core = { path = "../cotrader-core" }
+cotrader-autonomous = { path = "../cotrader-autonomous" }
+cotrader-ml = { path = "../cotrader-ml" }
+cotrader-runtime = { path = "../cotrader-runtime" }
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { workspace = true }
+reqwest = { version = "0.11", features = ["json"] }
+axum = { version = "0.7", features = ["macros", "ws"] }
+tower-http = { version = "0.5", features = ["cors", "fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

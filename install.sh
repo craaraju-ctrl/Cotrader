@@ -142,8 +142,8 @@ if [ ! -f "$INSTALL_DIR/.env" ]; then
 MEMORY_PORT=3111
 MEMORY_DB_PATH=memory/data.db
 
-# Tredo Exchange
-TREDO_PORT=8080
+# External Exchange (Tredo Exchange runs separately)
+EXCHANGE_URL=http://localhost:8080
 
 # RAT Bot
 RAT_PORT=8082

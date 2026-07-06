@@ -6,7 +6,7 @@
 //!
 //! These components are designed to be used across the crate and by external consumers.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
@@ -21,13 +21,38 @@ pub enum CircuitState {
 }
 
 /// A reusable, thread-safe Circuit Breaker implementation.
+///
+/// FIXED (fault-isolation audit, D1): the previous implementation used three
+/// separate mutexes with inconsistent acquisition order (`on_success`:
+/// state → failure_count; `on_failure`: failure_count → … → state), a
+/// confirmed ABBA deadlock under concurrent load (4/4 threads permanently
+/// stuck in an 8M-op stress test). All state now lives behind ONE mutex with
+/// tiny critical sections, so a deadlock is structurally impossible and the
+/// sync lock never parks a Tokio worker beyond nanoseconds.
 #[derive(Debug)]
+struct BreakerInner {
+    state: CircuitState,
+    failure_count: u32,
+    last_failure_time: Option<Instant>,
+}
+
 pub struct CircuitBreaker {
-    state: Arc<Mutex<CircuitState>>,
-    failure_count: Arc<Mutex<u32>>,
-    last_failure_time: Arc<Mutex<Option<Instant>>>,
+    inner: Mutex<BreakerInner>,
     failure_threshold: u32,
     reset_timeout: Duration,
+    /// Optional hook fired exactly once per Closed/HalfOpen → Open transition
+    /// (used by consumers to propagate the halt to other subsystems).
+    on_open: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+}
+
+impl std::fmt::Debug for CircuitBreaker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CircuitBreaker")
+            .field("inner", &self.inner)
+            .field("failure_threshold", &self.failure_threshold)
+            .field("reset_timeout", &self.reset_timeout)
+            .finish()
+    }
 }
 
 impl CircuitBreaker {
@@ -37,58 +62,77 @@ impl CircuitBreaker {
     /// - `reset_timeout_secs`: Time in seconds after which to attempt recovery (Half-Open).
     pub fn new(failure_threshold: u32, reset_timeout_secs: u64) -> Self {
         Self {
-            state: Arc::new(Mutex::new(CircuitState::Closed)),
-            failure_count: Arc::new(Mutex::new(0)),
-            last_failure_time: Arc::new(Mutex::new(None)),
+            inner: Mutex::new(BreakerInner {
+                state: CircuitState::Closed,
+                failure_count: 0,
+                last_failure_time: None,
+            }),
             failure_threshold,
             reset_timeout: Duration::from_secs(reset_timeout_secs),
+            on_open: Mutex::new(None),
         }
+    }
+
+    /// Register a callback fired on every Closed/HalfOpen → Open transition.
+    /// Callers use this to announce the halt on a global coordination channel.
+    pub fn set_on_open(&self, cb: impl Fn() + Send + Sync + 'static) {
+        *self.on_open.lock().unwrap_or_else(|p| p.into_inner()) = Some(Box::new(cb));
     }
 
     /// Check if a request is allowed to proceed.
     pub fn can_execute(&self) -> bool {
-        let state = *self.state.lock().unwrap();
-        match state {
-            CircuitState::Closed => true,
-            CircuitState::HalfOpen => true,
+        let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        match g.state {
+            CircuitState::Closed | CircuitState::HalfOpen => true,
             CircuitState::Open => {
-                if let Some(last_failure) = *self.last_failure_time.lock().unwrap() {
-                    if last_failure.elapsed() >= self.reset_timeout {
-                        // Transition to HalfOpen without holding multiple locks
-                        *self.state.lock().unwrap() = CircuitState::HalfOpen;
-                        return true;
-                    }
+                if g
+                    .last_failure_time
+                    .map_or(false, |t| t.elapsed() >= self.reset_timeout)
+                {
+                    g.state = CircuitState::HalfOpen;
+                    true
+                } else {
+                    false
                 }
-                false
             }
         }
     }
 
     /// Record a successful request.
     pub fn on_success(&self) {
-        let mut state = self.state.lock().unwrap();
-        let mut failure_count = self.failure_count.lock().unwrap();
-        *state = CircuitState::Closed;
-        *failure_count = 0;
+        let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        g.state = CircuitState::Closed;
+        g.failure_count = 0;
     }
 
     /// Record a failed request.
     pub fn on_failure(&self) {
-        let mut failure_count = self.failure_count.lock().unwrap();
-        *failure_count += 1;
-
-        let mut last_failure_time = self.last_failure_time.lock().unwrap();
-        *last_failure_time = Some(Instant::now());
-
-        if *failure_count >= self.failure_threshold {
-            let mut state = self.state.lock().unwrap();
-            *state = CircuitState::Open;
+        let opened = {
+            let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+            g.failure_count += 1;
+            g.last_failure_time = Some(Instant::now());
+            if g.failure_count >= self.failure_threshold && g.state != CircuitState::Open {
+                g.state = CircuitState::Open;
+                true
+            } else {
+                false
+            }
+        }; // inner lock released BEFORE the callback — no nested locking
+        if opened {
+            if let Some(cb) = self
+                .on_open
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .as_ref()
+            {
+                cb();
+            }
         }
     }
 
     /// Get the current state of the circuit breaker.
     pub fn get_state(&self) -> CircuitState {
-        *self.state.lock().unwrap()
+        self.inner.lock().unwrap_or_else(|p| p.into_inner()).state
     }
 }
 
@@ -118,6 +162,12 @@ impl ResilientClient {
             client,
             circuit_breaker,
         }
+    }
+
+    /// Access the inner circuit breaker (e.g. to register an `on_open` hook
+    /// that propagates the halt to a global coordination channel).
+    pub fn circuit_breaker(&self) -> &CircuitBreaker {
+        &self.circuit_breaker
     }
 
     /// Perform a resilient POST request with JSON body and custom headers.
@@ -195,5 +245,64 @@ impl ResilientClient {
                 Err(e.to_string())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn opens_after_threshold_and_half_opens() {
+        let cb = CircuitBreaker::new(3, 0);
+        assert_eq!(cb.get_state(), CircuitState::Closed);
+        for _ in 0..3 {
+            cb.on_failure();
+        }
+        assert_eq!(cb.get_state(), CircuitState::Open);
+        // reset_timeout = 0 → next can_execute() probes HalfOpen
+        assert!(cb.can_execute());
+        assert_eq!(cb.get_state(), CircuitState::HalfOpen);
+        cb.on_success();
+        assert_eq!(cb.get_state(), CircuitState::Closed);
+    }
+
+    /// Regression test for the ABBA deadlock (D1): 4 threads × 2M mixed
+    /// success/failure ops. With the old triple-mutex layout this deadlocked
+    /// permanently; the single-mutex version must complete.
+    #[test]
+    fn no_deadlock_under_concurrent_hammer() {
+        let cb = Arc::new(CircuitBreaker::new(1, 3600));
+        let mut handles = Vec::new();
+        for t in 0..4u64 {
+            let cb = cb.clone();
+            handles.push(std::thread::spawn(move || {
+                for i in 0..2_000_000u64 {
+                    if (t + i) % 2 == 0 {
+                        cb.on_success();
+                    } else {
+                        cb.on_failure();
+                    }
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn on_open_hook_fires_once_per_transition() {
+        let cb = CircuitBreaker::new(2, 3600);
+        let hits = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let h = hits.clone();
+        cb.set_on_open(move || {
+            h.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        cb.on_failure();
+        cb.on_failure(); // opens here
+        cb.on_failure(); // already open — no second fire
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

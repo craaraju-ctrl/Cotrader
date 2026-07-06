@@ -1,0 +1,70 @@
+# RAT Agent — Docker Compose
+# Production-grade deployment with memory service, pipeline, and monitoring
+
+version: "3.9"
+
+x-common: &common
+  restart: unless-stopped
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  # ── Memory Service ──────────────────────────────────────────────────────
+  memory:
+    <<: *common
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: builder
+    command: memory
+    ports:
+      - "3111:3111"
+    volumes:
+      - rat_data:/app/data
+    environment:
+      - RUST_LOG=info
+      - MEMORY_DB_PATH=/app/data/memory.db
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3111/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── Trading Pipeline ────────────────────────────────────────────────────
+  pipeline:
+    <<: *common
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: builder
+    command: rat-pipeline --symbols BTC,ETH --mode paper
+    depends_on:
+      memory:
+        condition: service_healthy
+    environment:
+      - MEMORY_API_URL=http://memory:3111
+      - RUST_LOG=info
+      - TRADING_MODE=paper
+    volumes:
+      - rat_data:/app/data
+
+  # ── Kronos AI Service ───────────────────────────────────────────────────
+  kronos:
+    <<: *common
+    build:
+      context: .
+      dockerfile: kronos/Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - kronos_models:/app/models
+    environment:
+      - RUST_LOG=info
+      - MODEL_CACHE_DIR=/app/models
+
+volumes:
+  rat_data:
+  kronos_models:

@@ -18,14 +18,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 ENV_FILE="$PROJECT_DIR/config/rat.env"
-LOG_DIR="${LOG_DIR:-/tmp/rat-logs}"
+LOG_DIR="${LOG_DIR:-/tmp/cotrader-logs}"
 
 # ── Build (release) if binary is missing or source has changed ──────────────
 #
 # We run the build *before* sourcing the env file so that environment variables
 # intended for the orchestrator don't leak into the compiler process.
 #
-BINARY="$PROJECT_DIR/target/release/rat-orchestrator"
+BINARY="$PROJECT_DIR/target/release/cotrader-orchestrator"
 
 echo "[orchestrator] Rebuilding release binary if stale…" >&2
 cd "$PROJECT_DIR"

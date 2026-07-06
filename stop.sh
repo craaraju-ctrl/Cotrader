@@ -27,7 +27,6 @@ echo -e "${CYAN}╚════════════════════�
 echo ""
 
 stop_service "RAT"            "rat"
-stop_service "Tredo Exchange" "tredo"
 stop_service "Agentic Memory" "memory"
 
 echo -e "\n${GREEN}All services stopped.${NC}"

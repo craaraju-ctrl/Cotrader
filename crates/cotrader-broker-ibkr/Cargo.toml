@@ -1,0 +1,20 @@
+[package]
+name = "cotrader-broker-ibkr"
+version.workspace = true
+description = "Interactive Brokers adapter for global stock, forex, commodity, and options trading"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[dependencies]
+cotrader-core = { path = "../cotrader-core" }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = ">=0.4.35, <0.4.40", features = ["serde"] }
+tracing = "0.1"
+ibapi = "3.1.0"
+async-trait = "0.1"

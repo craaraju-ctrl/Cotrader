@@ -1,0 +1,7 @@
+[alias]
+xtask = "run --package xtask --"
+
+[registries]
+
+[target.x86_64-apple-darwin]
+rustflags = []

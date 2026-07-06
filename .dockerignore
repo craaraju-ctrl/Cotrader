@@ -1,0 +1,57 @@
+# Git
+.git/
+.gitignore
+
+# Build artifacts
+target/
+**/target/
+
+# Environment
+.env
+.env.local
+*.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Documentation (not needed at runtime)
+*.md
+*.pdf
+*.txt
+
+# Scripts
+scripts/
+*.sh
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Jupyter
+*.ipynb
+
+# Data
+*.csv
+*.jsonl
+
+# Documentation
+FAQ.md
+TESTING.md
+CONTRIBUTING.md
+DEVELOPMENT.md
+DEPLOYMENT.md
+PROJECT_ANALYSIS.md
+SECURITY.md
+ARCHITECTURE.md

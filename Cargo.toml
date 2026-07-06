@@ -2,55 +2,32 @@
 resolver = "2"
 
 members = [
-    # Exchange
-    "exchange",
-    # Memory
-    "memory",
-    # RAT crates
-    "crates/rat-core",
-    "crates/rat-autonomous",
-    "crates/rat-agents",
-    "crates/rat-indicators",
-    "crates/rat-pipeline",
-    "crates/rat-orchestrator",
-    "crates/rat-runtime",
-    "crates/rat-tui",
-    "crates/rat-server",
-    "crates/rat-exchange-client",
-    "crates/rat-memory-client",
-    "crates/rat-broker/rat-broker-5paisa",
-    "crates/rat-broker/rat-broker-alpaca",
-    "crates/rat-broker/rat-broker-zerodha",
-    "crates/rat-broker/rat-broker-binance",
-    "crates/rat-broker/rat-broker-angelone",
-    "crates/rat-broker/rat-broker-upstox",
-    "crates/rat-compliance",
-    "crates/rat-eventbus",
-    "crates/rat-market-data",
-    "crates/rat-metrics",
-    "crates/rat-watchdog",
-    "crates/rat-ecosystem",
-    "crates/rat-reasoning",
-    "crates/rat-strategies",
-    "crates/rat-risk",
-    "crates/rat-patterns",
-    "crates/rat-feeds",
-    "crates/rat-rules",
-    "crates/rat-skills",
-    "crates/rat-regime",
-    "crates/rat-sentiment",
-    "crates/rat-memory",
-    "crates/rat-indicators",
+    # ── Core ──
+    "crates/cotrader-core",
+    "crates/cotrader-autonomous",
+    "crates/cotrader-orchestrator",
+    "crates/cotrader-runtime",
+    # ── Brokers ──
+    "crates/cotrader-broker-binance",
+    "crates/cotrader-broker-ibkr",
+    "crates/cotrader-broker-zerodha",
+    # ── Services ──
+    "crates/cotrader-tui",
+    # ── ML ──
+    "crates/cotrader-ml",
+    # ── Build automation ──
+    "xtask",
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
-authors = ["RAT Agent Contributors"]
-repository = "https://github.com/varma/rat-agent"
-homepage = "https://github.com/varma/rat-agent"
+authors = ["CoTrader Contributors"]
+repository = "https://github.com/varma/cotrader"
+homepage = "https://github.com/varma/cotrader"
 readme = "README.md"
 
 [workspace.dependencies]
 chrono = { version = ">=0.4.35, <0.4.40", features = ["serde"] }
+ractor = "0.15"

@@ -8,7 +8,7 @@
 set -euo pipefail
 
 BASE_URL="${MEMORY_API_URL:-http://localhost:3111}"
-SKILL_FILE="docs/skills/rat-exchange-design.md"
+SKILL_FILE="docs/skills/cotrader-exchange-design.md"
 
 cd "$(dirname "$0")/.."
 
@@ -37,7 +37,7 @@ post_record() {
       \"id\": \"$id\",
       \"content\": $(echo "$content" | jq -Rs .),
       \"content_type\": \"$content_type\",
-      \"metadata\": {\"source\": \"rat-design-system\", \"tier\": \"$tier\"},
+      \"metadata\": {\"source\": \"cotrader-design-system\", \"tier\": \"$tier\"},
       \"tier\": \"$tier\",
       \"importance\": $importance
     }"

@@ -15,8 +15,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-BINARY="$PROJECT_DIR/target/release/rat-orchestrator"
-[ -f "$BINARY" ] || BINARY="$PROJECT_DIR/target/debug/rat-orchestrator"
+BINARY="$PROJECT_DIR/target/release/cotrader-orchestrator"
+[ -f "$BINARY" ] || BINARY="$PROJECT_DIR/target/debug/cotrader-orchestrator"
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
 info()  { printf "  \033[1;34m•\033[0m %s\n" "$*"; }
@@ -75,8 +75,8 @@ status_launchd() {
 
 # ── Linux systemd ────────────────────────────────────────────────────────────
 install_systemd() {
-    local unit_src="$SCRIPT_DIR/rat-orchestrator.service"
-    local unit_dst="/etc/systemd/system/rat-orchestrator.service"
+    local unit_src="$SCRIPT_DIR/cotrader-orchestrator.service"
+    local unit_dst="/etc/systemd/system/cotrader-orchestrator.service"
 
     sudo mkdir -p /opt/rat
     sudo ln -sf "$PROJECT_DIR" /opt/rat 2>/dev/null || \
@@ -84,23 +84,23 @@ install_systemd() {
 
     sudo cp "$unit_src" "$unit_dst"
     sudo systemctl daemon-reload
-    sudo systemctl enable rat-orchestrator
-    sudo systemctl restart rat-orchestrator
+    sudo systemctl enable cotrader-orchestrator
+    sudo systemctl restart cotrader-orchestrator
     ok "systemd service installed and started"
 }
 
 uninstall_systemd() {
-    sudo systemctl stop rat-orchestrator 2>/dev/null || true
-    sudo systemctl disable rat-orchestrator 2>/dev/null || true
-    sudo rm -f /etc/systemd/system/rat-orchestrator.service
+    sudo systemctl stop cotrader-orchestrator 2>/dev/null || true
+    sudo systemctl disable cotrader-orchestrator 2>/dev/null || true
+    sudo rm -f /etc/systemd/system/cotrader-orchestrator.service
     sudo systemctl daemon-reload
     ok "systemd service removed"
 }
 
 status_systemd() {
-    if systemctl is-enabled rat-orchestrator 2>/dev/null | grep -q enabled; then
+    if systemctl is-enabled cotrader-orchestrator 2>/dev/null | grep -q enabled; then
         info "Service is enabled"
-        systemctl --no-pager status rat-orchestrator 2>/dev/null | head -10
+        systemctl --no-pager status cotrader-orchestrator 2>/dev/null | head -10
     else
         warn "Service not installed or not enabled"
     fi
@@ -108,18 +108,18 @@ status_systemd() {
 
 # ── Cron @reboot fallback ────────────────────────────────────────────────────
 install_cron() {
-    local cron_cmd="@reboot cd $PROJECT_DIR && export LOG_DIR=/tmp/rat-logs && $SCRIPT_DIR/start_orchestrator.sh # rat-orchestrator"
-    (crontab -l 2>/dev/null | grep -v 'rat-orchestrator' || true; echo "$cron_cmd") | crontab -
+    local cron_cmd="@reboot cd $PROJECT_DIR && export LOG_DIR=/tmp/cotrader-logs && $SCRIPT_DIR/start_orchestrator.sh # cotrader-orchestrator"
+    (crontab -l 2>/dev/null | grep -v 'cotrader-orchestrator' || true; echo "$cron_cmd") | crontab -
     ok "cron @reboot entry added"
 }
 
 uninstall_cron() {
-    crontab -l 2>/dev/null | grep -v 'rat-orchestrator' | crontab - || true
+    crontab -l 2>/dev/null | grep -v 'cotrader-orchestrator' | crontab - || true
     ok "cron @reboot entry removed"
 }
 
 status_cron() {
-    if crontab -l 2>/dev/null | grep -q 'rat-orchestrator'; then
+    if crontab -l 2>/dev/null | grep -q 'cotrader-orchestrator'; then
         info "cron @reboot entry exists"
     else
         warn "No cron @reboot entry for rat"

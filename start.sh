@@ -52,27 +52,12 @@ else
     MEMORY_DB_PATH="$MEMORY_DB_PATH" \
     OLLAMA_BASE_URL="$OLLAMA_BASE_URL" \
     OLLAMA_MODEL="$OLLAMA_MODEL" \
-    cargo run --release -p agentic-memory > "$LOGDIR/memory.log" 2>&1 &
+    ./target/release/agentic-memory > "$LOGDIR/memory.log" 2>&1 &
     echo $! > "$PIDFILE_MEM"
     wait_for_port "$MEMORY_PORT" "Agentic Memory" 45
 fi
 
-# ── 2. Tredo Exchange ──────────────────────────────────────────────────
-PIDFILE_TREDO="$PIDDIR/tredo.pid"
-if is_running "$PIDFILE_TREDO"; then
-    warn "Tredo Exchange already running (PID $(cat "$PIDFILE_TREDO"))"
-else
-    log "Starting Tredo Exchange on port $TREDO_PORT..."
-    PORT="$TREDO_PORT" \
-    DATABASE_URL="$DATABASE_URL" \
-    RUST_LOG="$RUST_LOG" \
-    MEMORY_AGENT_URL="$MEMORY_AGENT_URL" \
-    cargo run --release -p tresdo-exchange > "$LOGDIR/tredo.log" 2>&1 &
-    echo $! > "$PIDFILE_TREDO"
-    wait_for_port "$TREDO_PORT" "Tredo Exchange" 60
-fi
-
-# ── 3. RAT ─────────────────────────────────────────────────────────────
+# ── 2. RAT ─────────────────────────────────────────────────────────────
 PIDFILE_RAT="$PIDDIR/rat.pid"
 if is_running "$PIDFILE_RAT"; then
     warn "RAT already running (PID $(cat "$PIDFILE_RAT"))"
@@ -83,13 +68,15 @@ else
     LLM_PROVIDER="$LLM_PROVIDER" \
     LLM_MODEL="$LLM_MODEL" \
     LLM_ENDPOINT="$LLM_ENDPOINT" \
+    OLLAMA_BASE_URL="$OLLAMA_BASE_URL" \
+    OLLAMA_MODEL="$OLLAMA_MODEL" \
     PAPER_MODE="$PAPER_MODE" \
     INITIAL_BALANCE="$INITIAL_BALANCE" \
     WS_ENABLED="$WS_ENABLED" \
     WATCHLIST="$WATCHLIST" \
     MEMORY_API_URL="$MEMORY_API_URL" \
     RUST_LOG=info \
-    cargo run --release -p rat-runtime --bin rat -- --mode paper > "$LOGDIR/rat.log" 2>&1 &
+    ./target/release/cotrader-orchestrator > "$LOGDIR/rat.log" 2>&1 &
     echo $! > "$PIDFILE_RAT"
     sleep 5
     if kill -0 "$(cat "$PIDFILE_RAT")" 2>/dev/null; then
@@ -105,7 +92,6 @@ echo -e "${GREEN}║              All services started!                         
 echo -e "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 echo "  Agentic Memory : http://localhost:$MEMORY_PORT  (PID $(cat "$PIDFILE_MEM"))"
-echo "  Tredo Exchange : http://localhost:$TREDO_PORT   (PID $(cat "$PIDFILE_TREDO"))"
 echo "  RAT            : autonomous trading bot          (PID $(cat "$PIDFILE_RAT"))"
 echo ""
 echo "  Logs: $LOGDIR/"
