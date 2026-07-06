@@ -100,6 +100,7 @@ async fn seed_aggregated_signal(state: &SharedState, conviction: f64) {
 // TEST 1: Full pipeline end-to-end — Gate passes → all layers execute
 // ══════════════════════════════════════════════════════════════════════════════
 #[tokio::test]
+#[ignore = "Requires Binance/Yahoo API access for market data — run locally with network"]
 async fn test_full_pipeline_end_to_end() {
     let (orch, db_path) = setup("e2e_pass").await;
 
@@ -156,6 +157,7 @@ async fn test_full_pipeline_end_to_end() {
 // TEST 2: Gate blocks → no downstream layers execute
 // ══════════════════════════════════════════════════════════════════════════════
 #[tokio::test]
+#[ignore = "Requires Binance/Yahoo API access for market data — run locally with network"]
 async fn test_gate_blocks_prevents_downstream() {
     let (orch, db_path) = setup("gate_block").await;
 
@@ -492,6 +494,7 @@ async fn test_low_priority_warnings_dont_block() {
 // TEST 8: COT chain captures all 5 layer entries on successful pipeline
 // ══════════════════════════════════════════════════════════════════════════════
 #[tokio::test]
+#[ignore = "Requires Binance/Yahoo API access for market data — run locally with network"]
 async fn test_cot_chain_captures_all_layers() {
     let (orch, db_path) = setup("cot_chain").await;
 
@@ -681,6 +684,7 @@ async fn test_identifier_feeds_debate_context() {
 // TEST 11: Medium-only block (bear regime + low confluence) — no Higher override
 // ══════════════════════════════════════════════════════════════════════════════
 #[tokio::test]
+#[ignore = "Requires Binance/Yahoo API access for market data — run locally with network"]
 async fn test_medium_only_block_stops_pipeline() {
     let (orch, db_path) = setup("med_block").await;
 
