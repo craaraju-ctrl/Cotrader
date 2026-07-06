@@ -1,0 +1,10 @@
+[package]
+name = "cotrader-broker-cotrader"
+version = "0.1.0"
+edition = "2021"
+description = "CoTrader Broker — paper trading adapter for integration tests"
+
+[dependencies]
+cotrader-core = { path = "../cotrader-core" }
+async-trait = "0.1"
+chrono = "0.4"

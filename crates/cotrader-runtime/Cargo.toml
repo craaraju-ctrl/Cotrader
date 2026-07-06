@@ -28,6 +28,9 @@ libc = "0.2"
 colored = "2"
 clap_complete = "4"
 
+[dev-dependencies]
+cotrader-broker-cotrader = { path = "../cotrader-broker-cotrader" }
+
 [[bin]]
 name = "cotrader"
 path = "src/bin/rat.rs"

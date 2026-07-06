@@ -8,6 +8,7 @@ members = [
     "crates/cotrader-orchestrator",
     "crates/cotrader-runtime",
     # ── Brokers ──
+    "crates/cotrader-broker-cotrader",
     "crates/cotrader-broker-binance",
     "crates/cotrader-broker-ibkr",
     "crates/cotrader-broker-zerodha",
