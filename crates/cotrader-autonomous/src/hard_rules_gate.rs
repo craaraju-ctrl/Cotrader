@@ -1762,6 +1762,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use cotrader_core::{Config, DisciplineRules, MemoryStore, TradeDirection};
     use cotrader_core::paper_engine::BrokerAdapter;
+    use crate::test_helpers::DemoBroker;
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 

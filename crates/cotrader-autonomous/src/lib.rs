@@ -82,3 +82,6 @@ pub use correlation_engine::CorrelationEngine;
 pub use state::SharedState;
 pub use rat::{Executer, Guardian, Identifier, Rat, Verifier};
 pub use types::*;
+
+#[cfg(test)]
+pub mod test_helpers;

@@ -325,6 +325,7 @@ mod tests {
     use std::sync::Arc;
     use cotrader_core::{Config, DisciplineRules, MemoryStore, TradeDirection};
     use cotrader_core::paper_engine::BrokerAdapter;
+    use crate::test_helpers::DemoBroker;
 
     #[tokio::test]
     async fn test_short_position_accounting() {

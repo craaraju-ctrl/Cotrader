@@ -21,6 +21,7 @@ pub struct DecisionResult {
     pub conviction: f64,
     pub ml_score: f64,
     pub verified: bool,
+    pub neurosymbolic_verified: bool,
     pub reasoning: String,
 }
 
@@ -107,6 +108,7 @@ impl DecisionAgent {
             conviction: conf,
             ml_score: ml_profit,
             verified,
+            neurosymbolic_verified: verified && conf >= min_conviction,
             reasoning,
         }
     }

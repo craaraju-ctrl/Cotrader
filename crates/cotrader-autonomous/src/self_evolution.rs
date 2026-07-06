@@ -948,6 +948,7 @@ mod tests {
     ) -> SharedState {
         use std::sync::Arc;
         use cotrader_core::paper_engine::BrokerAdapter;
+        use crate::test_helpers::DemoBroker;
         let memory = cotrader_core::MemoryStore::new("test_se_bg_redb").expect("MemoryStore");
         let rules = cotrader_core::DisciplineRules::default();
         let config = cotrader_core::Config::default();
