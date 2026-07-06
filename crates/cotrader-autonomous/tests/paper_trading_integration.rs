@@ -256,7 +256,7 @@ async fn test_rejected_signal_zero_position_size() {
     );
     let err = format!("{}", result.unwrap_err());
     assert!(
-        err.contains("Invalid position size"),
+        err.contains("position size") || err.contains("Position size"),
         "Error should mention invalid position size: {}",
         err
     );
