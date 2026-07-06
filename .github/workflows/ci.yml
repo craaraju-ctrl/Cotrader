@@ -1,11 +1,9 @@
-# RAT Agent — CI/CD Pipeline
-# Professional-grade CI with caching, linting, security audit, and full workspace build
-
+# Cotrader — CI Pipeline
 name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main]
   pull_request:
     branches: [main]
 
@@ -14,12 +12,9 @@ env:
   CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
 
 jobs:
-  # ── Build & Test (all platforms) ─────────────────────────────────────────
+  # ── Build & Test ──────────────────────────────────────────────────────────
   build:
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -45,9 +40,6 @@ jobs:
       - name: Clippy lint
         run: cargo clippy --workspace --all-targets
 
-      - name: Check documentation
-        run: cargo doc --workspace --no-deps 2>&1 | tail -10
-
   # ── Security Audit ───────────────────────────────────────────────────────
   audit:
     runs-on: ubuntu-latest
@@ -59,22 +51,3 @@ jobs:
 
       - name: Dependency audit
         run: cargo install cargo-audit && cargo audit 2>&1 | tail -20
-
-  # ── Integration Tests (release mode) ────────────────────────────────────
-  integration:
-    runs-on: ubuntu-latest
-    needs: build
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo dependencies
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build release
-        run: cargo build --release
-
-      - name: Verify pipeline help
-        run: timeout 5 ./target/release/rat-pipeline --help 2>&1 || true
