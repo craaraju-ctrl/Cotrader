@@ -551,6 +551,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // Requires Binance API access — geo-restricted in CI
     async fn live_binance_batch_and_klines() {
         let client = reqwest::Client::new();
         let tickers = fetch_tickers_24hr_batch(&client, &["BTC", "ETH", "PEPE", "SHIB"])
