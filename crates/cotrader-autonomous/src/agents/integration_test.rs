@@ -84,6 +84,7 @@ mod tests {
             confidence: 0.78,
             conviction: 0.75,
             ml_score: 0.82,
+            verified: true,
             neurosymbolic_verified: true,
             reasoning: "ML=82% | Rules OK | Kronos confirms".to_string(),
         };
