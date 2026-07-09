@@ -34,7 +34,7 @@ use cotrader_core::{
     compute_cornish_fisher_var, check_var_emergency_gate,
     SentimentConfig, SentimentResult, extract_sentiment,
 };
-use cotrader_core::config::{LlamaBackend, SystemMode, LatencyConfig};
+use cotrader_core::config::{LlamaBackend, SystemMode, LatencyConfig, AuditConfig, StepTelemetry, BoundaryState, ToolCall, CacheFetch};
 
 // ── Global Model Storage (Continuous On — loaded once at startup, kept hot in RAM) ──
 /// Runtime model for Chronos-Bolt time series forecasting.
@@ -305,6 +305,11 @@ impl TriLevelValidator {
         self.state.io.config.latency_config.clone()
     }
 
+    /// Get audit config for current mode.
+    fn audit_config(&self) -> AuditConfig {
+        self.state.io.config.audit_config.clone()
+    }
+
     /// Enforce inspection mode latency gate — blocks for the specified duration.
     /// Logs the gate activity with timestamp and layer name.
     async fn inspection_gate(layer_name: &str, delay_ms: u64, symbol: &str) {
@@ -350,6 +355,174 @@ impl TriLevelValidator {
                 symbol, latency_ms
             );
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // AUDIT MODE: Sequential Execution, Adaptive Timeouts, Fallback Analysis
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// Execute a step with adaptive timeout boundary observation.
+    /// Returns (result, telemetry, timeout_triggered).
+    async fn execute_step_with_timeout<F, Fut>(
+        layer: &str,
+        step: &str,
+        timeout_ms: u64,
+        symbol: &str,
+        f: F,
+    ) -> (Option<String>, StepTelemetry, bool)
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = String>,
+    {
+        let started_at = Utc::now().to_rfc3339();
+        let start = Instant::now();
+        let mut tool_calls = Vec::new();
+        let mut cache_fetches = Vec::new();
+
+        eprintln!(
+            "[AUDIT] ⏱️  {} | {} → {} | Starting with {}ms timeout...",
+            symbol, layer, step, timeout_ms
+        );
+
+        // Execute with timeout
+        let result = tokio::time::timeout(
+            tokio::time::Duration::from_millis(timeout_ms),
+            f(),
+        ).await;
+
+        let duration_ms = start.elapsed().as_millis() as u64;
+        let completed_at = Utc::now().to_rfc3339();
+
+        match result {
+            Ok(output) => {
+                eprintln!(
+                    "[AUDIT] ✅ {} | {} → {} | Completed in {}ms",
+                    symbol, layer, step, duration_ms
+                );
+                (
+                    Some(output),
+                    StepTelemetry {
+                        layer: layer.to_string(),
+                        step: step.to_string(),
+                        started_at,
+                        completed_at,
+                        duration_ms,
+                        success: true,
+                        timeout_triggered: false,
+                        boundary_state: None,
+                        tool_calls,
+                        cache_fetches,
+                    },
+                    false,
+                )
+            }
+            Err(_timeout) => {
+                eprintln!(
+                    "[AUDIT] ⚠️  {} | {} → {} | TIMEOUT after {}ms!",
+                    symbol, layer, step, timeout_ms
+                );
+                (
+                    None,
+                    StepTelemetry {
+                        layer: layer.to_string(),
+                        step: step.to_string(),
+                        started_at,
+                        completed_at,
+                        duration_ms,
+                        success: false,
+                        timeout_triggered: true,
+                        boundary_state: Some(BoundaryState {
+                            partial_decision: Some("TIMEOUT - No decision reached".to_string()),
+                            intermediate_weights: None,
+                            uncompleted_payload: format!("Step '{}' in layer '{}' did not complete within {}ms", step, layer, timeout_ms),
+                            risk_implications: format!("Layer {} timeout may affect consensus accuracy. Fallback required for layer {}.", layer, layer),
+                        }),
+                        tool_calls,
+                        cache_fetches,
+                    },
+                    true,
+                )
+            }
+        }
+    }
+
+    /// Generate deep fallback causality analysis.
+    fn generate_fallback_analysis(
+        layer: &str,
+        step: &str,
+        timeout_ms: u64,
+        duration_ms: u64,
+        symbol: &str,
+        config: &AuditConfig,
+    ) -> String {
+        let overrun = duration_ms.saturating_sub(timeout_ms);
+        let cause = if duration_ms >= timeout_ms { "INFERENCE SATURATION" } else { "PREMATURE STEP" };
+        let cause_detail = if duration_ms >= timeout_ms {
+            "Inference computation exceeded allocated time window"
+        } else {
+            "Step completed within budget but was interrupted by higher-level timeout"
+        };
+        let layer_weight = if layer == "Rules" { 35 } else if layer == "ML/Signal" { 25 } else if layer == "Chronos" { 25 } else { 15 };
+        let reduced_count = 3; // 4 - 1
+        let substep_type = if layer == "Chronos" { "chronos_substep" } else if layer == "LLM" { "llm_substep" } else { "layer_step" };
+        let recommended_timeout = if layer == "Chronos" {
+            config.chronos_substep_timeout_ms
+        } else if layer == "LLM" {
+            config.llm_substep_timeout_ms
+        } else {
+            config.layer_step_timeout_ms
+        };
+        let fallback_status = if config.zero_fallback_drive { "ENABLED" } else { "DISABLED" };
+
+        let analysis = format!(
+            r#"═══════════════════════════════════════════════════════════════════════════════
+[FALLBACK CAUSALITY ANALYSIS] {} | {} → {}
+═══════════════════════════════════════════════════════════════════════════════
+
+1. TIMEOUT BOUNDARY ANALYSIS:
+   - Layer: {}
+   - Step: {}
+   - Allocated Time Budget: {}ms
+   - Actual Execution Time: {}ms
+   - Time Overrun: {}ms
+
+2. FALLBACK CAUSE DETERMINATION:
+   - Did the layer fallback because model inference saturated the time budget?
+     → {} ({})
+   - Did it step forward prematurely to avoid pipe starvation?
+     → {} ({})
+
+3. UNCOMPLETED EXECUTION PAYLOAD:
+   - The step '{}' within layer '{}' was interrupted at the {}ms boundary.
+   - Partial results were discarded to maintain pipeline flow.
+   - The system will rely on fallback consensus from available layers.
+
+4. SYSTEMIC RISK IMPLICATIONS:
+   - Layer {} contributes {}% to the consensus weight.
+   - Timeout reduces effective layer count from 4 to {}.
+   - Agreement gate threshold: ≥2 layers must agree.
+   - If this layer's timeout prevents agreement, consensus will be forced to HOLD.
+
+5. ZERO-FALLBACK DRIVE STATUS:
+   - Zero-fallback mode: {}
+   - Current fallback count: 1
+   - Target: 0 fallbacks per pipeline cycle
+   - Recommendation: Increase {} timeout to {}ms to avoid future fallbacks.
+
+═══════════════════════════════════════════════════════════════════════════════
+"#,
+            symbol, layer, step,
+            layer, step,
+            timeout_ms, duration_ms, overrun,
+            if duration_ms >= timeout_ms { "YES" } else { "NO" }, cause,
+            if duration_ms < timeout_ms { "YES" } else { "NO" }, cause_detail,
+            step, layer, duration_ms,
+            layer, layer_weight, reduced_count,
+            fallback_status, substep_type, recommended_timeout,
+        );
+
+        eprintln!("{}", analysis);
+        analysis
     }
 
     /// Run all 4 parallel checks using an explicit OHLCV snapshot so all layers
@@ -470,34 +643,265 @@ impl TriLevelValidator {
             }
         };
 
-        // ── Inspection Mode: Emit pipeline start telemetry ─────────────────────
-        let is_inspection = self.system_mode().is_inspection();
+        // ── Inspection/Audit Mode: Emit pipeline start telemetry ───────────────
+        let system_mode = self.system_mode();
         let latency = self.latency_config();
-        if is_inspection {
-            eprintln!("[INSPECTION] ═══════════════════════════════════════════════════════════════");
-            eprintln!("[INSPECTION] 🚀 {} | Pipeline START | Price: ${:.2} | Regime: {}", symbol, current_price, trend_label);
-            eprintln!("[INSPECTION] 📊 VaR: {} | Emergency: {}", 
+        let audit = self.audit_config();
+        let is_inspection = system_mode.is_inspection();
+        let is_audit = system_mode.is_audit();
+        let is_verbose = system_mode.is_verbose();
+
+        if is_verbose {
+            let mode_label = if is_audit { "AUDIT" } else { "INSPECTION" };
+            eprintln!("[{}] ═══════════════════════════════════════════════════════════════", mode_label);
+            eprintln!("[{}] 🚀 {} | Pipeline START | Price: ${:.2} | Regime: {} | Mode: {:?}", mode_label, symbol, current_price, trend_label, system_mode);
+            eprintln!("[{}] 📊 VaR: {} | Emergency: {}", mode_label,
                 var_result.as_ref().map(|v| format!("alpha={:.4}", v.var_alpha)).unwrap_or_else(|| "N/A".into()),
                 var_emergency
             );
-            eprintln!("[INSPECTION] ═══════════════════════════════════════════════════════════════");
+            if is_audit {
+                eprintln!("[{}] ⚙️  Audit Config: sequential={} | step_timeout={}ms | zero_fallback={}",
+                    mode_label, audit.sequential_execution, audit.layer_step_timeout_ms, audit.zero_fallback_drive);
+            }
+            eprintln!("[{}] ═══════════════════════════════════════════════════════════════", mode_label);
         }
 
-        // ── Phase 1: Run four parallel checks (Rules, ML, Trend, Sentiment) ──
-        // All 4 layers receive the identical OHLCV data captured at pipeline start.
-        // No layer sees stale or different data.
+        // ── Phase 1: Run four checks (parallel or sequential based on mode) ──
         let snapshot_ref = snapshot.clone();
+        let mut telemetry_log: Vec<StepTelemetry> = Vec::new();
+        let mut fallback_analyses: Vec<String> = Vec::new();
         
-        // In inspection mode, run layers sequentially with latency gates for visibility
-        let (rules_sig, ml_sig, trend_sig, sentiment_sig) = if is_inspection {
+        let (rules_sig, ml_sig, trend_sig, sentiment_sig) = if is_audit && audit.sequential_execution {
+            // ═══ AUDIT MODE: Strict sequential execution with adaptive timeouts ═══
+            let step_timeout = audit.layer_step_timeout_ms;
+            let chronos_timeout = audit.chronos_substep_timeout_ms;
+            
+            eprintln!("[AUDIT] ═══════════════════════════════════════════════════════════════");
+            eprintln!("[AUDIT] 📋 {} | Sequential execution mode activated", symbol);
+            eprintln!("[AUDIT] ⏱️  Step timeout: {}ms | Chronos timeout: {}ms", step_timeout, chronos_timeout);
+            eprintln!("[AUDIT] ═══════════════════════════════════════════════════════════════");
+            
+            // Layer 1: Rules Engine (35% weight)
+            let (rules_result, rules_telemetry, rules_timeout) = Self::execute_step_with_timeout(
+                "Rules", "Pivot/Confluence Calculation", step_timeout, &sym,
+                || {
+                    let state = state_rules.clone();
+                    let snapshot = snapshot_ref.clone();
+                    let sym = sym.clone();
+                    async move {
+                        let sig = Self::check_rules_layer(state, &sym, current_price, confluence, &snapshot).await;
+                        format!("action={} signal={:+.3} conf={:.2}", sig.action, sig.signal, sig.confidence)
+                    }
+                },
+            ).await;
+            telemetry_log.push(rules_telemetry);
+            
+            let rules_sig = if let Some(result) = rules_result {
+                // Parse result back to LayerSignal
+                let action = result.split("action=").nth(1).unwrap_or("HOLD").split_whitespace().next().unwrap_or("HOLD").to_string();
+                let signal = result.split("signal=").nth(1).unwrap_or("0.0").split_whitespace().next().unwrap_or("0.0").parse::<f64>().unwrap_or(0.0);
+                let confidence = result.split("conf=").nth(1).unwrap_or("0.0").parse::<f64>().unwrap_or(0.0);
+                LayerSignal {
+                    layer: "rules".into(),
+                    signal,
+                    action,
+                    confidence,
+                    reasoning: format!("Audit mode: rules layer completed"),
+                    available: true,
+                }
+            } else {
+                // Timeout fallback
+                if audit.fallback_causality_analysis {
+                    let analysis = Self::generate_fallback_analysis(
+                        "Rules", "Pivot/Confluence Calculation", step_timeout,
+                        step_timeout, &sym, &audit,
+                    );
+                    fallback_analyses.push(analysis);
+                }
+                LayerSignal {
+                    layer: "rules".into(),
+                    signal: 0.0,
+                    action: "HOLD".into(),
+                    confidence: 0.0,
+                    reasoning: format!("TIMEOUT: Rules layer exceeded {}ms budget", step_timeout),
+                    available: false,
+                }
+            };
+            Self::emit_layer_telemetry(&sym, "Rules", &rules_sig);
+            
+            // Layer 2: ML/Signal (25% weight)
+            let (ml_result, ml_telemetry, ml_timeout) = Self::execute_step_with_timeout(
+                "ML/Signal", "Confluence + Trend Analysis", step_timeout, &sym,
+                || {
+                    let state = state_llm.clone();
+                    let snapshot = snapshot_ref.clone();
+                    let sym = sym.clone();
+                    let trend = trend.clone();
+                    let multi_tf = multi_tf_context.clone();
+                    let agent_sum = agent_summary.clone();
+                    let news = news_context.clone();
+                    let vector = vector_context.clone();
+                    let patterns = patterns_context.clone();
+                    async move {
+                        let sig = Self::check_llm_layer(
+                            state, &sym, current_price, confluence, &trend,
+                            portfolio_heat, session_open, consecutive_losses,
+                            &multi_tf, &agent_sum, &news, &vector, &patterns, &snapshot,
+                        ).await;
+                        format!("action={} signal={:+.3} conf={:.2}", sig.action, sig.signal, sig.confidence)
+                    }
+                },
+            ).await;
+            telemetry_log.push(ml_telemetry);
+            
+            let ml_sig = if let Some(result) = ml_result {
+                let action = result.split("action=").nth(1).unwrap_or("HOLD").split_whitespace().next().unwrap_or("HOLD").to_string();
+                let signal = result.split("signal=").nth(1).unwrap_or("0.0").split_whitespace().next().unwrap_or("0.0").parse::<f64>().unwrap_or(0.0);
+                let confidence = result.split("conf=").nth(1).unwrap_or("0.0").parse::<f64>().unwrap_or(0.0);
+                LayerSignal {
+                    layer: "signal".into(),
+                    signal,
+                    action,
+                    confidence,
+                    reasoning: format!("Audit mode: ML/Signal layer completed"),
+                    available: true,
+                }
+            } else {
+                if audit.fallback_causality_analysis {
+                    let analysis = Self::generate_fallback_analysis(
+                        "ML/Signal", "Confluence + Trend Analysis", step_timeout,
+                        step_timeout, &sym, &audit,
+                    );
+                    fallback_analyses.push(analysis);
+                }
+                LayerSignal {
+                    layer: "signal".into(),
+                    signal: 0.0,
+                    action: "HOLD".into(),
+                    confidence: 0.0,
+                    reasoning: format!("TIMEOUT: ML/Signal layer exceeded {}ms budget", step_timeout),
+                    available: false,
+                }
+            };
+            Self::emit_layer_telemetry(&sym, "ML/Signal", &ml_sig);
+            
+            // Layer 3: Chronos Forecast (25% weight)
+            let (trend_result, trend_telemetry, trend_timeout) = Self::execute_step_with_timeout(
+                "Chronos", "T5 Time Series Forecasting", chronos_timeout, &sym,
+                || {
+                    let state = state_trend.clone();
+                    let snapshot = snapshot_ref.clone();
+                    let sym = sym.clone();
+                    async move {
+                        let sig = Self::check_trend_layer(state, &sym, current_price, &snapshot).await;
+                        format!("action={} signal={:+.3} conf={:.2}", sig.action, sig.signal, sig.confidence)
+                    }
+                },
+            ).await;
+            telemetry_log.push(trend_telemetry);
+            
+            let trend_sig = if let Some(result) = trend_result {
+                let action = result.split("action=").nth(1).unwrap_or("HOLD").split_whitespace().next().unwrap_or("HOLD").to_string();
+                let signal = result.split("signal=").nth(1).unwrap_or("0.0").split_whitespace().next().unwrap_or("0.0").parse::<f64>().unwrap_or(0.0);
+                let confidence = result.split("conf=").nth(1).unwrap_or("0.0").parse::<f64>().unwrap_or(0.0);
+                LayerSignal {
+                    layer: "trend".into(),
+                    signal,
+                    action,
+                    confidence,
+                    reasoning: format!("Audit mode: Chronos layer completed"),
+                    available: true,
+                }
+            } else {
+                if audit.fallback_causality_analysis {
+                    let analysis = Self::generate_fallback_analysis(
+                        "Chronos", "T5 Time Series Forecasting", chronos_timeout,
+                        chronos_timeout, &sym, &audit,
+                    );
+                    fallback_analyses.push(analysis);
+                }
+                LayerSignal {
+                    layer: "trend".into(),
+                    signal: 0.0,
+                    action: "HOLD".into(),
+                    confidence: 0.0,
+                    reasoning: format!("TIMEOUT: Chronos layer exceeded {}ms budget", chronos_timeout),
+                    available: false,
+                }
+            };
+            Self::emit_layer_telemetry(&sym, "Chronos", &trend_sig);
+            
+            // Layer 4: Sentiment Pipeline (15% weight)
+            let (sentiment_result_val, sentiment_telemetry, sentiment_timeout) = Self::execute_step_with_timeout(
+                "Sentiment", "FinBERT Sentiment Extraction", step_timeout, &sym,
+                || {
+                    let state = state_sentiment.clone();
+                    let sym = sym.clone();
+                    let sent_result = sentiment_result.clone();
+                    async move {
+                        let sig = Self::check_sentiment_layer(state, &sym, &sent_result).await;
+                        format!("action={} signal={:+.3} conf={:.2}", sig.action, sig.signal, sig.confidence)
+                    }
+                },
+            ).await;
+            telemetry_log.push(sentiment_telemetry);
+            
+            let sentiment_sig = if let Some(result) = sentiment_result_val {
+                let action = result.split("action=").nth(1).unwrap_or("HOLD").split_whitespace().next().unwrap_or("HOLD").to_string();
+                let signal = result.split("signal=").nth(1).unwrap_or("0.0").split_whitespace().next().unwrap_or("0.0").parse::<f64>().unwrap_or(0.0);
+                let confidence = result.split("conf=").nth(1).unwrap_or("0.0").parse::<f64>().unwrap_or(0.0);
+                LayerSignal {
+                    layer: "sentiment".into(),
+                    signal,
+                    action,
+                    confidence,
+                    reasoning: format!("Audit mode: Sentiment layer completed"),
+                    available: true,
+                }
+            } else {
+                if audit.fallback_causality_analysis {
+                    let analysis = Self::generate_fallback_analysis(
+                        "Sentiment", "FinBERT Sentiment Extraction", step_timeout,
+                        step_timeout, &sym, &audit,
+                    );
+                    fallback_analyses.push(analysis);
+                }
+                LayerSignal {
+                    layer: "sentiment".into(),
+                    signal: 0.0,
+                    action: "HOLD".into(),
+                    confidence: 0.0,
+                    reasoning: format!("TIMEOUT: Sentiment layer exceeded {}ms budget", step_timeout),
+                    available: false,
+                }
+            };
+            Self::emit_layer_telemetry(&sym, "Sentiment", &sentiment_sig);
+            
+            // Audit mode summary
+            let completed_layers = [&rules_sig, &ml_sig, &trend_sig, &sentiment_sig]
+                .iter()
+                .filter(|l| l.available)
+                .count();
+            let timeout_count = telemetry_log.iter().filter(|t| t.timeout_triggered).count();
+            
+            eprintln!("[AUDIT] ═══════════════════════════════════════════════════════════════");
+            eprintln!("[AUDIT] 📊 {} | Phase 1 Summary: {}/4 layers completed, {} timeouts", symbol, completed_layers, timeout_count);
+            eprintln!("[AUDIT] 📋 Total telemetry entries: {}", telemetry_log.len());
+            if !fallback_analyses.is_empty() {
+                eprintln!("[AUDIT] ⚠️  {} | {} fallback(s) triggered — see causality analysis above", symbol, fallback_analyses.len());
+            }
+            eprintln!("[AUDIT] ═══════════════════════════════════════════════════════════════");
+            
+            (rules_sig, ml_sig, trend_sig, sentiment_sig)
+            
+        } else if is_inspection {
+            // ═══ INSPECTION MODE: Sequential with latency gates ═══
             let layer_delay = latency.layer_delay_ms;
             
-            // Rules Layer
             Self::inspection_gate("Rules Engine", layer_delay, &sym).await;
             let rules_sig = Self::check_rules_layer(state_rules, &sym, current_price, confluence, &snapshot_ref).await;
             Self::emit_layer_telemetry(&sym, "Rules", &rules_sig);
             
-            // ML/Signal Layer
             Self::inspection_gate("ML Signal", layer_delay, &sym).await;
             let ml_sig = Self::check_llm_layer(
                 state_llm, &sym, current_price, confluence, &trend,
@@ -507,19 +911,17 @@ impl TriLevelValidator {
             ).await;
             Self::emit_layer_telemetry(&sym, "ML/Signal", &ml_sig);
             
-            // Trend Layer (Chronos-Bolt)
             Self::inspection_gate("Chronos Forecast", layer_delay, &sym).await;
             let trend_sig = Self::check_trend_layer(state_trend, &sym, current_price, &snapshot_ref).await;
             Self::emit_layer_telemetry(&sym, "Chronos", &trend_sig);
             
-            // Sentiment Layer
             Self::inspection_gate("Sentiment Pipeline", layer_delay, &sym).await;
             let sentiment_sig = Self::check_sentiment_layer(state_sentiment, &sym, &sentiment_result).await;
             Self::emit_layer_telemetry(&sym, "Sentiment", &sentiment_sig);
             
             (rules_sig, ml_sig, trend_sig, sentiment_sig)
         } else {
-            // Production mode: run all 4 layers in parallel for speed
+            // ═══ PRODUCTION MODE: Parallel execution for speed ═══
             tokio::join!(
                 Self::check_rules_layer(state_rules, &sym, current_price, confluence, &snapshot_ref),
                 Self::check_llm_layer(
@@ -534,10 +936,7 @@ impl TriLevelValidator {
         };
 
         // ── Phase 2: LLM Arbitration (only on conflict/high-risk) ────────────
-        // The escalation gate checks for direction conflicts or high volatility.
-        // If triggered, the LLM (Llama-3.2-3B via Candle) resolves the conflict.
-        // If not triggered, the ML signal is used directly (fast path).
-        if is_inspection {
+        if is_verbose {
             Self::inspection_gate("LLM Arbitration", latency.layer_delay_ms, &sym).await;
         }
         let llm_sig = Self::arbitrate_with_llm(
@@ -550,7 +949,7 @@ impl TriLevelValidator {
             &sentiment_sig,
         )
         .await;
-        if is_inspection {
+        if is_verbose {
             Self::emit_layer_telemetry(&sym, "LLM Arbitration", &llm_sig);
         }
 

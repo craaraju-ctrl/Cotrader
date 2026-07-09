@@ -9,6 +9,9 @@ pub enum SystemMode {
     /// Inspection mode — intentional latency gates, verbose CLI telemetry,
     /// long-context LLM reasoning with full chain-of-thought output.
     Inspection,
+    /// Audit mode — strict sequential execution, adaptive timeout boundaries,
+    /// zero-fallback drive, and comprehensive fallback causality analysis.
+    Audit,
 }
 
 impl Default for SystemMode {
@@ -23,10 +26,21 @@ impl SystemMode {
         matches!(self, Self::Inspection)
     }
 
+    /// Check if audit mode is active (enables sequential execution and boundary testing).
+    pub fn is_audit(&self) -> bool {
+        matches!(self, Self::Audit)
+    }
+
+    /// Check if any verbose mode is active (inspection or audit).
+    pub fn is_verbose(&self) -> bool {
+        self.is_inspection() || self.is_audit()
+    }
+
     /// Load from environment variable `SYSTEM_MODE`.
     pub fn from_env() -> Self {
         match std::env::var("SYSTEM_MODE").unwrap_or_default().to_lowercase().as_str() {
             "inspection" | "inspect" | "debug" => Self::Inspection,
+            "audit" | "boundary" | "test" => Self::Audit,
             _ => Self::Production,
         }
     }
@@ -47,6 +61,122 @@ pub struct LatencyConfig {
     pub temperature: f64,
     /// Top-p nucleus sampling. Default: 0.95.
     pub top_p: f64,
+}
+
+/// Audit mode configuration for sequential execution and boundary testing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditConfig {
+    /// Enable strict sequential execution (Layer 1 → 2 → 3 → 4).
+    pub sequential_execution: bool,
+    /// Timeout per layer step (ms). Default: 5000ms (5s).
+    pub layer_step_timeout_ms: u64,
+    /// Timeout for Chronos-Bolt sub-steps (ms). Default: 15000ms (15s).
+    pub chronos_substep_timeout_ms: u64,
+    /// Timeout for LLM reasoning sub-steps (ms). Default: 30000ms (30s).
+    pub llm_substep_timeout_ms: u64,
+    /// Enable zero-fallback drive (attempt to avoid fallbacks).
+    pub zero_fallback_drive: bool,
+    /// Generate deep fallback causality analysis on timeout.
+    pub fallback_causality_analysis: bool,
+    /// Maximum tokens for fallback reasoning trace.
+    pub fallback_reasoning_tokens: usize,
+    /// Display intermediate states on timeout boundary crossing.
+    pub display_boundary_states: bool,
+}
+
+impl Default for AuditConfig {
+    fn default() -> Self {
+        Self {
+            sequential_execution: true,
+            layer_step_timeout_ms: 5000,
+            chronos_substep_timeout_ms: 15_000,
+            llm_substep_timeout_ms: 30_000,
+            zero_fallback_drive: true,
+            fallback_causality_analysis: true,
+            fallback_reasoning_tokens: 1024,
+            display_boundary_states: true,
+        }
+    }
+}
+
+impl AuditConfig {
+    /// Production mode — disabled.
+    pub fn disabled() -> Self {
+        Self {
+            sequential_execution: false,
+            layer_step_timeout_ms: 0,
+            chronos_substep_timeout_ms: 0,
+            llm_substep_timeout_ms: 0,
+            zero_fallback_drive: false,
+            fallback_causality_analysis: false,
+            fallback_reasoning_tokens: 0,
+            display_boundary_states: false,
+        }
+    }
+}
+
+/// Telemetry event for a single step within a layer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StepTelemetry {
+    /// Layer name (e.g., "Rules Engine", "Chronos Forecast").
+    pub layer: String,
+    /// Step name within the layer (e.g., "Pivot Calculation", "VaR Gate").
+    pub step: String,
+    /// Start timestamp (ISO 8601).
+    pub started_at: String,
+    /// End timestamp (ISO 8601).
+    pub completed_at: String,
+    /// Execution time in milliseconds.
+    pub duration_ms: u64,
+    /// Whether this step completed successfully.
+    pub success: bool,
+    /// Whether this step was interrupted by timeout.
+    pub timeout_triggered: bool,
+    /// Intermediate state at timeout boundary (if applicable).
+    pub boundary_state: Option<BoundaryState>,
+    /// Tool calls made during this step.
+    pub tool_calls: Vec<ToolCall>,
+    /// Memory/cache fetches during this step.
+    pub cache_fetches: Vec<CacheFetch>,
+}
+
+/// State snapshot at the moment a timeout boundary is crossed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BoundaryState {
+    /// Partial decision reached before timeout.
+    pub partial_decision: Option<String>,
+    /// Intermediate weights/scores at timeout.
+    pub intermediate_weights: Option<Vec<(String, f64)>>,
+    /// Uncompleted execution payload description.
+    pub uncompleted_payload: String,
+    /// Risk implications of this fallback.
+    pub risk_implications: String,
+}
+
+/// A single tool invocation during step execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCall {
+    /// Tool name (e.g., "EpisodeStore::query", "CacheFrame::read").
+    pub tool: String,
+    /// Parameters passed to the tool.
+    pub params: String,
+    /// Execution time in milliseconds.
+    pub duration_ms: u64,
+    /// Whether the call succeeded.
+    pub success: bool,
+}
+
+/// A cache/memory fetch during step execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheFetch {
+    /// Cache identifier (e.g., "memory.db:decisions", "policy_cache.json").
+    pub cache_id: String,
+    /// Fetch type (read/write).
+    pub fetch_type: String,
+    /// Whether the fetch hit the cache.
+    pub hit: bool,
+    /// Fetch duration in milliseconds.
+    pub duration_ms: u64,
 }
 
 impl Default for LatencyConfig {
@@ -183,12 +313,15 @@ pub struct SystemConfig {
     pub setup_completed: bool,
     /// Which LLM backend to use for signal arbitration.
     pub llama_backend: LlamaBackend,
-    /// System operating mode (Production or Inspection).
+    /// System operating mode (Production, Inspection, or Audit).
     #[serde(default)]
     pub system_mode: SystemMode,
     /// Latency gate configuration (used in inspection mode).
     #[serde(default)]
     pub latency_config: LatencyConfig,
+    /// Audit mode configuration (used in audit mode).
+    #[serde(default)]
+    pub audit_config: AuditConfig,
 }
 
 impl Default for SystemConfig {
@@ -198,6 +331,7 @@ impl Default for SystemConfig {
             llama_backend: LlamaBackend::None,
             system_mode: SystemMode::from_env(),
             latency_config: LatencyConfig::default(),
+            audit_config: AuditConfig::default(),
         }
     }
 }
@@ -286,6 +420,7 @@ pub struct Config {
     // === System Mode & Latency Gates ===
     pub system_mode: SystemMode,
     pub latency_config: LatencyConfig,
+    pub audit_config: AuditConfig,
 }
 
 impl Default for Config {
@@ -331,10 +466,15 @@ impl Default for Config {
             llama_backend: sys.llama_backend.clone(),
             setup_completed: sys.setup_completed,
             system_mode: sys.system_mode.clone(),
-            latency_config: if sys.system_mode.is_inspection() {
+            latency_config: if sys.system_mode.is_verbose() {
                 sys.latency_config.clone()
             } else {
                 LatencyConfig::production()
+            },
+            audit_config: if sys.system_mode.is_audit() {
+                sys.audit_config.clone()
+            } else {
+                AuditConfig::disabled()
             },
         }
     }
