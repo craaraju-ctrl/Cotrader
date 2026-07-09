@@ -10,6 +10,17 @@ use crate::{
 };
 use cotrader_core::{AgentInput, MarketContext};
 
+/// Local definition of SimilarResult (removed from cotrader-core).
+#[derive(Debug, Clone)]
+pub struct SimilarResult {
+    pub episode_id: String,
+    pub symbol: String,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub similarity: f64,
+    pub summary_text: String,
+    pub regret_score: Option<f64>,
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // EvidenceBuilder — structured evidence accumulation for all agents
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -706,20 +717,8 @@ impl HistorianAgent {
             *r.as_ref().unwrap_or(&crate::types::MarketRegime::Ranging)
         });
 
-        // === VECTOR MEMORY SEARCH ===
-        let mut similar_episodes = Vec::new();
-        {
-            let vm = self.state.agent_memory.vector_memory.read().await;
-            if !vm.is_empty() {
-                let query = format!(
-                    "{} {} price={:.2}",
-                    ctx.symbol, "historical outcome", ctx.current_price
-                );
-                if let Ok(results) = vm.search(&query, 3).await {
-                    similar_episodes = results;
-                }
-            }
-        }
+        // === VECTOR MEMORY SEARCH (removed — dependency deleted) ===
+        let similar_episodes: Vec<SimilarResult> = Vec::new();
 
         // === AGENTMEMORY SEARCH ===
         let mem = cotrader_core::AgentMemoryClient::new();

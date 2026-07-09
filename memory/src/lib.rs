@@ -38,8 +38,6 @@ pub mod cache;
 pub mod client;
 pub mod consolidation;
 pub mod context;
-pub mod embed_cohere;
-pub mod embed_openai;
 pub mod errors;
 pub mod evolution;
 pub mod experts;
@@ -77,7 +75,7 @@ pub use cache::{CachedItem, PolicyCache};
 pub use consolidation::{ConsolidationEngine, DefaultImportanceScorer, FinancialRegretScorer};
 pub use context::ContextManager;
 pub use evolution::{EvolutionConfig, EvolutionEngine, SleepCycleHandle, SleepCycleReport};
-pub use experts::RetrievalExpert;
+pub use experts::{RetrievalExpert, StrategyConfidence, StrategyReference};
 pub use graph::KnowledgeGraph;
 pub use rag::{chunk_text, ChunkStrategy, DummyEmbedder, Embedder, OllamaEmbedder, RagPipeline};
 pub use reasoning::ReasoningEngine;
@@ -89,8 +87,6 @@ pub use types::*;
 pub use vector::*;
 
 pub use client::MemoryClient;
-pub use embed_cohere::CohereEmbedder;
-pub use embed_openai::OpenAIEmbedder;
 pub use llm::{LLMClient, LLMResponse, Message, ToolCall, ToolDefinition};
 pub use resilience::{CircuitBreaker, CircuitState, ResilientClient};
 

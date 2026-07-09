@@ -253,8 +253,7 @@ impl RagPipeline {
     }
 }
 
-pub use crate::embed_cohere::CohereEmbedder;
-pub use crate::embed_openai::OpenAIEmbedder;
+
 
 // ── Ollama Embedder ─────────────────────────────────────────────────────────
 

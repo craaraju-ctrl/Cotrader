@@ -1140,7 +1140,7 @@ async fn upsert_context_block(
     State(state): State<ApiState>,
     Json(body): Json<ContextBlockBody>,
 ) -> Result<impl IntoResponse, AppError> {
-    let mut ctx = state.context.write().await;        let content = body.content.clone();
+    let mut ctx = state.context.write().await;
     let block = ContextBlock {
         block_id: body.block_id,
         label: body.label,
@@ -1148,7 +1148,7 @@ async fn upsert_context_block(
         pinned: body.pinned,
         priority: body.priority.unwrap_or(50),
         max_tokens: body.max_tokens.unwrap_or(1024),
-        current_tokens: content.split_whitespace().count(),
+        current_tokens: 0, // vestigial field, kept for DB schema compatibility
         last_updated: chrono::Utc::now().to_rfc3339(),
         metadata: std::collections::HashMap::new(),
     };
@@ -1196,14 +1196,14 @@ async fn render_context(
 ) -> Result<impl IntoResponse, AppError> {
     let ctx = state.context.read().await;
     let rendered = ctx.render_context();
-    let usage = ctx.token_usage();
-    let budget = ctx.token_budget();
+    let usage = ctx.current_size_bytes();
+    let capacity = ctx.capacity_bytes();
     Ok((
         AxumStatus::OK,
         Json(serde_json::json!({
             "context": rendered,
-            "token_usage": usage,
-            "token_budget": budget,
+            "size_bytes": usage,
+            "capacity_bytes": capacity,
             "max_tokens": ctx.config().max_tokens,
         })),
     ))
@@ -1270,6 +1270,29 @@ async fn system_health(State(state): State<ApiState>) -> Result<impl IntoRespons
             ));
         }
     }
+
+    // Memory segment sizes per tier
+    let mut segment_sizes: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+    for (tier_name, tier_stats) in &stats.tier_breakdown {
+        segment_sizes.insert(tier_name.clone(), serde_json::json!({
+            "record_count": tier_stats.total_records,
+            "avg_importance": tier_stats.average_importance,
+            "total_accesses": tier_stats.total_accesses,
+            "with_embeddings": tier_stats.total_with_embeddings,
+        }));
+    }
+
+    // Star rating distribution from strategy_ratings table (live query)
+    let star_dist = state
+        .store
+        .strategy_rating_distribution()
+        .unwrap_or_default();
+    let star_distribution = serde_json::json!({
+        "SingleStar": star_dist.get("SingleStar").copied().unwrap_or(0),
+        "DoubleStar": star_dist.get("DoubleStar").copied().unwrap_or(0),
+        "TripleStar": star_dist.get("TripleStar").copied().unwrap_or(0),
+    });
+
     Ok((
         AxumStatus::OK,
         Json(serde_json::json!({
@@ -1277,6 +1300,10 @@ async fn system_health(State(state): State<ApiState>) -> Result<impl IntoRespons
             "total_records": stats.total_records,
             "total_across_tiers": stats.total_records,
             "graph_edges": graph_edges,
+            "storage_bytes": stats.storage_bytes,
+            "active_memory_segments": segment_sizes,
+            "star_rating_distribution": star_distribution,
+            "content_type_distribution": stats.content_types,
             "recommendations": recommendations,
         })),
     ))
@@ -1348,6 +1375,7 @@ impl MemoryApi {
             max_ram_entries: 100,
             auto_embed: false,
             vector_dimension,
+            ..Default::default()
         };
         let store = MemoryStore::open(&config).map_err(|e| format!("DB error: {}", e))?;
         let tiered = TieredMemory {
@@ -2939,7 +2967,7 @@ mod tests {
         let (status, rendered) = api_get(&app, "/context/render").await;
         assert_eq!(status, AxumStatus::OK);
         assert!(rendered["context"].as_str().unwrap().contains("PERSONA"));
-        assert!(rendered["token_usage"].as_u64().unwrap() > 0);
+        assert!(rendered["size_bytes"].as_u64().unwrap() > 0);
         assert!(rendered["max_tokens"].as_u64().unwrap() > 0);
 
         // List context blocks
@@ -3072,7 +3100,6 @@ mod tests {
     // ── Pipeline 14: Full Universal Self-Evolving Pipeline ──────────────
 
     #[tokio::test]
-    #[ignore] // Temporarily disabled — needs volatility endpoint fix
     async fn integration_universal_self_evolution() {
         let app = MemoryApi::new(":memory:", "0.0.0.0:0").unwrap().router();
 
@@ -3148,7 +3175,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, AxumStatus::OK);
-        assert!(recalled["recall_count"].as_u64().unwrap() >= 1);
+        assert!(recalled["fact"]["recall_count"].as_i64().unwrap() >= 1);
 
         // Phase 8: Render context
         let (status, ctx) = api_get(&app, "/context/render").await;

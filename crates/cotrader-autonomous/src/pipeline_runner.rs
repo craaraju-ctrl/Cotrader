@@ -30,13 +30,10 @@ pub async fn publish_pipeline_event(
 }
 
 /// Per-symbol cycle dedup: tracks which symbols have an in-flight pipeline run.
-/// If a symbol is already running, skip it instead of queuing (prevents backlog growth).
-/// Uses std::sync::Mutex (not tokio) because Drop is sync and the critical section is tiny.
 static IN_FLIGHT: Lazy<std::sync::Mutex<HashSet<String>>> =
     Lazy::new(|| std::sync::Mutex::new(HashSet::new()));
 
 /// RAII guard that removes a symbol from the IN_FLIGHT set when dropped.
-/// Uses std::sync::Mutex::lock() which blocks briefly but never silently leaks.
 struct InFlightGuard(String);
 impl Drop for InFlightGuard {
     fn drop(&mut self) {
@@ -95,128 +92,60 @@ fn summary_to_report(symbol: &str, summary: &PipelineSummary) -> PipelineRunRepo
     }
 }
 
-async fn fetch_yahoo_ohlcv(
-    client: &reqwest::Client,
-    symbol: &str,
-) -> Result<Vec<OhlcvBar>, Box<dyn std::error::Error + Send + Sync>> {
-    let yahoo_symbol = cotrader_core::yahoo_symbol(symbol);
-    let url = format!(
-        "https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}?interval=1m&range=1d"
-    );
-    let resp: serde_json::Value = client
-        .get(&url)
-        .header(
-            "User-Agent",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
-        )
-        .timeout(Duration::from_secs(10))
-        .send()
-        .await?
-        .json()
-        .await?;
-
-    let result = &resp["chart"]["result"][0];
-    let timestamps: Vec<i64> = result["timestamp"]
-        .as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_i64()).collect())
-        .unwrap_or_default();
-    let quote = &result["indicators"]["quote"][0];
-    let parse_arr = |key: &str| -> Vec<f64> {
-        quote[key]
-            .as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_f64()).collect())
-            .unwrap_or_default()
-    };
-    let opens = parse_arr("open");
-    let highs = parse_arr("high");
-    let lows = parse_arr("low");
-    let closes = parse_arr("close");
-    let volumes = parse_arr("volume");
-
-    let n = timestamps
-        .len()
-        .min(opens.len())
-        .min(highs.len())
-        .min(lows.len())
-        .min(closes.len())
-        .min(volumes.len());
-
-    let mut bars = Vec::with_capacity(n);
-    for i in 0..n {
-        let dt = chrono::DateTime::from_timestamp(timestamps[i], 0).unwrap_or_else(Utc::now);
-        bars.push(OhlcvBar {
-            timestamp: dt.to_rfc3339(),
-            open: opens[i],
-            high: highs[i],
-            low: lows[i],
-            close: closes[i],
-            volume: volumes[i],
-        });
-    }
-    Ok(bars)
-}
-
 /// Ensure OHLCV history + live price exist before running the agentic pipeline.
+/// All data is fetched through Tredo Exchange — the single price gateway.
 pub async fn ensure_market_data(
     symbol: &str,
     client: &reqwest::Client,
     state: &SharedState,
 ) -> Result<f64, String> {
     let sym = normalize_symbol(symbol);
-    let is_crypto = cotrader_core::is_crypto_symbol(&sym);
 
     let bar_count = {
         let history = state.market_data.ohlcv_history.read().await;
         history.get(&sym).map(|b| b.len()).unwrap_or(0)
     };
 
+    // Fetch OHLCV candles from Tredo Exchange
     if bar_count < 20 {
-        let bars = if is_crypto {
-            cotrader_core::fetch_klines(client, &sym, "1m", 100)
-                .await
-                .map_err(|e| format!("Binance klines: {e}"))?
-        } else {
-            fetch_yahoo_ohlcv(client, &sym)
-                .await
-                .map_err(|e| format!("Yahoo OHLCV: {e}"))?
-        };
+        let bars = cotrader_core::fetch_tredo_candles(client, &sym, "1m", 100)
+            .await
+            .unwrap_or_default();
+
         if bars.is_empty() {
-            return Err(format!("No OHLCV bars returned for {sym}"));
+            return Err(format!("Tredo Exchange: no OHLCV bars returned for {sym}"));
         }
         let n = bars.len();
         state.market_data.ohlcv_history.write().await.insert(sym.clone(), bars);
-        println!("[PipelineRunner] Loaded {n} OHLCV bars for {sym}");
+        println!("[PipelineRunner] Loaded {n} OHLCV bars from Tredo Exchange for {sym}");
     }
 
-    let live_price = if is_crypto {
-        cotrader_core::fetch_binance_price(client, &sym)
-            .await
-            .map_err(|e| format!("Binance price: {e}"))?
-    } else {
-        let yahoo_symbol = cotrader_core::yahoo_symbol(&sym);
-        let url = format!(
-            "https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}?interval=1m&range=1d"
-        );
-        let resp: serde_json::Value = client
-            .get(&url)
-            .header("User-Agent", "Mozilla/5.0")
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await
-            .map_err(|e| format!("Yahoo price: {e}"))?
-            .json()
-            .await
-            .map_err(|e| format!("Yahoo parse: {e}"))?;
-        let meta = &resp["chart"]["result"][0]["meta"];
-        // Try regularMarketPrice first; fall back to chartPreviousClose when markets are closed
-        meta["regularMarketPrice"]
-            .as_f64()
-            .or_else(|| meta["chartPreviousClose"].as_f64())
-            .ok_or_else(|| {
-                format!("Yahoo: no price for {sym} (no regularMarketPrice or chartPreviousClose)")
-            })?
+    // Fetch live price from Tredo Exchange
+    // If Tredo is unreachable, fall back to the last OHLCV close price (enables offline testing)
+    let live_price = match cotrader_core::fetch_tredo_price(client, &sym).await {
+        Ok(price) => price,
+        Err(_) => {
+            let fallback = {
+                let history = state.market_data.ohlcv_history.read().await;
+                history.get(&sym).and_then(|b| b.last().map(|b| b.close)).unwrap_or(0.0)
+            };
+            if fallback > 0.0 {
+                println!(
+                    "[PipelineRunner] Tredo unreachable — using last OHLCV close {:.2} for {}",
+                    fallback, sym
+                );
+                fallback
+            } else {
+                return Err(format!(
+                    "No live price from Tredo and no OHLCV history for {sym}"
+                ));
+            }
+        }
     };
 
+    println!("[PipelineRunner] {} live price from Tredo: {:.2}", sym, live_price);
+
+    // Update the latest bar with the live price
     {
         let mut history = state.market_data.ohlcv_history.write().await;
         let hist = history.entry(sym.clone()).or_default();
@@ -283,7 +212,6 @@ pub async fn run_single_quiet(
             };
         }
     }
-    // RAII guard: remove from in-flight set when done (even on panic)
     let _guard = InFlightGuard(sym.clone());
 
     let _permit = match PIPELINE_SEM.acquire().await {
@@ -369,7 +297,6 @@ pub async fn run_batch(
             trades_executed += 1;
         }
         results.push(outcome.report);
-        // Brief pause between symbols to avoid rate limits
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
@@ -389,14 +316,9 @@ pub async fn run_batch(
 /// Configuration for the whitelist run loop.
 #[derive(Debug, Clone)]
 pub struct WhitelistConfig {
-    /// Symbols to scan (e.g., ["BTC", "ETH", "SOL"]). Inner loop iterates these.
     pub symbols: Vec<String>,
-    /// Minimum cooldown between runs of the SAME symbol (seconds).
-    /// E.g., 1800 = 30 minutes between BTC → BTC runs.
     pub cooldown_secs: u64,
-    /// Pause between different symbols (seconds). Prevents rate-limit hammering.
     pub inter_symbol_delay_ms: u64,
-    /// If true, skip symbols currently in cooldown (don't block, just move on).
     pub skip_in_cooldown: bool,
 }
 
@@ -414,9 +336,7 @@ impl Default for WhitelistConfig {
 /// Per-symbol cooldown tracker.
 #[derive(Debug, Clone)]
 pub struct SymbolCooldownTracker {
-    /// Map of symbol → last run timestamp.
     last_run: HashMap<String, DateTime<Utc>>,
-    /// Default cooldown duration.
     cooldown_secs: u64,
 }
 
@@ -428,23 +348,20 @@ impl SymbolCooldownTracker {
         }
     }
 
-    /// Returns true if the symbol is allowed to run (not in cooldown).
     pub fn is_allowed(&self, symbol: &str) -> bool {
         match self.last_run.get(symbol) {
             Some(last) => {
                 let elapsed = (Utc::now() - *last).num_seconds() as u64;
                 elapsed >= self.cooldown_secs
             }
-            None => true, // never run before
+            None => true,
         }
     }
 
-    /// Record that a symbol has just been processed.
     pub fn record_run(&mut self, symbol: &str) {
         self.last_run.insert(symbol.to_string(), Utc::now());
     }
 
-    /// Time remaining until the symbol can run again (seconds). 0 if allowed.
     pub fn remaining_secs(&self, symbol: &str) -> u64 {
         match self.last_run.get(symbol) {
             Some(last) => {
@@ -456,15 +373,7 @@ impl SymbolCooldownTracker {
     }
 }
 
-/// Run the whitelist sequential loop: for each symbol in the whitelist, capture
-/// a single OHLCV snapshot and run it through HardRulesGate + LLM + Kronos
-/// (all 3 layers see identical market data), then execute if passed.
-///
-/// Cooldown is per-symbol: BTC runs once, then ETH runs once, then SOL runs once,
-/// then back to BTC (if cooldown has elapsed).
-///
-/// ## Output
-/// Returns a `BatchPipelineReport` with one result per whitelist symbol per loop.
+/// Run the whitelist sequential loop.
 pub async fn run_whitelist_loop(
     orchestrator: &AutonomousOrchestrator,
     client: &reqwest::Client,
@@ -481,7 +390,6 @@ pub async fn run_whitelist_loop(
             continue;
         }
 
-        // Check cooldown before running
         if config.skip_in_cooldown && !cooldown.is_allowed(&sym) {
             let remaining = cooldown.remaining_secs(&sym);
             println!(
@@ -510,11 +418,9 @@ pub async fn run_whitelist_loop(
             trades_executed += 1;
         }
 
-        // Record the run timestamp for cooldown
         cooldown.record_run(&sym);
         results.push(outcome.report);
 
-        // Brief pause between symbols to avoid rate limits
         if config.inter_symbol_delay_ms > 0 {
             tokio::time::sleep(Duration::from_millis(config.inter_symbol_delay_ms)).await;
         }
@@ -529,15 +435,9 @@ pub async fn run_whitelist_loop(
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// Tests
-// ═══════════════════════════════════════════════════════════════════════════════
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ── SymbolCooldownTracker ──────────────────────────────────────────────
 
     #[test]
     fn test_cooldown_allowed_when_never_run() {
@@ -582,7 +482,6 @@ mod tests {
     #[test]
     fn test_empty_cooldown_tracker_returns_zero_remaining() {
         let tracker = SymbolCooldownTracker::new(300);
-        // No symbols recorded at all
         assert_eq!(tracker.remaining_secs("NONEXISTENT"), 0);
         assert!(tracker.is_allowed("NONEXISTENT"));
     }

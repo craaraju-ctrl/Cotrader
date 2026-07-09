@@ -294,7 +294,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_regime_stability_and_meta_control_risk_squeezing() {
-        let db_store = EpisodeStore::open("file::memory:?cache=shared")
+        // Use unique in-memory DB to avoid lock contention with parallel tests
+        let db_name = format!("file:memdb_{}?mode=memory&cache=private", std::process::id());
+        let db_store = EpisodeStore::open(&db_name)
             .expect("Failed to create in-memory EpisodeStore");
 
         let weight_tuner = AttributionEngine::new(0.10);

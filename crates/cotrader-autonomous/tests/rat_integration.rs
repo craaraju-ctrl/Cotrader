@@ -646,9 +646,11 @@ async fn test_state_sharing_across_groups() {
         Arc::ptr_eq(&orch.risk_psych, &rat.verifier.risk_psych),
         "risk_psych should be shared"
     );
+    // Strategy agent was removed in a previous refactoring;
+    // Executer now contains only portfolio and execution.
     assert!(
-        Arc::ptr_eq(&orch.strategy, &rat.executer.strategy),
-        "strategy should be shared"
+        Arc::ptr_eq(&orch.execution, &rat.executer.execution),
+        "execution should be shared"
     );
 
     // Modify state through one agent and verify it's visible through another
@@ -1063,10 +1065,11 @@ async fn test_cleanup_temp_files() {
         let _ = fs::remove_file(&path2);
     }
     // Clean up shared SQLite db as well
+    let storage = cotrader_core::StorageConfig::default();
     for f in &[
-        "rat_history.db",
-        "rat_history.db-wal",
-        "rat_history.db-shm",
+        &storage.main_db().to_string_lossy().to_string(),
+        &storage.main_db().with_extension("db-wal").to_string_lossy().to_string(),
+        &storage.main_db().with_extension("db-shm").to_string_lossy().to_string(),
     ] {
         if fs::remove_file(f).is_ok() {
             cleaned += 1;

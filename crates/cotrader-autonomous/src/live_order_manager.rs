@@ -25,24 +25,30 @@ use cotrader_core::TradeDirection;
 
 // ── Database Path ────────────────────────────────────────────────────────────
 
-const DEFAULT_DB_PATH: &str = "rat_orders.db";
+/// Returns the default orders DB path from StorageConfig.
+fn default_db_path() -> String {
+    cotrader_core::StorageConfig::default().orders_db().to_string_lossy().to_string()
+}
 
 // ── OrderRecord — Persistent Order State ─────────────────────────────────────
 
 /// A single order tracked through its lifecycle.
+/// NOTE: `qty` and `filled_qty` are `f64` to support fractional quantities
+/// for crypto assets (e.g., 0.062 BTC). The original `i32` design caused
+/// severe oversizing (0.062 BTC → 1 BTC = 16× intended size).
 #[derive(Debug, Clone)]
 pub struct OrderRecord {
     pub broker_order_id: String,
     pub symbol: String,
     pub direction: TradeDirection,
-    pub qty: i32,
+    pub qty: f64,
     pub order_type: OrderType,
     pub price: Option<f64>,
     pub stop_loss: Option<f64>,
     pub take_profit: Option<f64>,
     pub strategy_tag: Option<String>,
     pub status: OrderStatus,
-    pub filled_qty: i32,
+    pub filled_qty: f64,
     pub filled_avg_price: Option<f64>,
     pub error_message: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
@@ -95,7 +101,8 @@ impl std::fmt::Debug for LiveOrderManager {
 impl LiveOrderManager {
     /// Open or create the SQLite database.
     pub fn open(db_path: Option<&str>) -> Result<Self, rusqlite::Error> {
-        let path = db_path.unwrap_or(DEFAULT_DB_PATH);
+        let default_path = default_db_path();
+        let path = db_path.unwrap_or(&default_path);
         let conn = Connection::open(path)?;
 
         // Enable WAL mode for better concurrent access
@@ -105,18 +112,18 @@ impl LiveOrderManager {
         )?;
 
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS live_orders (
+            "            CREATE TABLE IF NOT EXISTS live_orders (
                 broker_order_id TEXT PRIMARY KEY,
                 symbol TEXT NOT NULL,
                 direction TEXT NOT NULL,
-                qty INTEGER NOT NULL,
+                qty REAL NOT NULL,
                 order_type TEXT NOT NULL,
                 price REAL,
                 stop_loss REAL,
                 take_profit REAL,
                 strategy_tag TEXT,
                 status TEXT NOT NULL DEFAULT 'PENDING',
-                filled_qty INTEGER DEFAULT 0,
+                filled_qty REAL DEFAULT 0,
                 filled_avg_price REAL,
                 error_message TEXT,
                 created_at TEXT NOT NULL,
@@ -135,13 +142,18 @@ impl LiveOrderManager {
     }
 
     /// Register a newly-placed order in the tracker.
+    ///
+    /// CRITICAL FIX (fractional qty): qty is now `f64` throughout to support
+    /// crypto fractional sizing (e.g. 0.062 BTC). The old `i32` schema caused
+    /// every fractional order to round to 1 unit, producing 16× oversizing.
+    /// See docs/FIXES.md for the full audit trail.
     #[allow(clippy::too_many_arguments)]
     pub async fn register_order(
         &self,
         broker_order_id: &str,
         symbol: &str,
         direction: TradeDirection,
-        qty: i32,
+        qty: f64,
         order_type: OrderType,
         price: Option<f64>,
         stop_loss: Option<f64>,
@@ -183,7 +195,7 @@ impl LiveOrderManager {
         &self,
         broker_order_id: &str,
         status: OrderStatus,
-        filled_qty: i32,
+        filled_qty: f64,
         filled_avg_price: Option<f64>,
         error_message: Option<String>,
     ) -> Result<(), rusqlite::Error> {
@@ -236,7 +248,7 @@ impl LiveOrderManager {
                 } else {
                     TradeDirection::Short
                 },
-                qty: row.get(3)?,
+                qty: row.get::<_, f64>(3)?,
                 order_type: parse_order_type(&row.get::<_, String>(4)?),
                 price: row.get(5)?,
                 stop_loss: row.get(6)?,
@@ -244,10 +256,10 @@ impl LiveOrderManager {
                 strategy_tag: row.get(8)?,
                 status: parse_order_status(
                     &status_str,
-                    row.get::<_, i32>(10)?,
-                    row.get::<_, i32>(3)?,
+                    row.get::<_, f64>(10)?,
+                    row.get::<_, f64>(3)?,
                 ),
-                filled_qty: row.get(10)?,
+                filled_qty: row.get::<_, f64>(10)?,
                 filled_avg_price: row.get(11)?,
                 error_message: row.get(12)?,
                 created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(13)?)
@@ -291,7 +303,7 @@ impl LiveOrderManager {
                 } else {
                     TradeDirection::Short
                 },
-                qty: row.get(3)?,
+                qty: row.get::<_, f64>(3)?,
                 order_type: parse_order_type(&row.get::<_, String>(4)?),
                 price: row.get(5)?,
                 stop_loss: row.get(6)?,
@@ -299,10 +311,10 @@ impl LiveOrderManager {
                 strategy_tag: row.get(8)?,
                 status: parse_order_status(
                     &status_str,
-                    row.get::<_, i32>(10)?,
-                    row.get::<_, i32>(3)?,
+                    row.get::<_, f64>(10)?,
+                    row.get::<_, f64>(3)?,
                 ),
-                filled_qty: row.get(10)?,
+                filled_qty: row.get::<_, f64>(10)?,
                 filled_avg_price: row.get(11)?,
                 error_message: row.get(12)?,
                 created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(13)?)
@@ -380,9 +392,11 @@ fn parse_order_type(s: &str) -> OrderType {
     }
 }
 
-fn parse_order_status(s: &str, filled_qty: i32, _total_qty: i32) -> OrderStatus {
+fn parse_order_status(s: &str, filled_qty: f64, _total_qty: f64) -> OrderStatus {
     match s {
         "PENDING" | "ACCEPTED" => OrderStatus::Pending,
+        // NOTE: filled_qty is f64 (supports fractional crypto quantities).
+        // The actual filled amount is tracked in OrderRecord.filled_qty.
         "PARTIALLY_FILLED" => OrderStatus::PartiallyFilled { filled_qty },
         "FILLED" => OrderStatus::Filled,
         "CANCELLED" | "EXPIRED" => OrderStatus::Cancelled,
@@ -408,7 +422,7 @@ mod tests {
                 "ORD-001",
                 "BTC",
                 TradeDirection::Long,
-                1,
+                1.0,
                 OrderType::Market,
                 Some(50000.0),
                 Some(49000.0),
@@ -422,7 +436,7 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].broker_order_id, "ORD-001");
         assert_eq!(pending[0].symbol, "BTC");
-        assert_eq!(pending[0].qty, 1);
+        assert_eq!(pending[0].qty, 1.0);
     }
 
     #[tokio::test]
@@ -434,7 +448,7 @@ mod tests {
                 "ORD-002",
                 "ETH",
                 TradeDirection::Long,
-                2,
+                2.0,
                 OrderType::Market,
                 None,
                 None,
@@ -445,7 +459,7 @@ mod tests {
             .unwrap();
 
         manager
-            .update_status("ORD-002", OrderStatus::Filled, 2, Some(3000.0), None)
+            .update_status("ORD-002", OrderStatus::Filled, 2.0, Some(3000.0), None)
             .await
             .unwrap();
 
@@ -462,7 +476,7 @@ mod tests {
                 "ORD-003",
                 "SOL",
                 TradeDirection::Short,
-                5,
+                5.0,
                 OrderType::Limit,
                 Some(150.0),
                 None,
@@ -478,7 +492,7 @@ mod tests {
                 OrderStatus::Rejected {
                     reason: "Insufficient balance".to_string(),
                 },
-                0,
+                0.0,
                 None,
                 Some("Insufficient balance".to_string()),
             )
@@ -501,7 +515,7 @@ mod tests {
                     &format!("ORD-R{}", i),
                     "BTC",
                     TradeDirection::Long,
-                    1,
+                    1.0,
                     OrderType::Market,
                     None,
                     None,
@@ -516,7 +530,7 @@ mod tests {
                     OrderStatus::Rejected {
                         reason: "risk_check".to_string(),
                     },
-                    0,
+                    0.0,
                     None,
                     Some("risk_check".to_string()),
                 )
@@ -533,7 +547,7 @@ mod tests {
                 "ORD-FILL",
                 "BTC",
                 TradeDirection::Long,
-                1,
+                1.0,
                 OrderType::Market,
                 None,
                 None,
@@ -543,7 +557,7 @@ mod tests {
             .await
             .unwrap();
         manager
-            .update_status("ORD-FILL", OrderStatus::Filled, 1, Some(50000.0), None)
+            .update_status("ORD-FILL", OrderStatus::Filled, 1.0, Some(50000.0), None)
             .await
             .unwrap();
 
@@ -560,7 +574,7 @@ mod tests {
                 "ORD-1",
                 "BTC",
                 TradeDirection::Long,
-                1,
+                1.0,
                 OrderType::Market,
                 None,
                 None,
@@ -574,7 +588,7 @@ mod tests {
                 "ORD-2",
                 "ETH",
                 TradeDirection::Long,
-                1,
+                1.0,
                 OrderType::Market,
                 None,
                 None,
@@ -590,6 +604,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_fractional_qty_crypto() {
+        // CRITICAL TEST: Crypto fractional quantities (e.g., 0.062 BTC)
+        // The old `i32` schema rounded this to 1 BTC = 16× oversizing.
+        // The f64 fix ensures fractional qty is stored and retrieved accurately.
+        let manager = LiveOrderManager::open(Some(":memory:")).unwrap();
+
+        // Register a fractional order like 0.062 BTC
+        manager
+            .register_order(
+                "ORD-FRAC-001",
+                "BTC",
+                TradeDirection::Long,
+                0.062, // fractional crypto qty
+                OrderType::Market,
+                Some(65000.0),
+                Some(64000.0),
+                Some(68000.0),
+                Some("fractional_test".to_string()),
+            )
+            .await
+            .unwrap();
+
+        let pending = manager.get_pending_orders().await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].broker_order_id, "ORD-FRAC-001");
+        assert!(
+            (pending[0].qty - 0.062).abs() < 1e-10,
+            "Fractional qty must be preserved exactly. Expected 0.062, got {}",
+            pending[0].qty
+        );
+        assert!(
+            pending[0].qty < 0.5,
+            "Fractional qty {} must remain fractional, not rounded up to 1",
+            pending[0].qty
+        );
+
+        // Update with fractional fill
+        manager
+            .update_status("ORD-FRAC-001", OrderStatus::Filled, 0.062, Some(65000.0), None)
+            .await
+            .unwrap();
+
+        // Verify the order is no longer pending (terminal state)
+        let all_orders = manager.get_orders_for_symbol("BTC", 24).await.unwrap();
+        assert!(!all_orders.is_empty());
+        let order = &all_orders[0];
+        assert!(
+            (order.filled_qty - 0.062).abs() < 1e-10,
+            "Filled fractional qty must be preserved. Expected 0.062, got {}",
+            order.filled_qty
+        );
+    }
+
+    #[tokio::test]
     async fn test_prune_old_orders() {
         let manager = LiveOrderManager::open(Some(":memory:")).unwrap();
 
@@ -598,7 +666,7 @@ mod tests {
                 "OLD",
                 "BTC",
                 TradeDirection::Long,
-                1,
+                1.0,
                 OrderType::Market,
                 None,
                 None,
@@ -612,7 +680,7 @@ mod tests {
                 "NEW",
                 "ETH",
                 TradeDirection::Long,
-                1,
+                1.0,
                 OrderType::Market,
                 None,
                 None,

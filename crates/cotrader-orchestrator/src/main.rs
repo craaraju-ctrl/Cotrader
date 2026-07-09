@@ -304,8 +304,8 @@ async fn get_system_health(State(state): State<WebState>) -> impl axum::response
     let manager = state.loop_manager.lock().await;
     let running = manager.is_running().await;
 
-    let current_model = state.orchestrator.state.io.llm.get_model();
-    let ollama_running = state.orchestrator.state.io.llm.is_ollama_running().await;
+    let current_model = "ML-only".to_string();
+    let ollama_running = false;
 
     Json(serde_json::json!({
         "kronos": kronos_up,
@@ -319,71 +319,8 @@ async fn get_system_health(State(state): State<WebState>) -> impl axum::response
 // ── LLM Model Management Endpoints ──────────────────────────────────────────
 
 async fn get_available_models(State(state): State<WebState>) -> impl axum::response::IntoResponse {
-    let llm = state.orchestrator.state.io.llm.clone();
-    // Use blocking for simplicity in API call
-    let client = reqwest::Client::new();
-    let endpoint = llm.endpoint.clone();
-
-    let base_url = endpoint
-        .replace("/api/generate", "")
-        .replace("/api/chat", "");
-    let res = client
-        .get(format!("{}/api/tags", base_url))
-        .timeout(Duration::from_secs(10))
-        .send()
-        .await;
-
-    match res {
-        Ok(resp) if resp.status().is_success() => {
-            #[derive(serde::Deserialize)]
-            struct OllamaTagsResponse {
-                models: Vec<ModelInfo>,
-            }
-            #[derive(serde::Deserialize)]
-            struct ModelInfo {
-                name: String,
-                size: Option<u64>,
-                modified_at: Option<String>,
-            }
-
-            if let Ok(tags_res) = resp.json::<OllamaTagsResponse>().await {
-                let models: Vec<serde_json::Value> = tags_res
-                    .models
-                    .into_iter()
-                    .map(|m| {
-                        let size_str = m.size.map(|s| {
-                            if s > 1_000_000_000 {
-                                format!("{:.1}GB", s as f64 / 1_000_000_000.0)
-                            } else if s > 1_000_000 {
-                                format!("{:.1}MB", s as f64 / 1_000_000.0)
-                            } else {
-                                format!("{}B", s)
-                            }
-                        });
-                        serde_json::json!({
-                            "name": m.name,
-                            "size": size_str,
-                            "modified": m.modified_at,
-                            "is_local": true
-                        })
-                    })
-                    .collect();
-                return Json(serde_json::json!({
-                    "success": true,
-                    "current_model": llm.get_model(),
-                    "models": models
-                }));
-            }
-        }
-        _ => {}
-    }
-
-    Json(serde_json::json!({
-        "success": false,
-        "error": "Failed to fetch models from Ollama. Is Ollama running?",
-        "current_model": llm.get_model(),
-        "models": []
-    }))
+    // LLM removed — return empty list
+    Json(serde_json::json!({"models": [], "current_model": "ML-only"}))
 }
 
 #[derive(serde::Deserialize)]
@@ -408,7 +345,7 @@ async fn set_llm_model(
 
     // Try to fetch models to validate
     let client = reqwest::Client::new();
-    let endpoint = state.orchestrator.state.io.llm.endpoint.clone();
+    let endpoint = "http://localhost:11434";
     let base_url = endpoint
         .replace("/api/generate", "")
         .replace("/api/chat", "");
@@ -450,7 +387,7 @@ async fn set_llm_model(
     }
 
     // Record the model change for COT logging
-    let old_model = state.orchestrator.state.io.llm.get_model();
+    let old_model = "ML-only";
     // Note: The model is already stored on LlmExecutor and used directly.
     // The env var approach was removed in favor of passing the model through
     // the executor's state. A restart is still needed for the new model to take effect.
@@ -1341,17 +1278,16 @@ async fn get_crypto_prices(
     let mut results = serde_json::Map::new();
 
     if exchange == "binance" {
-        let sym_refs: Vec<&str> = symbols.iter().map(String::as_str).collect();
-        match cotrader_core::fetch_tickers_24hr_batch(&client, &sym_refs).await {
-            Ok(tickers) => {
-                for ticker in &tickers {
+        for sym in &symbols {
+            match cotrader_core::fetch_tredo_ticker_24hr(&client, sym).await {
+                Ok(ticker) => {
                     results.insert(
-                        ticker.base_symbol.clone(),
-                        cotrader_core::ticker_to_api_json(ticker, "binance"),
+                        sym.clone(),
+                        ticker,
                     );
                 }
+                Err(e) => eprintln!("[API] Binance ticker failed for {}: {e}", sym),
             }
-            Err(e) => eprintln!("[API] Binance batch ticker failed: {e}"),
         }
         for sym in &symbols {
             if results.contains_key(sym) {
@@ -1551,18 +1487,13 @@ async fn get_all_prices(State(state): State<WebState>) -> impl axum::response::I
         .map(String::as_str)
         .collect();
 
-    // Crypto: batch from Binance (fast, single API call)
+    // Crypto: fetch from Tredo one by one
     if !crypto_syms.is_empty() {
-        if let Ok(tickers) = cotrader_core::fetch_tickers_24hr_batch(&client, &crypto_syms).await {
-            for ticker in &tickers {
+        for sym in &crypto_syms {
+            if let Ok(ticker) = cotrader_core::fetch_tredo_ticker_24hr(&client, sym).await {
                 results.insert(
-                    ticker.base_symbol.clone(),
-                    serde_json::json!({
-                        "price": ticker.price,
-                        "change_pct": ticker.change_pct_24h,
-                        "volume": format!("{:.1}K", ticker.volume_24h / 1000.0),
-                        "exchange": "binance",
-                    }),
+                    sym.to_string(),
+                    ticker,
                 );
             }
         }
@@ -1803,19 +1734,19 @@ async fn main() {
         .init();
 
     // ── PID Lock File: Prevent Duplicate Orchestrator Instances ──────
-    // Writes the current PID to /tmp/rat-orchestrator.pid on startup.
+    // Writes the current PID to ~/.rat/orchestrator.pid on startup.
     // If the file already exists and the owning process is alive, exits with an
     // error message pointing the user to the running instance.
     //
     // On clean shutdown the lock file is removed after graceful_shutdown()
     // completes. On panic, the custom panic hook (below) cleans it up.
     {
-        let lock_path = std::path::Path::new("/tmp/rat-orchestrator.pid");
+        let lock_path = cotrader_core::config::SystemConfig::rat_dir().join("orchestrator.pid");
         let this_pid = std::process::id();
 
         if lock_path.exists() {
             // Read the PID stored in the lock file
-            let stale_pid: u32 = match std::fs::read_to_string(lock_path) {
+            let stale_pid: u32 = match std::fs::read_to_string(&lock_path) {
                 Ok(s) => s.trim().parse().unwrap_or(0),
                 Err(_) => 0,
             };
@@ -1843,13 +1774,13 @@ async fn main() {
                 std::process::exit(1);
             } else if !alive && stale_pid > 0 {
                 // Stale lock — clean it up
-                let _ = std::fs::remove_file(lock_path);
+                let _ = std::fs::remove_file(&lock_path);
                 info!("Removed stale PID lock from dead process {}", stale_pid);
             }
         }
 
         // Write our PID
-        if let Err(e) = std::fs::write(lock_path, this_pid.to_string()) {
+        if let Err(e) = std::fs::write(&lock_path, this_pid.to_string()) {
             warn!(error = %e, "Failed to write PID lock file — continuing anyway");
         } else {
             info!(pid = this_pid, path = %lock_path.display(), "PID lock written");
@@ -1870,7 +1801,8 @@ async fn main() {
             .unwrap_or_else(|| "unknown location".to_string());
         eprintln!("💥 [PANIC] {} at {} — SYSTEM CRASHED", msg, location);
         // Clean up PID lock on panic
-        let _ = std::fs::remove_file("/tmp/rat-orchestrator.pid");
+        let lock_path = cotrader_core::config::SystemConfig::rat_dir().join("orchestrator.pid");
+        let _ = std::fs::remove_file(lock_path);
     }));
 
     println!("╔══════════════════════════════════════════════════════╗");
@@ -1895,8 +1827,7 @@ async fn main() {
 
     // Log LLM status — actual probing happens on each call
     {
-        let llm = &orchestrator.state.io.llm;
-        info!("LLM configured: {} @ {} (probes live on each call)", llm.get_model(), llm.endpoint);
+        info!("LLM removed: system runs on ML + rules only");
     }
 
     // === NEW: Initialize the global OutcomeProcessor for self-evolution ===
@@ -2074,8 +2005,8 @@ async fn main() {
     // selector models after accumulating enough trade data (50+ new episodes).
     // Models are saved to data/models/ and hot-loaded by MLEngine on next inference.
     {
-        let models_dir = std::path::PathBuf::from("data/models");
-        let db_path = std::path::PathBuf::from("rat_history.db");
+        let models_dir = cotrader_core::config::StorageConfig::default().model_dir();
+        let db_path = cotrader_core::config::StorageConfig::default().main_db();
         cotrader_ml::start_background_ml_training(models_dir, db_path);
     }
 
@@ -2097,7 +2028,7 @@ async fn main() {
                     .await
                     .is_ok();
 
-                let ollama_up = state_for_metrics.io.llm.is_ollama_running().await;
+                let ollama_up = false;
                 let running = {
                     let p = state_for_metrics.portfolio_store.portfolio.read().await;
                     p.trading_enabled
@@ -2191,7 +2122,7 @@ async fn main() {
                             .update_status(
                                 &order.broker_order_id,
                                 cotrader_core::paper_engine::OrderStatus::Expired,
-                                0,
+                                0.0,
                                 None,
                                 Some("Timed out".to_string()),
                             )
@@ -2218,7 +2149,7 @@ async fn main() {
                                 ) {
                                     order.qty
                                 } else {
-                                    0
+                                    0.0
                                 };
                                 let _ = state_for_orders
                                     .portfolio_store.live_order_manager
@@ -2581,6 +2512,7 @@ async fn main() {
     graceful_shutdown(&orchestrator).await;
 
     // Clean up PID lock after all state is saved
-    let _ = std::fs::remove_file("/tmp/rat-orchestrator.pid");
+    let lock_path = cotrader_core::config::SystemConfig::rat_dir().join("orchestrator.pid");
+    let _ = std::fs::remove_file(lock_path);
     info!("PID lock removed");
 }

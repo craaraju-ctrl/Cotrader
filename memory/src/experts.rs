@@ -6,6 +6,85 @@ use crate::store::MemoryStore;
 use crate::types::{MemoryRecord, SearchResult, TradingRelation};
 use crate::vector::cosine_similarity;
 
+/// Strategy confidence rating (star-rating system).
+/// Stamped on successful trade path executions by FinancialRegretScorer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum StrategyConfidence {
+    /// Single star (★) — Marginal confidence, weak signal convergence
+    SingleStar = 1,
+    /// Double star (★★) — Moderate confidence, multiple indicators align
+    DoubleStar = 2,
+    /// Triple star (★★★) — High confidence, strong confluence
+    TripleStar = 3,
+}
+
+impl StrategyConfidence {
+    /// Numeric weight for blending into confidence score matrix.
+    pub fn weight(&self) -> f64 {
+        match self {
+            Self::SingleStar => 1.0,
+            Self::DoubleStar => 2.0,
+            Self::TripleStar => 3.0,
+        }
+    }
+
+    /// Normalize to 0.0–1.0 range for use as a blending factor.
+    pub fn normalized_score(&self) -> f64 {
+        self.weight() / 3.0
+    }
+
+    /// Derive rating from a raw importance score (0.0–1.0).
+    pub fn from_importance(importance: f64) -> Self {
+        if importance >= 0.7 {
+            Self::TripleStar
+        } else if importance >= 0.4 {
+            Self::DoubleStar
+        } else {
+            Self::SingleStar
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::SingleStar => "★",
+            Self::DoubleStar => "★★",
+            Self::TripleStar => "★★★",
+        }
+    }
+
+    /// Return the tier name as a static string for DB storage and health queries.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::SingleStar => "SingleStar",
+            Self::DoubleStar => "DoubleStar",
+            Self::TripleStar => "TripleStar",
+        }
+    }
+}
+
+impl std::fmt::Display for StrategyConfidence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.label())
+    }
+}
+
+/// An isolated reference parameter returned during queries.
+/// Used ONLY as historical confidence score weights matrix,
+/// NOT as a hard override or final execution signal.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct StrategyReference {
+    /// The star rating for this historical sequence
+    pub confidence: StrategyConfidence,
+    /// The raw importance score that produced this rating
+    pub raw_importance: f64,
+    /// The namespace/market this rating is associated with
+    pub namespace_id: String,
+    /// Number of historical records contributing to this rating
+    pub sample_size: u64,
+    /// The final blended score (combines star weight with current volatility)
+    pub blended_score: f64,
+}
+
 /// Expert specialized in hybrid memory retrieval (vector + graph + staleness).
 pub struct RetrievalExpert {
     pub store: MemoryStore,

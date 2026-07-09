@@ -6,7 +6,7 @@ use std::error::Error;
 use cotrader_core::{
     calculate_confluence_score, calculate_pivot_points, detect_advanced_patterns, detect_patterns,
     detect_patterns_multi_tf, format_advanced_patterns, format_patterns, is_in_trading_session,
-    Agent, AgentInput, AgentOutput, AgentTier, KronosForecastRequest, KronosForecastTool,
+    Agent, AgentInput, AgentOutput, AgentTier,
     MarketContext, MultiTfPatternConfirmation, OhlcvBar, SkillVote, TrendDirection,
 };
 
@@ -19,9 +19,8 @@ impl MarketIntelligenceAgent {
         Self { state }
     }
 
-    /// Run Kronos forecast + pivot/confluence analysis for a symbol.
+    /// Run market analysis: trend + pivot/confluence analysis for a symbol.
     /// Uses the real OHLCV history from SharedState (fetched from Binance/Yahoo).
-    /// Stores the full Kronos forecast JSON in SharedState.last_forecast for Phase 5 (LLM).
     pub async fn analyze_market(
         &self,
         symbol: &str,
@@ -71,151 +70,32 @@ impl MarketIntelligenceAgent {
         let low = price * 0.985;
         let prev_close = price * 0.998;
 
-        // --- Kronos Forecast Service ---
-        let kronos_client = KronosForecastTool::new(self.state.io.config.kronos_service_url.clone());
-
-        // Read real OHLCV history from SharedState (fetched by orchestrator from Binance/Yahoo)
-        let ohlcv_for_kronos: Vec<OhlcvBar> = {
-            let history = self.state.market_data.ohlcv_history.read().await;
-            history.get(symbol).cloned().unwrap_or_default()
-        };
-
-        // Fallback: if no history available, build a single bar from current price
-        let sample_ohlcv = if ohlcv_for_kronos.is_empty() {
-            vec![OhlcvBar {
-                timestamp: Utc::now().to_rfc3339(),
-                open: prev_close,
-                high,
-                low,
-                close: price,
-                volume: 100_000.0,
-            }]
-        } else {
-            ohlcv_for_kronos
-        };
-
-        let pred_len = if sample_ohlcv.len() >= 10 { 10 } else { 5 };
-
-        println!(
-            "[MarketIntelligence] Feeding {} OHLCV bars to Kronos for {}",
-            sample_ohlcv.len(),
-            symbol
-        );
-
-        let forecast_req = KronosForecastRequest {
-            symbol: symbol.to_string(),
-            ohlcv: sample_ohlcv.clone(),
-            pred_len,
-            temperature: 0.8,
-            top_p: 0.9,
-            sample_count: 1,
-        };
-
+        // --- Trend Calculation from OHLCV history ---
         let mut trend_direction = None;
-        let mut forecast_summary = String::from("No forecast available");
+        let mut trend_summary = String::from("No trend data");
 
-        match kronos_client.forecast(forecast_req).await {
-            Ok(resp) => {
-                // Summarise the 5-bar forecast for the LLM prompt
-                let closes: Vec<f64> = resp
-                    .forecasts
-                    .iter()
-                    .filter_map(|f| f.get("close").and_then(|c| c.as_f64()))
-                    .collect();
+        {
+            let history = self.state.market_data.ohlcv_history.read().await;
+            if let Some(bars) = history.get(symbol) {
+                if bars.len() >= 10 {
+                    let recent_closes: Vec<f64> = bars.iter().rev().take(10).map(|b| b.close).collect();
+                    let oldest = recent_closes.last().copied().unwrap_or(price);
+                    let newest = recent_closes.first().copied().unwrap_or(price);
+                    let change_pct = (newest - oldest) / oldest * 100.0;
 
-                let mut pred_close_val = 0.0_f64;
-                let mut pct_change_val = 0.0_f64;
-                if let Some(&pred_close) = closes.last() {
-                    pred_close_val = pred_close;
-                    pct_change_val = (pred_close - price) / price * 100.0;
-                    println!(
-                        "[MarketIntelligence] Kronos predicted close for {}: {:.2} (current: {:.2})",
-                        symbol, pred_close, price
-                    );
-
-                    trend_direction = Some(if pred_close > price {
+                    trend_direction = Some(if change_pct > 0.5 {
                         TrendDirection::Bullish
-                    } else if pred_close < price {
+                    } else if change_pct < -0.5 {
                         TrendDirection::Bearish
                     } else {
                         TrendDirection::Neutral
                     });
 
-                    forecast_summary = format!(
-                        "Predicts {:.2} in 5 bars ({:+.2}%). Closes: {}",
-                        pred_close,
-                        pct_change_val,
-                        closes
-                            .iter()
-                            .map(|c| format!("{:.2}", c))
-                            .collect::<Vec<_>>()
-                            .join(", ")
+                    trend_summary = format!(
+                        "10-bar trend: {:+.2}%",
+                        change_pct
                     );
                 }
-
-                // Store full forecast JSON for Phase 5 (StrategyDecisionAgent)
-                {
-                    let mut last = self.state.market_data.last_forecast.write().await;
-                    *last = Some(serde_json::json!({
-                        "symbol": symbol,
-                        "forecasts": resp.forecasts,
-                        "summary": forecast_summary.clone(),
-                    }));
-                }
-
-                // Track Kronos forecast decision in communication log with chain-of-reasoning
-                self.state
-                    .push_agent_decision(
-                        AgentDecision::new(
-                            "Kronos",
-                            symbol,
-                            DecisionVerdict::Pass {
-                                reason: forecast_summary.clone(),
-                            },
-                        )
-                        .with_evidence(vec![
-                            format!("predicted_close: {:.2}", pred_close_val),
-                            format!("pct_change: {:+.2}%", pct_change_val),
-                            format!("current_price: {:.2}", price),
-                            format!("bars_fed: {}", sample_ohlcv.len()),
-                            format!(
-                                "closes: {}",
-                                closes
-                                    .iter()
-                                    .map(|c| format!("{:.2}", c))
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            ),
-                        ])
-                        .addressed_to("StrategyDecision"),
-                    )
-                    .await;
-            }
-            Err(e) => {
-                println!(
-                    "[MarketIntelligence] Kronos call failed: {}. Defaulting to Neutral.",
-                    e
-                );
-                let mut last = self.state.market_data.last_forecast.write().await;
-                *last = None;
-                // Track Kronos failure in communication log
-                self.state
-                    .push_agent_decision(
-                        AgentDecision::new(
-                            "Kronos",
-                            symbol,
-                            DecisionVerdict::Warn {
-                                reason: format!("Kronos forecast failed: {}", e),
-                            },
-                        )
-                        .with_evidence(vec![
-                            format!("current_price: {:.2}", price),
-                            format!("bars_fed: {}", sample_ohlcv.len()),
-                            format!("fallback: Neutral"),
-                        ])
-                        .addressed_to("StrategyDecision"),
-                    )
-                    .await;
             }
         }
 
@@ -420,7 +300,7 @@ impl MarketIntelligenceAgent {
             symbol, price, pivots.pivot, pivots.r1, pivots.s1,
             confluence * 100.0,
             if session_valid { "VALID" } else { "INVALID" },
-            forecast_summary
+            trend_summary
         );
 
         // ── Candlestick Pattern Detection (Single-TF on 1m) ─────────────────

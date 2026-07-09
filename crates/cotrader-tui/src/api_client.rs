@@ -84,7 +84,7 @@ pub enum ApiMessage {
 pub struct TradeData {
     pub symbol: String,
     pub direction: String,
-    pub qty: i32,
+    pub qty: f64,
     pub entry_price: f64,
     pub exit_price: f64,
     pub realized_pnl: f64,
@@ -740,7 +740,7 @@ fn parse_trades_from_portfolio(json: &Value) -> Vec<TradeData> {
                 direction: t.get("direction").and_then(|v| v.as_str())
                     .or_else(|| t.get("side").and_then(|v| v.as_str()))
                     .unwrap_or("?").to_string(),
-                qty: t.get("qty").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                qty: t.get("qty").and_then(|v| v.as_f64()).unwrap_or(0.0),
                 entry_price: t.get("entry_price").and_then(|v| v.as_f64())
                     .or_else(|| t.get("price").and_then(|v| v.as_f64()))
                     .unwrap_or(0.0),
@@ -935,7 +935,7 @@ fn parse_trades(json: &Value) -> Vec<TradeData> {
             direction: t.get("direction").and_then(|v| v.as_str())
                 .or_else(|| t.get("side").and_then(|v| v.as_str()))
                 .unwrap_or("?").to_string(),
-            qty: t.get("qty").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+            qty: t.get("qty").and_then(|v| v.as_f64()).unwrap_or(0.0),
             entry_price: t.get("entry_price").and_then(|v| v.as_f64())
                 .or_else(|| t.get("price").and_then(|v| v.as_f64()))
                 .unwrap_or(0.0),
@@ -1368,18 +1368,44 @@ pub fn process_message(msg: ApiMessage, app: &mut crate::app::App) {
                             }
                         }
                     }
-                    Some("pipeline_event") => {
+                    Some("pipeline_event") | Some("signal_event") => {
                         // Pipeline lifecycle event from EventBus bridge.
-                        // Contains the full signal data (action, symbol, prices, confidence, reasoning).
-                        // Populate BOTH the COT log (for Agents tab) AND the dedicated pipeline panel.
-                        let action = json.get("action").and_then(|v| v.as_str()).unwrap_or("HOLD").to_string();
-                        let symbol = json.get("symbol").and_then(|v| v.as_str()).unwrap_or("?").to_string();
-                        let confidence = json.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                        let reasoning = json.get("reasoning").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        let source = json.get("source").and_then(|v| v.as_str()).unwrap_or("pipeline").to_string();
-                        let ts = json.get("timestamp").and_then(|v| v.as_i64())
-                            .map(|ts| ts.to_string())
-                            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+                        // Supports both the older flat format and the newer nested RatEvent format:
+                        //   signal_event: {"type": "signal_event", "event": {SignalEvent}}
+                        //   pipeline_event: {"action": "BUY", "symbol": "BTC", ...}
+
+                        // Determine which format and extract fields
+                        let (action, symbol, confidence, reasoning, source, ts) =
+                            if let Some(ev) = json.get("event") {
+                                // New format: nested RatEvent::Signal structure
+                                let action = ev.get("action").and_then(|v| v.as_str()).unwrap_or("HOLD").to_string();
+                                let symbol = ev.get("symbol").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+                                let confidence = ev.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                let reasoning = ev.get("reasoning").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                let source = ev.get("source").and_then(|v| v.as_str()).unwrap_or("pipeline").to_string();
+                                let ts = ev.get("timestamp_micros").and_then(|v| v.as_i64())
+                                    .map(|micros| {
+                                        // Convert microsecond timestamp to HH:MM:SS format
+                                        let secs = micros / 1_000_000;
+                                        let hours = (secs / 3600) % 24;
+                                        let minutes = (secs / 60) % 60;
+                                        let seconds = secs % 60;
+                                        format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
+                                    })
+                                    .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+                                (action, symbol, confidence, reasoning, source, ts)
+                            } else {
+                                // Old format: flat fields at top level
+                                let action = json.get("action").and_then(|v| v.as_str()).unwrap_or("HOLD").to_string();
+                                let symbol = json.get("symbol").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+                                let confidence = json.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                let reasoning = json.get("reasoning").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                let source = json.get("source").and_then(|v| v.as_str()).unwrap_or("pipeline").to_string();
+                                let ts = json.get("timestamp").and_then(|v| v.as_i64())
+                                    .map(|ts| ts.to_string())
+                                    .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+                                (action, symbol, confidence, reasoning, source, ts)
+                            };
 
                         // 1. Push to dedicated pipeline events panel
                         let pipeline_entry = crate::app::PipelineEvent {

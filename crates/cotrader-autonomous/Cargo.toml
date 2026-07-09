@@ -24,7 +24,11 @@ serde_json = "1.0"
 rusqlite = { version = "0.39", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
 once_cell = "1"
-reqwest = { version = "0.11", features = ["json"] }
+reqwest = { version = "0.11", features = ["json", "blocking"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+hex = "0.4"
+toml = "0.8"
 
 [dev-dependencies]
 cotrader-broker-cotrader = { path = "../cotrader-broker-cotrader" }

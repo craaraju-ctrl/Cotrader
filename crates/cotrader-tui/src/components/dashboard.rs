@@ -5,10 +5,13 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Gauge, Paragraph, Row, Table};
 use ratatui::Frame;
+use std::collections::VecDeque;
 
-use crate::app::App;
+use crate::app::{App, PipelineEvent};
 use crate::components::Component;
 use crate::theme::THEME;
+
+const MAX_VISIBLE_SIGNALS: usize = 5;
 
 pub struct DashboardComponent;
 
@@ -20,14 +23,14 @@ impl Component for DashboardComponent {
                 Constraint::Length(8),   // Portfolio summary cards
                 Constraint::Min(8),     // Market overview table
                 Constraint::Length(5),   // Risk metrics
-                Constraint::Length(6),   // Quick actions / status
+                Constraint::Length(10),  // Signal events log
             ])
             .split(area);
 
         self.render_portfolio_cards(frame, chunks[0], app);
         self.render_market_table(frame, chunks[1], app);
         self.render_risk_metrics(frame, chunks[2], app);
-        self.render_status_bar(frame, chunks[3], app);
+        self.render_signal_events(frame, chunks[3], app);
     }
 }
 
@@ -175,7 +178,7 @@ impl DashboardComponent {
 
                 Row::new(vec![
                     ratatui::widgets::Cell::from(Span::styled(
-                        sym.clone(),
+                        (*sym).clone(),
                         Style::default().fg(THEME.text).add_modifier(if is_selected { Modifier::BOLD } else { Modifier::empty() }),
                     )),
                     ratatui::widgets::Cell::from(format!("${:.2}", md.price)),
@@ -301,74 +304,95 @@ impl DashboardComponent {
         frame.render_widget(conc_gauge, gauge_chunks[3]);
     }
 
-    fn render_status_bar(&self, frame: &mut Frame, area: Rect, app: &App) {
-        let chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(50),
-                Constraint::Percentage(50),
-            ])
-            .split(area);
+    /// Render the signal events log panel — shows recent RatEvent::Signal
+    /// events from the EventBus WebSocket bridge.
+    fn render_signal_events(&self, frame: &mut Frame, area: Rect, app: &App) {
+        let events: &VecDeque<PipelineEvent> = &app.pipeline_events;
 
-        // ── Agent Status ───────────────────────────────────────────────────
-        let agent_status = if let Some(first_agent) = app.agents.first() {
-            let status_color = match first_agent.status.as_str() {
-                "active" | "running" => THEME.positive,
-                "error" | "failed" => THEME.negative,
-                _ => THEME.text_dim,
-            };
+        let lines: Vec<Line> = if events.is_empty() {
             vec![
-                Line::from(vec![
-                    Span::styled("  🤖 ", Style::default().fg(THEME.accent)),
-                    Span::styled(&first_agent.name, Style::default().fg(THEME.text)),
-                    Span::styled(" │ ", Style::default().fg(THEME.border)),
-                    Span::styled(&first_agent.status, Style::default().fg(status_color)),
-                    Span::styled(" │ ", Style::default().fg(THEME.border)),
-                    Span::styled(format!("conf: {:.0}%", first_agent.confidence * 100.0), Style::default().fg(THEME.text_dim)),
-                ]),
+                Line::from(Span::styled(
+                    "  No signal events yet — waiting for pipeline...",
+                    Style::default().fg(THEME.text_dim),
+                )),
             ]
         } else {
-            vec![Line::from(Span::styled("  🤖 No agents active", THEME.dim_style()))]
+            events
+                .iter()
+                .take(MAX_VISIBLE_SIGNALS)
+                .map(|ev| {
+                    let action_color = match ev.action.as_str() {
+                        "BUY" => THEME.positive,
+                        "SELL" => THEME.negative,
+                        _ => THEME.text_dim,
+                    };
+                    let confidence_color = if ev.confidence >= 0.8 {
+                        THEME.positive
+                    } else if ev.confidence >= 0.6 {
+                        THEME.warning
+                    } else {
+                        THEME.text_dim
+                    };
+
+                    // Truncate reasoning to fit one line
+                    let reason = if ev.reasoning.len() > 42 {
+                        format!("{}...", &ev.reasoning[..39])
+                    } else {
+                        ev.reasoning.clone()
+                    };
+
+                    // Format the timestamp as HH:MM:SS
+                    let ts = if ev.timestamp.len() >= 19 {
+                        let (_, time_part) = ev.timestamp.split_at(11);
+                        let time_part = &time_part[..8];
+                        time_part.to_string()
+                    } else {
+                        ev.timestamp.clone()
+                    };
+
+                    Line::from(vec![
+                        Span::styled(format!(" {} ", ts), Style::default().fg(THEME.text_dim)),
+                        Span::styled(
+                            format!(" {:5} ", ev.action),
+                            Style::default()
+                                .fg(action_color)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!(" {:<6} ", ev.symbol),
+                            Style::default().fg(THEME.highlight).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!(" {:>5.0}% ", ev.confidence * 100.0),
+                            Style::default().fg(confidence_color),
+                        ),
+                        Span::styled(
+                            format!("  │  {}", reason),
+                            Style::default().fg(THEME.text),
+                        ),
+                    ])
+                })
+                .collect()
         };
 
-        let agent_para = Paragraph::new(agent_status)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(THEME.border)),
-            );
-        frame.render_widget(agent_para, chunks[0]);
+        // Count total signals vs trades
+        let total = events.len();
+        let trades = events.iter().filter(|e| e.action == "BUY" || e.action == "SELL").count();
+        let holds = total.saturating_sub(trades);
 
-        // ── System Status ──────────────────────────────────────────────────
-        let ws_indicator = if app.ws_connected {
-            Span::styled("● WS ", Style::default().fg(THEME.positive))
-        } else {
-            Span::styled("○ WS ", Style::default().fg(THEME.negative))
-        };
+        let title = format!(
+            " SIGNAL EVENTS  ({} total — {} trades / {} holds) ",
+            total, trades, holds
+        );
 
-        let system_status = vec![
-            Line::from(vec![
-                Span::styled("  ", Style::default()),
-                ws_indicator,
-                Span::styled("│ ", Style::default().fg(THEME.border)),
-                Span::styled(
-                    format!("Uptime: {}", app.health.uptime),
-                    Style::default().fg(THEME.text_dim),
-                ),
-                Span::styled(" │ ", Style::default().fg(THEME.border)),
-                Span::styled(
-                    format!("CPU: {:.1}%", app.health.cpu_usage),
-                    Style::default().fg(THEME.text_dim),
-                ),
-            ]),
-        ];
+        let block = Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(THEME.border));
 
-        let system_para = Paragraph::new(system_status)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(THEME.border)),
-            );
-        frame.render_widget(system_para, chunks[1]);
+        let paragraph = Paragraph::new(lines)
+            .block(block);
+
+        frame.render_widget(paragraph, area);
     }
 }

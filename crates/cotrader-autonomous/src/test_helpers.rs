@@ -66,7 +66,7 @@ impl BrokerAdapter for DemoBroker {
             id: "closed-1".to_string(),
             symbol: "TEST".to_string(),
             direction: TradeDirection::Long,
-            qty: 1,
+            qty: 1.0,
             entry_price: 100.0,
             exit_price: 100.0,
             realized_pnl: 0.0,

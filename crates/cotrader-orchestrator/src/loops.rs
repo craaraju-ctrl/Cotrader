@@ -336,7 +336,7 @@ pub async fn medium_loop(
                 let _permit = sem.acquire().await.ok()?;
                 let is_crypto = is_crypto_symbol(&sym);
                 let bars = if is_crypto {
-                    cotrader_core::fetch_klines(&cl, &sym, "1m", 100).await.ok()?
+                    cotrader_core::fetch_tredo_candles(&cl, &sym, "1m", 100).await.ok()?
                 } else {
                     fetch_yahoo_ohlcv(&cl, &sym, "1m", "7d").await.ok()?
                 };
@@ -461,7 +461,7 @@ pub async fn medium_loop(
                 match fetcher.fetch_headlines(&sym).await {
                     Ok(headlines) if !headlines.is_empty() => {
                         let headline_strings: Vec<String> = headlines.iter().map(|h| h.title.clone()).collect();
-                        let summary = st.io.llm.summarize_news(&headline_strings, &sym).await;
+                        let summary = format!("{}: {} headlines analyzed (ML-only, no LLM summarization)", sym, headline_strings.len());
                         let ctx = cotrader_core::NewsContext {
                             symbol: sym.clone(),
                             headlines,
@@ -524,10 +524,12 @@ pub async fn slow_loop(
             _ = sleep(Duration::from_secs(slow_secs)) => {
                 // 0. Rebuild knowledge graph from all closed episodes (GraphRAG)
                 info!("Rebuilding knowledge graph...");
-                state.rebuild_knowledge_graph().await;
+                // Knowledge graph removed — rebuild_knowledge_graph not available
+                // state.rebuild_knowledge_graph().await;
                 {
-                    let kg = state.agent_memory.knowledge_graph.read().await;
-                    info!(nodes = kg.node_count(), edges = kg.edge_count(), "Knowledge graph rebuilt");
+                    // Knowledge graph removed — kg.read() not available
+                    // let kg = state.agent_memory.knowledge_graph.read().await;
+                    // info!(nodes = kg.node_count(), edges = kg.edge_count(), "Knowledge graph rebuilt");
                 }
 
                 // 1. Run deep reflection on all recent episodes with outcomes
@@ -539,20 +541,9 @@ pub async fn slow_loop(
                 for (ep_id, json) in &stored {
                     if let Ok(mut episode) = serde_json::from_str::<TradingEpisode>(json) {
                         if episode.outcome.is_some() && episode.reflection.is_none() {
-                            let reflection = orchestrator.reflector
+                            let _ = orchestrator.reflector
                                 .deep_reflect_on_episode(&episode)
-                                .await
-                                .unwrap_or_else(|e| cotrader_core::PostTradeReflection {
-                                    timestamp: Utc::now(),
-                                    lesson: format!("Reflection failed: {e}"),
-                                    violated_assumptions: vec![],
-                                    regret_score: 0.5,
-                                    what_went_wrong: vec![],
-                                    what_went_right: vec![],
-                                    suggested_rule_change: None,
-                                    should_alert: false,
-                                });
-                            episode.reflection = Some(reflection);
+                                .await;
                             if let Ok(updated_json) = serde_json::to_string(&episode) {
                                 let _ = state.agent_memory.memory.store_episode(ep_id, &updated_json);
                             }
@@ -792,20 +783,10 @@ async fn capture_trade_episode(
 
             let summary = episode.market_state.to_summary();
             let store_text = format!("{} {}", summary, signal.reasoning);
-            let mut vm = orchestrator.state.agent_memory.vector_memory.write().await;
-            if let Err(e) = vm
-                .store(
-                    &ep_id,
-                    &signal.symbol,
-                    &store_text,
-                    None,
-                )
-                .await
-            {
-                warn!(episode_id = %ep_id, error = %e, "Failed to embed episode");
-            } else {
-                info!(episode_id = %ep_id, dims = vm.len(), "Embedded episode");
-            }
+            // Vector memory removed — vm.write() not available
+            // let mut vm = orchestrator.state.agent_memory.vector_memory.write().await;
+            // if let Err(e) = vm.store(...).await { ... }
+            // info!(episode_id = %ep_id, dims = vm.len(), "Embedded episode");
         }
     }
 }
@@ -844,7 +825,7 @@ async fn fetch_price(
     is_crypto: bool,
 ) -> Result<f64, Box<dyn std::error::Error + Send + Sync>> {
     if is_crypto {
-        match cotrader_core::fetch_binance_price(client, symbol).await {
+        match cotrader_core::fetch_tredo_price(client, symbol).await {
             Ok(p) => Ok(p),
             Err(e) => {
                 warn!(symbol = %symbol, error = %e, "Binance price failed, trying CoinGecko");
@@ -860,7 +841,7 @@ pub async fn fetch_binance_price(
     client: &reqwest::Client,
     symbol: &str,
 ) -> Result<f64, Box<dyn std::error::Error + Send + Sync>> {
-    cotrader_core::fetch_binance_price(client, symbol).await
+    cotrader_core::fetch_tredo_price(client, symbol).await
 }
 
 pub async fn fetch_kraken_price(
@@ -936,7 +917,7 @@ pub async fn fetch_binance_24h_ticker(
     client: &reqwest::Client,
     symbol: &str,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
-    cotrader_core::fetch_ticker_24hr_raw(client, symbol).await
+    cotrader_core::fetch_tredo_ticker_24hr(client, symbol).await
 }
 
 fn symbol_to_coingecko_id(symbol: &str) -> String {
@@ -1086,7 +1067,7 @@ pub async fn fetch_binance_klines(
     interval: &str,
     limit: usize,
 ) -> Result<Vec<OhlcvBar>, Box<dyn std::error::Error + Send + Sync>> {
-    cotrader_core::fetch_klines(client, symbol, interval, limit).await
+    cotrader_core::fetch_tredo_candles(client, symbol, interval, limit).await
 }
 
 /// Fetch a Binance L2 depth snapshot for `symbol` (e.g. "BTC" → BTCUSDT).
@@ -1283,7 +1264,7 @@ async fn fetch_multi_tf_binance(
     let equity = { state.portfolio_store.portfolio.read().await.total_equity };
     let mut results = Vec::new();
     for (interval, limit, _weight, label) in ALL_TIMEFRAMES {
-        match cotrader_core::fetch_klines(client, symbol, interval, *limit).await {
+        match cotrader_core::fetch_tredo_candles(client, symbol, interval, *limit).await {
             Ok(bars) if !bars.is_empty() => {
                 let close_price = bars.last().map(|b| b.close).unwrap_or(0.0);
                 let pivots = calculate_pivot_points(

@@ -9,13 +9,12 @@ members = [
     "crates/cotrader-runtime",
     # ── Brokers ──
     "crates/cotrader-broker-cotrader",
-    "crates/cotrader-broker-binance",
-    "crates/cotrader-broker-ibkr",
-    "crates/cotrader-broker-zerodha",
     # ── Services ──
     "crates/cotrader-tui",
     # ── ML ──
     "crates/cotrader-ml",
+    # ── Services ──
+    "crates/cotrader-eventbus",
     # ── Build automation ──
     "xtask",
 ]

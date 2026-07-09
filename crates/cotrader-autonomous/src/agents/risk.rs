@@ -1,14 +1,12 @@
 //! Risk Agent — Position sizing → drawdown → circuit breaker → limits → overtrading prevention.
-//!
-//! Merges: RiskCalculator, HardRulesGate, DrawdownMonitor, OvertradingPreventer
 
 use super::reasoning::ReasoningChain;
-use crate::state::SharedState;
-use crate::types::TradeSignal;
+use crate::types::{AgentOutputEvent, CacheFrame, TradeSignal};
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct RiskAgent {
-    pub state: SharedState,
+    pub cot_tx: tokio::sync::broadcast::Sender<AgentOutputEvent>,
 }
 
 #[derive(Debug, Clone)]
@@ -23,24 +21,24 @@ pub struct RiskCheckResult {
 
 #[derive(Debug, Clone, Default)]
 pub struct RiskAdjustments {
-    pub size_multiplier: f64, // 1.0 = no change, 0.5 = halve size
-    pub sl_widening: f64,     // 1.0 = no change, 1.3 = widen SL 30%
+    pub size_multiplier: f64,
+    pub sl_widening: f64,
 }
 
 impl RiskAgent {
-    pub fn new(state: SharedState) -> Self {
-        Self { state }
+    pub fn new(cot_tx: tokio::sync::broadcast::Sender<AgentOutputEvent>) -> Self {
+        Self { cot_tx }
     }
 
-    /// Run all risk checks on a proposed trade.
-    pub async fn check(&self, signal: &TradeSignal) -> RiskCheckResult {
-        let rules = self.state.rule_engine.rules.read().await;
-        let portfolio = self.state.portfolio_store.portfolio.read().await;
+    /// Run all risk checks on a proposed trade using CacheFrame.
+    pub async fn check(&self, frame: &CacheFrame, signal: &TradeSignal) -> RiskCheckResult {
+        let rules = &frame.discipline_rules;
+        let portfolio = &frame.portfolio;
         let mut warnings = Vec::new();
         let mut adjustments = RiskAdjustments::default();
 
         // 1. Portfolio heat check
-        let total_risk: f64 = portfolio.open_positions.iter().map(|p| p.risk_amount).sum();
+        let total_risk: f64 = frame.open_positions.iter().map(|p| p.risk_amount).sum();
         let heat = if portfolio.total_equity > 0.0 {
             total_risk / portfolio.total_equity
         } else {
@@ -50,7 +48,10 @@ impl RiskAgent {
         if heat > rules.max_risk_per_trade * 5.0 {
             return RiskCheckResult {
                 passed: false,
-                blocking_reason: Some(format!("Portfolio heat critical: {:.1}% (max 50%)", heat * 100.0)),
+                blocking_reason: Some(format!(
+                    "Portfolio heat critical: {:.1}% (max 50%)",
+                    heat * 100.0
+                )),
                 warnings,
                 risk_score: heat,
                 position_size_allowed: 0.0,
@@ -60,7 +61,7 @@ impl RiskAgent {
 
         if heat > rules.max_risk_per_trade * 3.0 {
             warnings.push(format!("Portfolio heat elevated: {:.1}%", heat * 100.0));
-            adjustments.size_multiplier *= 0.5; // Halve position size
+            adjustments.size_multiplier *= 0.5;
         }
 
         // 2. Consecutive losses check
@@ -79,17 +80,20 @@ impl RiskAgent {
         }
 
         if portfolio.consecutive_losses >= 3 {
-            warnings.push(format!("{} consecutive losses — reduce exposure", portfolio.consecutive_losses));
+            warnings.push(format!(
+                "{} consecutive losses — reduce exposure",
+                portfolio.consecutive_losses
+            ));
             adjustments.size_multiplier *= 0.75;
         }
 
         // 3. Daily drawdown check
-        if portfolio.max_drawdown_today > rules.max_daily_drawdown {
+        if frame.daily_stats.max_drawdown_today > rules.max_daily_drawdown {
             return RiskCheckResult {
                 passed: false,
                 blocking_reason: Some(format!(
                     "Daily drawdown exceeded: {:.1}% (max {:.1}%)",
-                    portfolio.max_drawdown_today * 100.0,
+                    frame.daily_stats.max_drawdown_today * 100.0,
                     rules.max_daily_drawdown * 100.0
                 )),
                 warnings,
@@ -99,18 +103,21 @@ impl RiskAgent {
             };
         }
 
-        if portfolio.max_drawdown_today > rules.max_daily_drawdown * 0.7 {
-            warnings.push(format!("Daily drawdown approaching limit: {:.1}%", portfolio.max_drawdown_today * 100.0));
+        if frame.daily_stats.max_drawdown_today > rules.max_daily_drawdown * 0.7 {
+            warnings.push(format!(
+                "Daily drawdown approaching limit: {:.1}%",
+                frame.daily_stats.max_drawdown_today * 100.0
+            ));
             adjustments.size_multiplier *= 0.8;
         }
 
         // 4. Overtrading check
-        if portfolio.total_trades_today >= 20 {
+        if frame.daily_stats.total_trades_today >= 20 {
             return RiskCheckResult {
                 passed: false,
                 blocking_reason: Some(format!(
                     "Overtrading: {} trades today (max 20)",
-                    portfolio.total_trades_today
+                    frame.daily_stats.total_trades_today
                 )),
                 warnings,
                 risk_score: 0.7,
@@ -119,14 +126,24 @@ impl RiskAgent {
             };
         }
 
-        if portfolio.total_trades_today >= 10 {
-            warnings.push(format!("High trade count today: {}", portfolio.total_trades_today));
+        if frame.daily_stats.total_trades_today >= 10 {
+            warnings.push(format!(
+                "High trade count today: {}",
+                frame.daily_stats.total_trades_today
+            ));
             adjustments.size_multiplier *= 0.8;
         }
 
         // 5. Duplicate symbol check
-        if portfolio.open_positions.iter().any(|p| p.symbol == signal.symbol) {
-            warnings.push(format!("Already have open position for {}", signal.symbol));
+        if frame
+            .open_positions
+            .iter()
+            .any(|p| cotrader_core::symbols_match(&p.symbol, &signal.symbol))
+        {
+            warnings.push(format!(
+                "Already have open position for {}",
+                signal.symbol
+            ));
             adjustments.size_multiplier *= 0.5;
         }
 
@@ -160,6 +177,27 @@ impl RiskAgent {
             adjustments.size_multiplier *= 0.7;
         }
 
+        // Emit COT event
+        let _ = self
+            .cot_tx
+            .send(AgentOutputEvent::Cot {
+                agent: "Risk".to_string(),
+                symbol: signal.symbol.clone(),
+                action: if warnings.is_empty() {
+                    "PASS".to_string()
+                } else {
+                    "WARN".to_string()
+                },
+                reason: format!(
+                    "Heat: {:.1}%, DD: {:.1}%, trades_today: {}, size_mult: {:.2}",
+                    heat * 100.0,
+                    frame.daily_stats.max_drawdown_today * 100.0,
+                    frame.daily_stats.total_trades_today,
+                    adjustments.size_multiplier
+                ),
+                confidence: (1.0 - heat).max(0.0),
+            });
+
         RiskCheckResult {
             passed: true,
             blocking_reason: None,
@@ -192,9 +230,15 @@ impl RiskAgent {
 
         if result.adjustments.size_multiplier < 1.0 {
             chain.add_step(
-                &format!("Position size reduced to {:.0}%", result.adjustments.size_multiplier * 100.0),
+                &format!(
+                    "Position size reduced to {:.0}%",
+                    result.adjustments.size_multiplier * 100.0
+                ),
                 "Risk adjustments applied based on current conditions",
-                vec![format!("multiplier={:.2}", result.adjustments.size_multiplier)],
+                vec![format!(
+                    "multiplier={:.2}",
+                    result.adjustments.size_multiplier
+                )],
                 0.75,
             );
         }

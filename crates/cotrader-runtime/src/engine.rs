@@ -150,6 +150,9 @@ impl RuntimeEngine {
         // ═══════════════════════════════════════════════════════════════
         // TASK 1: Price Fetcher — periodically fetches live prices and
         //          publishes PriceTick events to the EventBus.
+        //          When COTRADER_BASE_URL is set, pulls from Tredo Exchange
+        //          (which aggregates Binance/Finnhub feeds) instead of
+        //          hitting external APIs directly.
         // ═══════════════════════════════════════════════════════════════
         let fetcher_bus = event_bus.clone();
         let fetcher_symbols = symbols.clone();
@@ -160,12 +163,23 @@ impl RuntimeEngine {
                 .build()
                 .unwrap_or_default();
 
+            // Use Tredo Exchange as price source when available
+            let use_tredo = cotrader_core::tredo_base_url().is_some();
+            if use_tredo {
+                tracing::info!("PriceFetcher: using Tredo Exchange for live prices");
+            } else {
+                tracing::info!("PriceFetcher: no Tredo Exchange configured — COTRADER_BASE_URL not set");
+            }
+
             let mut sym_idx = 0usize;
             loop {
                 let sym = fetcher_symbols[sym_idx % fetcher_symbols.len()].clone();
                 sym_idx += 1;
 
-                match api_clients::fetch_live_bar(&client, &sym).await {
+                // Fetch live bar from Tredo Exchange
+                let bar_result = api_clients::fetch_live_bar(&client, &sym).await;
+
+                match bar_result {
                     Ok(bar) if bar.close > 0.0 => {
                         fetcher_bus.publish(AgentEvent::PriceTick {
                             symbol: sym.clone(),
@@ -937,7 +951,7 @@ impl RuntimeEngine {
             symbol: signal.symbol.clone(),
             direction: signal.direction,
             order_type: OrderType::Market,
-            qty: signal.position_size.round().max(1.0) as i32,
+            qty: signal.position_size,
             price: None,
             stop_loss: Some(signal.stop_loss),
             take_profit: Some(signal.take_profit),

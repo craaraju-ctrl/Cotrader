@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 use cotrader_core::TradeDirection;
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -371,6 +372,137 @@ pub struct RuleTrace {
     /// Plain-text conclusion summarising the reasoning chain.
     pub conclusion: String,
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CacheFrame — Immutable read-only snapshot for agent evaluation
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// A globally unique epoch identifier, monotonically increasing.
+pub type EpochId = u64;
+
+/// Agent identity string.
+pub type AgentId = String;
+
+/// Immutable, pre-computed snapshot of all data an agent needs to make
+/// a trading decision. Agents consume this instead of `SharedState` to
+/// eliminate `RwLock` contention and prevent accidental state mutation.
+#[derive(Debug, Clone)]
+pub struct CacheFrame {
+    pub epoch_id: EpochId,
+    pub symbol: String,
+    pub current_price: f64,
+    pub metrics: Option<crate::market_metrics_meter::MetricsSnapshot>,
+    pub regime: MarketRegime,
+    pub patterns: Vec<String>,
+    pub ohlcv_bars: Vec<cotrader_core::OhlcvBar>,
+    pub portfolio: PortfolioState,
+    pub discipline_rules: Arc<cotrader_core::DisciplineRules>,
+    pub open_positions: Vec<OpenPosition>,
+    pub latest_news: Option<cotrader_core::NewsContext>,
+    pub rule_version: u64,
+    pub timestamp: DateTime<Utc>,
+    pub daily_stats: DailyStats,
+}
+
+/// Aggregate daily trading statistics pre-computed for agent evaluation.
+#[derive(Debug, Clone, Copy)]
+pub struct DailyStats {
+    pub total_trades_today: u32,
+    pub winning_trades_today: u32,
+    pub losing_trades_today: u32,
+    pub consecutive_losses: u32,
+    pub daily_pnl: f64,
+    pub max_drawdown_today: f64,
+    pub total_equity: f64,
+}
+
+impl Default for DailyStats {
+    fn default() -> Self {
+        Self {
+            total_trades_today: 0,
+            winning_trades_today: 0,
+            losing_trades_today: 0,
+            consecutive_losses: 0,
+            daily_pnl: 0.0,
+            max_drawdown_today: 0.0,
+            total_equity: 100_000.0,
+        }
+    }
+}
+
+/// A cryptographically signed trade intent from an agent.
+/// The Ed25519 signature is over (agent_id || epoch_id || rule_version || signal).
+/// Verified by the Runtime Execution Pipeline before execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignedTradeIntent {
+    pub intent_id: String,
+    pub agent_id: AgentId,
+    pub epoch_id: EpochId,
+    pub rule_version: u64,
+    pub signal: TradeSignal,
+    pub created_at: DateTime<Utc>,
+    /// Ed25519 signature bytes.
+    pub signature: Vec<u8>,
+    /// Ed25519 verifying key bytes (for verification by the pipeline).
+    pub verifying_key: Vec<u8>,
+}
+
+/// Events emitted by agents through output channels to the orchestrator.
+/// Agents never directly mutate SharedState.
+#[derive(Debug, Clone)]
+pub enum AgentOutputEvent {
+    /// Chain-of-thought entry for audit / TUI display.
+    Cot {
+        agent: String,
+        symbol: String,
+        action: String,
+        reason: String,
+        confidence: f64,
+    },
+    /// A signed trade intent for execution.
+    TradeIntent(SignedTradeIntent),
+    /// A reasoning chain from an agent.
+    ReasoningChain(super::agents::ReasoningChain),
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Bulkhead & Circuit Breaker Types
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Name of a bulkhead pool.
+pub type BulkheadName = &'static str;
+
+/// Standard bulkhead pool identifiers.
+pub mod bulkhead_names {
+    pub const BROKER_API: &str = "broker_api";
+    pub const DATA_FEED: &str = "data_feed";
+    pub const DATABASE_WRITE: &str = "database_write";
+    pub const DATABASE_READ: &str = "database_read";
+    pub const AGENT_EVALUATION: &str = "agent_evaluation";
+}
+
+/// Error returned when a bulkhead pool is full.
+#[derive(Debug, Clone)]
+pub struct BulkheadFull {
+    pub name: BulkheadName,
+    pub max_queue_ms: u64,
+}
+
+impl std::fmt::Display for BulkheadFull {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Bulkhead '{}' full (queued > {}ms)",
+            self.name, self.max_queue_ms
+        )
+    }
+}
+
+impl std::error::Error for BulkheadFull {}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Existing types below remain unchanged
+// ═══════════════════════════════════════════════════════════════════════════════
 
 /// Full chain-of-reasoning for an entire HardRulesGate evaluation.
 /// Contains one `RuleTrace` per rule evaluated, plus an overall summary.

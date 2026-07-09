@@ -34,8 +34,6 @@ pub struct StreamingReasoner {
     #[allow(dead_code)]
     state: SharedState,
     #[allow(dead_code)]
-    llm: Option<Arc<cotrader_core::LlmExecutor>>,
-    #[allow(dead_code)]
     max_iterations: u32,
 }
 
@@ -43,7 +41,6 @@ impl StreamingReasoner {
     pub fn new(state: SharedState) -> Self {
         Self {
             state,
-            llm: None,
             max_iterations: 5,
         }
     }

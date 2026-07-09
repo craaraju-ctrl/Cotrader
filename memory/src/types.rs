@@ -684,9 +684,12 @@ pub struct ContextBlock {
     pub pinned: bool,
     /// Priority for eviction when context is full (lower = evicted first)
     pub priority: i32,
-    /// Maximum tokens this block can hold
+    /// DEPRECATED: Kept for DB schema compatibility. Byte-based eviction in context.rs
+    /// ignores this field. Use content.len() for capacity checks.
+    #[serde(default)]
     pub max_tokens: usize,
-    /// Current token count
+    /// DEPRECATED: No longer computed by context manager. Always serialized as 0.
+    #[serde(default)]
     pub current_tokens: usize,
     /// When this block was last updated
     pub last_updated: String,
@@ -710,10 +713,9 @@ pub struct ContextSummary {
 /// Context window configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextConfig {
-    /// Maximum total tokens in the context window
+    /// Maximum total capacity in bytes for the context window.
+    /// Used with a 4:1 byte-to-token heuristic for capacity estimation.
     pub max_tokens: usize,
-    /// Token budget reserved for pinned blocks
-    pub pinned_budget: usize,
     /// Whether to auto-summarize evicted blocks
     pub auto_summarize: bool,
     /// Maximum number of archived summaries to keep
@@ -724,7 +726,6 @@ impl Default for ContextConfig {
     fn default() -> Self {
         Self {
             max_tokens: 8192,
-            pinned_budget: 2048,
             auto_summarize: true,
             max_archived_summaries: 100,
         }
@@ -758,6 +759,86 @@ pub struct SearchResult {
 
 // ── Storage Configuration ──────────────────────────────────────────────────
 
+/// Market-aware pruning configuration for 24/7 adaptive memory management.
+/// Defines per-asset-class low-volatility windows for optimal pruning scheduling.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarketPruningConfig {
+    /// Pruning windows per namespace/asset class.
+    /// Key: namespace_id or market ticker.
+    /// Value: (start_hour_utc, end_hour_utc) — the lowest volatility window.
+    pub pruning_windows: HashMap<String, (u8, u8)>,
+    /// Default pruning window for unknown namespaces (e.g., crypto 24/7).
+    pub default_window: (u8, u8),
+    /// Effective importance threshold below which records are wiped.
+    pub wipe_threshold: f64,
+    /// Minimum access count to retain a record.
+    pub min_access_count: u32,
+}
+
+impl Default for MarketPruningConfig {
+    fn default() -> Self {
+        let mut pruning_windows = HashMap::new();
+        // Equities: prune post-market close (21:00–02:00 UTC)
+        pruning_windows.insert("equities".to_string(), (21, 2));
+        // Forex: prune during low-volume session (21:00–06:00 UTC)
+        pruning_windows.insert("forex".to_string(), (21, 6));
+        // Crypto: historically lowest volume 03:00–06:00 UTC
+        pruning_windows.insert("crypto".to_string(), (3, 6));
+        Self {
+            pruning_windows,
+            default_window: (3, 6), // safe default: low-volume window
+            wipe_threshold: 0.2,
+            min_access_count: 3,
+        }
+    }
+}
+
+impl MarketPruningConfig {
+    /// Check if the current UTC hour is within the pruning window for a namespace.
+    pub fn is_pruning_window_active(&self, namespace_id: &str) -> bool {
+        use chrono::Timelike;
+        let now = chrono::Utc::now();
+        let current_hour = now.hour() as u8;
+        let (start, end) = self.pruning_windows
+            .get(namespace_id)
+            .copied()
+            .unwrap_or(self.default_window);
+
+        if start < end {
+            // Normal range: e.g., 3–6
+            current_hour >= start && current_hour < end
+        } else {
+            // Wrapping range: e.g., 21–2 (spans midnight)
+            current_hour >= start || current_hour < end
+        }
+    }
+}
+
+/// Directory router configuration for time-based sharding.
+/// Routes writes into monthly SQLite partitions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShardingConfig {
+    /// Base directory for sharded database files.
+    pub base_dir: String,
+    /// File name pattern (strftime-compatible, e.g., "memory_%Y_%m.db").
+    pub file_pattern: String,
+    /// Whether to keep older months accessible under read-only multi-db attachment.
+    pub attach_readonly: bool,
+    /// Maximum number of months to keep active (beyond that, detach).
+    pub retention_months: u32,
+}
+
+impl Default for ShardingConfig {
+    fn default() -> Self {
+        Self {
+            base_dir: ".".to_string(),
+            file_pattern: "memory_%Y_%m.db".to_string(),
+            attach_readonly: true,
+            retention_months: 12,
+        }
+    }
+}
+
 /// Configuration for the storage backend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageConfig {
@@ -767,6 +848,12 @@ pub struct StorageConfig {
     /// Dimension for vector embeddings (used by sqlite-vec vec0 tables)
     #[serde(default = "default_vector_dim")]
     pub vector_dimension: usize,
+    /// Market-aware pruning configuration for 24/7 adaptive memory management.
+    #[serde(default)]
+    pub market_pruning: MarketPruningConfig,
+    /// Time-based sharding configuration for high-frequency scaling.
+    #[serde(default)]
+    pub sharding: ShardingConfig,
 }
 
 fn default_vector_dim() -> usize {
@@ -780,6 +867,8 @@ impl Default for StorageConfig {
             max_ram_entries: 100,
             auto_embed: false,
             vector_dimension: default_vector_dim(),
+            market_pruning: MarketPruningConfig::default(),
+            sharding: ShardingConfig::default(),
         }
     }
 }

@@ -22,7 +22,7 @@ impl VolumeProfileSkill {
         if let Some(bars) = history.get(symbol) {
             if bars.len() >= 20 {
                 let profile = compute_volume_profile(bars, 20);
-                let current_price = bars.last().unwrap().close;
+                let current_price = bars.last().map(|b| b.close).unwrap_or(0.0);
                 // Position relative to value area: inside = balanced, above/below = directional
                 let relative = if current_price > profile.vah {
                     1.0 // above value area = bullish

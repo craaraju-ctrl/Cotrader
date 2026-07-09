@@ -27,7 +27,7 @@ impl SupportResistanceSkill {
         if let Some(bars) = history.get(symbol) {
             if bars.len() >= 30 {
                 let (supports, resistances) = compute_support_resistance(bars, 30);
-                let current_price = bars.last().unwrap().close;
+                let current_price = bars.last().map(|b| b.close).unwrap_or(0.0);
                 let n = bars.len();
                 let price_change = if n >= 4 {
                     (bars[n - 1].close - bars[n - 4].close) / bars[n - 4].close

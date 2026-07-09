@@ -33,7 +33,6 @@ pub mod scanner;
 pub mod self_evolution;
 pub mod session_timer;
 pub mod state;
-pub mod strategy_decision;
 pub mod rat;
 pub mod types;
 pub mod walk_forward_runner; // Prevents parameter overfitting via train/test rolling windows before paper trading
@@ -48,7 +47,6 @@ pub mod symbol_ranker;
 pub mod correlation_engine;
 pub mod correlation_checker;
 pub mod debate;
-pub mod debate_layer; // High-level adversarial debate: Bull/Bear teams, Synthesizer, Judge
 pub mod funding_rate; // Crypto perpetual funding rate proxy (counter-sentiment indicator)
 pub mod hard_rules_gate; // Layer 1: Priority-based hard rules gate (top of pipeline)
 pub mod liquidity; // Market liquidity, spread, depth, slippage risk analyzer
@@ -62,7 +60,9 @@ pub mod regime_detector; // kept for backward compat during migration
 pub mod sentiment_analyzer;
 pub mod skills;
 pub mod super_intelligence;
-pub mod support_resistance; // Swing high/low S/R level detection with clustering
+pub mod support_resistance;
+pub mod resilience; // Swing high/low S/R level detection with clustering
+pub mod setup; // Bootstrap & Setup Mode — interactive model backend selection
 pub mod tri_level_validator; // Parallel rules + LLM + Kronos validation with outcome attribution
 pub mod volatility_calculator;
 pub mod volume_profile; // Point of Control (POC), Value Area High/Low (VAH/VAL) // Vol measurement + regime detection
@@ -81,6 +81,8 @@ pub use symbol_ranker::SymbolRanker;
 pub use correlation_engine::CorrelationEngine;
 pub use state::SharedState;
 pub use rat::{Executer, Guardian, Identifier, Rat, Verifier};
+pub use resilience::{Bulkhead, BulkheadRegistry, CircuitBreakerHierarchy,
+    acquire_broker_permit, acquire_agent_permit, acquire_db_read_permit, acquire_db_write_permit};
 pub use types::*;
 
 #[cfg(test)]

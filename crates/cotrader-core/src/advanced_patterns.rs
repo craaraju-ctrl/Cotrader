@@ -534,7 +534,7 @@ pub fn detect_flag(bars: &[OhlcvBar]) -> Option<FlagPennantPattern> {
     } else {
         recent_high * 1.01
     };
-    let strength = (pole_change.abs() * 5.0).min(1.0) * 0.6
+    let strength: f64 = (pole_change.abs() * 5.0).min(1.0) * 0.6
         + (1.0 - consolidation_range / pole_change.abs()).min(1.0) * 0.4;
 
     Some(FlagPennantPattern {
@@ -814,7 +814,7 @@ pub fn detect_channel(bars: &[OhlcvBar]) -> Option<ChannelPattern> {
     };
 
     let breakout_strength = if breakout_side.is_some() { 0.4 } else { 0.1 };
-    let strength = ((1.0 - width_pct / 0.1) * 0.4 + breakout_strength + 0.2).clamp(0.0, 1.0);
+    let strength: f64 = ((1.0 - width_pct / 0.1) * 0.4 + breakout_strength + 0.2).clamp(0.0, 1.0);
 
     Some(ChannelPattern {
         channel_type: channel_type.into(),
@@ -1194,7 +1194,7 @@ fn detect_cup_and_handle(bars: &[OhlcvBar]) -> Option<CupAndHandlePattern> {
         handle_depth_pct,
         target,
         invalidation: cup_bottom,
-        strength: strength.clamp(0.0, 0.9),
+        strength: (strength as f64).clamp(0.0, 0.9),
     })
 }
 

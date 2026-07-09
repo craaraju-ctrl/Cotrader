@@ -270,26 +270,26 @@ async fn test_api_client_fetch_price() {
         .build()
         .expect("Client build");
 
-    // Try fetching BTC price from Binance
-    match cotrader_runtime::api_clients::fetch_binance_price(&client, "BTC").await {
+    // Try fetching BTC price from Tredo Exchange (single price gateway)
+    match cotrader_runtime::api_clients::fetch_price(&client, "BTC").await {
         Ok(price) => {
             assert!(price > 0.0, "BTC price should be positive, got {}", price);
-            println!("Binance BTC price: ${:.2}", price);
+            println!("BTC price: ${:.2}", price);
         }
         Err(e) => {
-            // Network might not be available in CI — that's OK, just warn
-            println!("Binance API unavailable (expected in offline CI): {}", e);
+            // Tredo might not be available in CI — that's OK, just warn
+            println!("Tredo API unavailable (expected in offline CI): {}", e);
         }
     }
 
-    // Try fetching NIFTY price from Yahoo
-    match cotrader_runtime::api_clients::fetch_yahoo_price(&client, "NIFTY").await {
+    // Try fetching ETH price from Tredo Exchange
+    match cotrader_runtime::api_clients::fetch_price(&client, "ETH").await {
         Ok(price) => {
-            assert!(price > 0.0, "NIFTY price should be positive");
-            println!("Yahoo NIFTY price: ₹{:.2}", price);
+            assert!(price > 0.0, "ETH price should be positive");
+            println!("ETH price: ${:.2}", price);
         }
         Err(e) => {
-            println!("Yahoo API unavailable: {}", e);
+            println!("Tredo API unavailable: {}", e);
         }
     }
 

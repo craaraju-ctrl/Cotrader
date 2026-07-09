@@ -1220,7 +1220,7 @@ fn detect_pin_bar(bars: &[OhlcvBar]) -> Option<CandlestickPattern> {
         return Some(CandlestickPattern {
             name: "Bullish Pin Bar".to_string(),
             direction: "bullish".to_string(),
-            strength: strength.clamp(0.0, 0.9),
+            strength: (strength as f64).clamp(0.0, 0.9),
             bar_index: bars.len() - 1,
         });
     }
@@ -1231,7 +1231,7 @@ fn detect_pin_bar(bars: &[OhlcvBar]) -> Option<CandlestickPattern> {
         return Some(CandlestickPattern {
             name: "Bearish Pin Bar".to_string(),
             direction: "bearish".to_string(),
-            strength: strength.clamp(0.0, 0.9),
+            strength: (strength as f64).clamp(0.0, 0.9),
             bar_index: bars.len() - 1,
         });
     }
@@ -1259,7 +1259,7 @@ fn detect_fakey(bars: &[OhlcvBar]) -> Option<CandlestickPattern> {
         return Some(CandlestickPattern {
             name: "Bullish Fakey".to_string(),
             direction: "bullish".to_string(),
-            strength: strength.clamp(0.0, 0.9),
+            strength: (strength as f64).clamp(0.0, 0.9),
             bar_index: bars.len() - 1,
         });
     }
@@ -1270,7 +1270,7 @@ fn detect_fakey(bars: &[OhlcvBar]) -> Option<CandlestickPattern> {
         return Some(CandlestickPattern {
             name: "Bearish Fakey".to_string(),
             direction: "bearish".to_string(),
-            strength: strength.clamp(0.0, 0.9),
+            strength: (strength as f64).clamp(0.0, 0.9),
             bar_index: bars.len() - 1,
         });
     }

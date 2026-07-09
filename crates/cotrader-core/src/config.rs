@@ -1,20 +1,171 @@
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+/// Centralized storage configuration — single source of truth for all DB paths.
+///
+/// All database files are resolved relative to the project root's `storage/` directory.
+/// This eliminates hardcoded relative paths scattered across the codebase.
+#[derive(Debug, Clone)]
+pub struct StorageConfig {
+    /// Base directory for all persistent storage (default: "storage")
+    pub base_dir: PathBuf,
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        // Resolve storage dir relative to the workspace root.
+        // CARGO_MANIFEST_DIR points to the crate being compiled; we walk up
+        // to the workspace root where `storage/` lives.
+        let manifest = std::env::var("CARGO_MANIFEST_DIR")
+            .unwrap_or_else(|_| ".".to_string());
+        let base = std::path::Path::new(&manifest)
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join("storage");
+        Self { base_dir: base }
+    }
+}
+
+impl StorageConfig {
+    /// Create with an explicit base directory.
+    pub fn with_base(base: impl Into<PathBuf>) -> Self {
+        Self { base_dir: base.into() }
+    }
+
+    /// Main trading database (episodes, orders, rules, regret, COT logs).
+    pub fn main_db(&self) -> PathBuf {
+        self.base_dir.join("cotrader.db")
+    }
+
+    /// Orders-only database (live order tracking).
+    pub fn orders_db(&self) -> PathBuf {
+        self.base_dir.join("orders.db")
+    }
+
+    /// Agentic memory server database.
+    pub fn memory_db(&self) -> PathBuf {
+        self.base_dir.join("memory.db")
+    }
+
+    /// Knowledge graph JSON snapshot.
+    pub fn knowledge_graph(&self) -> PathBuf {
+        self.base_dir.join("knowledge_graph.json")
+    }
+
+    /// Policy cache JSON snapshot.
+    pub fn policy_cache(&self) -> PathBuf {
+        self.base_dir.join("policy_cache.json")
+    }
+
+    /// ML model weights directory.
+    pub fn model_dir(&self) -> PathBuf {
+        self.base_dir.join("models")
+    }
+
+    /// Reasoning trace log.
+    pub fn reasoning_log(&self) -> PathBuf {
+        self.base_dir.join("reasoning.jsonl")
+    }
+
+    /// Ensure the storage directory exists.
+    pub fn ensure_exists(&self) -> std::io::Result<()> {
+        std::fs::create_dir_all(&self.base_dir)
+    }
+}
+
+/// Which backend to use for LLM signal arbitration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type")]
+pub enum LlamaBackend {
+    /// Use a local Ollama instance (zero RAM overhead — runs in separate process).
+    Ollama {
+        /// Ollama server URL, e.g. "http://localhost:11434"
+        url: String,
+        /// Model name, e.g. "llama3.2:3b"
+        model: String,
+    },
+    /// Use cached GGUF via Candle (~2GB RAM, ~6s inference on CPU).
+    CandleGGUF,
+    /// No LLM arbitration — consensus-only fallback.
+    None,
+}
+
+impl Default for LlamaBackend {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+/// Persistable system configuration saved to `~/.rat/system.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemConfig {
+    /// Whether the one-time setup wizard has been completed.
+    pub setup_completed: bool,
+    /// Which LLM backend to use for signal arbitration.
+    pub llama_backend: LlamaBackend,
+}
+
+impl Default for SystemConfig {
+    fn default() -> Self {
+        Self {
+            setup_completed: false,
+            llama_backend: LlamaBackend::None,
+
+        }
+    }
+}
+
+impl SystemConfig {
+    /// Resolve the `~/.rat/` directory, creating it if needed.
+    pub fn rat_dir() -> PathBuf {
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/tmp"));
+        let dir = home.join(".rat");
+        std::fs::create_dir_all(&dir).ok();
+        dir
+    }
+
+    /// Path to the system config file.
+    pub fn path() -> PathBuf {
+        Self::rat_dir().join("system.toml")
+    }
+
+    /// Load system config from disk, returning default if not found.
+    pub fn load() -> Self {
+        let path = Self::path();
+        if !path.exists() {
+            return Self::default();
+        }
+        match std::fs::read_to_string(&path) {
+            Ok(content) => {
+                toml::from_str(&content).unwrap_or_else(|e| {
+                    eprintln!("[SystemConfig] ⚠ Failed to parse {}: {}. Using defaults.", path.display(), e);
+                    Self::default()
+                })
+            }
+            Err(e) => {
+                eprintln!("[SystemConfig] ⚠ Failed to read {}: {}. Using defaults.", path.display(), e);
+                Self::default()
+            }
+        }
+    }
+
+    /// Save system config to disk.
+    pub fn save(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let path = Self::path();
+        let content = toml::to_string_pretty(self)?;
+        std::fs::write(&path, content)?;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub initial_balance: f64,
     pub max_position_size: f64,
     pub api_key: String,
     pub api_secret: String,
-    pub kronos_service_url: String,
-
-    // === Multi-LLM (populated by ./rat setup wizard) ===
-    pub llm_provider: String, // ollama | openai | anthropic | gemini | other
-    pub llm_model: String,
-    pub llm_endpoint: String,
-    pub llm_api_key: String,
-
-    // Additional provider keys for fallbacks / specialized agents (debate, reflection)
-    pub openai_api_key: String,
-    pub claude_api_key: String,
 
     // === Notifications (WhatsApp / Telegram) ===
     pub telegram_bot_token: String,
@@ -40,6 +191,10 @@ pub struct Config {
 
     // Paper enforcement (set by launcher/setup)
     pub paper_mode: bool,
+
+    // === LLM/Model Backend (from system config) ===
+    pub llama_backend: LlamaBackend,
+    pub setup_completed: bool,
 }
 
 impl Default for Config {
@@ -47,26 +202,15 @@ impl Default for Config {
         let paper_mode = std::env::var("PAPER_MODE")
             .map(|v| v != "false")
             .unwrap_or(true);
+
+        // Merge system config from disk
+        let sys = SystemConfig::load();
+
         Self {
             initial_balance: 100_000.0,
-            // Live trading keeps the 4% (1/25) discipline cap. Paper mode
-            // relaxes to 95% so paper runs get enough trade frequency to
-            // validate strategy logic — see strategy_decision.rs and
-            // portfolio_manager.rs for the matching mode-gated cap.
             max_position_size: if paper_mode { 0.95 } else { 0.04 },
             api_key: "DUMMY_API_KEY".to_string(),
             api_secret: "DUMMY_API_SECRET".to_string(),
-            kronos_service_url: "http://127.0.0.1:8000".to_string(),
-
-            llm_provider: std::env::var("LLM_PROVIDER").unwrap_or_else(|_| "ollama".to_string()),
-            llm_model: std::env::var("LLM_MODEL")
-                .unwrap_or_else(|_| "nemotron-3-nano:4b".to_string()),
-            llm_endpoint: std::env::var("LLM_ENDPOINT")
-                .unwrap_or_else(|_| "http://localhost:11434".to_string()),
-            llm_api_key: std::env::var("LLM_API_KEY").unwrap_or_default(),
-
-            openai_api_key: std::env::var("OPENAI_API_KEY").unwrap_or_default(),
-            claude_api_key: std::env::var("CLAUDE_API_KEY").unwrap_or_default(),
 
             telegram_bot_token: std::env::var("TELEGRAM_BOT_TOKEN").unwrap_or_default(),
             telegram_chat_id: std::env::var("TELEGRAM_CHAT_ID").unwrap_or_default(),
@@ -93,13 +237,14 @@ impl Default for Config {
             fred_api_key: std::env::var("FRED_API_KEY").unwrap_or_default(),
 
             paper_mode,
+            llama_backend: sys.llama_backend,
+            setup_completed: sys.setup_completed,
         }
     }
 }
 
 impl Config {
     /// Load from env (populated by `source config/rat.env` after `./rat setup`).
-    /// Future: also support YAML/JSON file load.
     pub fn load() -> Self {
         Self::default()
     }

@@ -1,7 +1,6 @@
 # RAT Agent — Docker Compose
 # Production-grade deployment with memory service, pipeline, and monitoring
 
-version: "3.9"
 
 x-common: &common
   restart: unless-stopped

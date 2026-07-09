@@ -29,10 +29,7 @@ async fn setup_env(db_name: &str) -> (AutonomousOrchestrator, String) {
     let _ = fs::remove_file(&db_path);
 
     let memory = MemoryStore::new(&db_path).expect("MemoryStore creation");
-    let config = Config {
-        kronos_service_url: "http://127.0.0.1:19999".to_string(),
-        ..Config::default()
-    };
+    let config = Config::default();
     let rules = DisciplineRules::default();
     let paper_broker: Arc<dyn BrokerAdapter> = Arc::new(cotrader_broker_cotrader::CoTraderBroker::new("http://localhost:8080", "cotrader_test", "test_secret", "test"));
     let state = SharedState::new(memory, rules, config, &sqlite_db_path, paper_broker).expect("SharedState init");

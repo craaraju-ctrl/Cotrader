@@ -29,6 +29,7 @@ pub trait Component {
     }
 
     /// Handle mouse events. Return true if consumed.
+    #[allow(dead_code)]
     fn handle_mouse(&mut self, mouse: MouseEvent, app: &mut App) -> bool {
         let _ = (mouse, app);
         false

@@ -13,6 +13,17 @@
 //   ConvictionStack → RankedDecision → StrategyDecisionAgent
 //
 // No LLM dependency — all intelligence is evidence-based and deterministic.
+
+/// Local definition of SimilarResult (removed from cotrader-core).
+#[derive(Debug, Clone)]
+pub struct SimilarResult {
+    pub episode_id: String,
+    pub symbol: String,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub similarity: f64,
+    pub summary_text: String,
+    pub regret_score: Option<f64>,
+}
 // ═══════════════════════════════════════════════════════════════════════════════
 
 use crate::debate::EvidenceBuilder;
@@ -547,18 +558,9 @@ impl MemoryContext {
         }
     }
 
-    /// Memory context from vector memory — semantic search for similar past episodes.
-    pub async fn from_vector_memory(state: &SharedState, symbol: &str, current_price: f64) -> Self {
-        let mut similar_episodes = Vec::new();
-        {
-            let vm = state.agent_memory.vector_memory.read().await;
-            if !vm.is_empty() {
-                let query = format!("{} price={:.2} trading outcome", symbol, current_price);
-                if let Ok(results) = vm.search(&query, 5).await {
-                    similar_episodes = results;
-                }
-            }
-        }
+    /// Memory context from vector memory (removed — dependency deleted).
+    pub async fn from_vector_memory_placeholder(state: &SharedState, symbol: &str, current_price: f64) -> Self {
+        let similar_episodes: Vec<SimilarResult> = Vec::new();
 
         if similar_episodes.is_empty() {
             return MemoryContext::empty();
@@ -1032,7 +1034,7 @@ impl SuperIntelligence {
         proposed_confidence: f64,
     ) -> SuperIntelligenceResult {
         // 1. Memory context
-        let memory = MemoryContext::from_vector_memory(state, symbol, current_price).await;
+        let memory = MemoryContext::from_vector_memory_placeholder(state, symbol, current_price).await;
 
         // 2. Build skill results map from aggregated signal + evidence
         let mut skill_results: HashMap<String, (f64, SkillDirection, f64)> = HashMap::new();

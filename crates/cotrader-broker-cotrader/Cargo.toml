@@ -2,9 +2,17 @@
 name = "cotrader-broker-cotrader"
 version = "0.1.0"
 edition = "2021"
-description = "CoTrader Broker — paper trading adapter for integration tests"
+description = "CoTrader Broker — Tredo Exchange adapter with HMAC-SHA256 auth"
 
 [dependencies]
 cotrader-core = { path = "../cotrader-core" }
 async-trait = "0.1"
 chrono = "0.4"
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+tracing = "0.1"
+tokio = { version = "1", features = ["sync"] }

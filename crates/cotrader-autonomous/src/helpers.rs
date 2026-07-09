@@ -403,9 +403,9 @@ pub fn compute_autonomous_levels(
     };
 
     let rr = if risk > 0.0 {
-        risk / (tp - entry).abs().max(0.0001)
+        (tp - entry).abs() / risk.max(0.0001)
     } else {
-        1.0
+        0.0
     };
 
     // Constrain to rules
@@ -420,15 +420,17 @@ pub fn compute_autonomous_levels(
         tp
     };
 
+    let final_rr = if risk > 0.0 {
+        (final_tp - entry).abs() / risk.max(0.0001)
+    } else {
+        2.0
+    };
+
     (
         entry,
         sl,
         final_tp,
-        if risk > 0.0 {
-            risk / (final_tp - entry).abs()
-        } else {
-            2.0
-        },
+        final_rr,
     )
 }
 
@@ -512,7 +514,7 @@ pub fn compute_stochastic(bars: &[OhlcvBar], period: usize) -> f64 {
     let recent = &bars[bars.len() - period..];
     let high = recent.iter().map(|b| b.high).fold(f64::MIN, f64::max);
     let low = recent.iter().map(|b| b.low).fold(f64::MAX, f64::min);
-    let close = bars.last().unwrap().close;
+    let close = bars.last().map(|b| b.close).unwrap_or(0.0);
     if high == low {
         return 50.0;
     }
@@ -694,9 +696,9 @@ pub fn compute_vwap(bars: &[OhlcvBar]) -> (f64, f64) {
     let vwap = if cum_vol > 0.0 {
         cum_vol_price / cum_vol
     } else {
-        bars.last().unwrap().close
+        bars.last().map(|b| b.close).unwrap_or(0.0)
     };
-    let current_price = bars.last().unwrap().close;
+    let current_price = bars.last().map(|b| b.close).unwrap_or(0.0);
     let deviation = if vwap > 0.0 {
         (current_price - vwap) / vwap
     } else {
@@ -900,7 +902,7 @@ pub fn compute_elder_ray(bars: &[OhlcvBar], period: usize) -> (f64, f64) {
         return (0.0, 0.0);
     }
     let ema = compute_ema(bars, period);
-    let last = bars.last().unwrap();
+    let Some(last) = bars.last() else { return (0.0, 0.0); };
     (last.high - ema, last.low - ema)
 }
 
@@ -963,7 +965,7 @@ pub fn compute_roc(bars: &[OhlcvBar], period: usize) -> f64 {
         return 0.0;
     }
     let prev = bars[bars.len() - period - 1].close;
-    let curr = bars.last().unwrap().close;
+    let curr = bars.last().map(|b| b.close).unwrap_or(0.0);
     if prev == 0.0 {
         0.0
     } else {
@@ -977,7 +979,7 @@ pub fn compute_momentum(bars: &[OhlcvBar], period: usize) -> f64 {
     if bars.len() < period + 1 {
         return 0.0;
     }
-    bars.last().unwrap().close - bars[bars.len() - period - 1].close
+    bars.last().map(|b| b.close).unwrap_or(0.0) - bars[bars.len() - period - 1].close
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1727,6 +1729,102 @@ mod indicator_tests {
             !supports.is_empty() || !resistances.is_empty(),
             "Should find S/R levels in oscillating data"
         );
+    }
+
+    // ═══ ATR Tests (regression: fixed RR inversion & True Range calculation) ═══
+
+    #[test]
+    fn test_compute_atr_basic() {
+        let bars = vec![
+            make_bar(105.0, 95.0, 100.0, 1000.0),
+            make_bar(110.0, 98.0, 108.0, 1000.0),
+            make_bar(112.0, 102.0, 110.0, 1000.0),
+        ];
+        // ATR with period < bars: uses simple TR average
+        let atr = compute_atr(&bars, 14);
+        assert!(atr > 0.0, "ATR should be positive, got {}", atr);
+    }
+
+    #[test]
+    fn test_compute_atr_single_bar_fallback() {
+        let bars = vec![make_bar(105.0, 95.0, 100.0, 1000.0)];
+        let atr = compute_atr(&bars, 14);
+        // Short data: returns (high - low).abs() from last bar
+        assert!((atr - 10.0).abs() < 0.01, "ATR should be ~10 for single bar with 10pt range, got {}", atr);
+    }
+
+    #[test]
+    fn test_compute_atr_empty_bars() {
+        let atr = compute_atr(&[], 14);
+        assert_eq!(atr, 0.0, "ATR of empty bars should be 0");
+    }
+
+    #[test]
+    fn test_compute_atr_true_range_includes_prev_close_gap() {
+        // Bar with a gap from previous close: True Range should include the gap.
+        // Using period=1 so bars.len() (2) >= period+1 (2) → exercises the TR path.
+        let bars = vec![
+            make_bar(105.0, 95.0, 100.0, 1000.0),  // close = 100
+            make_bar(115.0, 108.0, 112.0, 1000.0), // gap up: low=108, prev_close=100 => gap=8
+        ];
+        // TR = max(high-low=7, |high-prev_close|=|115-100|=15, |low-prev_close|=|108-100|=8) = 15
+        // ATR = 15/1 = 15
+        let atr = compute_atr(&bars, 1);
+        assert!((atr - 15.0).abs() < 0.01, "ATR should include prev close gap via True Range, expected 15, got {}", atr);
+    }
+
+    // ═══ enforce_min_risk_reward Tests ═══
+
+    #[test]
+    fn test_enforce_rr_meets_minimum() {
+        let (tp, rr) = enforce_min_risk_reward(
+            cotrader_core::TradeDirection::Long,
+            100.0,  // entry
+            99.0,   // sl (1pt risk)
+            103.0,  // tp (3pt reward → 3:1)
+            1.5,    // min_rr
+        );
+        assert!((rr - 3.0).abs() < 0.01, "RR should be 3.0, got {}", rr);
+        assert!((tp - 103.0).abs() < 0.01, "TP should not change, got {}", tp);
+    }
+
+    #[test]
+    fn test_enforce_rr_extends_tp_when_below_min() {
+        let (tp, rr) = enforce_min_risk_reward(
+            cotrader_core::TradeDirection::Long,
+            100.0,  // entry
+            99.0,   // sl (1pt risk)
+            101.0,  // tp (1pt reward → 1:1, below 1.5 min)
+            1.5,    // min_rr
+        );
+        assert!((rr - 1.5).abs() < 0.01, "RR should be extended to 1.5, got {}", rr);
+        assert!((tp - 101.5).abs() < 0.01, "TP should be extended to 101.5, got {}", tp);
+    }
+
+    #[test]
+    fn test_enforce_rr_short_position() {
+        let (tp, rr) = enforce_min_risk_reward(
+            cotrader_core::TradeDirection::Short,
+            100.0,  // entry
+            101.0,  // sl (1pt risk)
+            98.0,   // tp (2pt reward → 2:1)
+            1.5,    // min_rr
+        );
+        assert!((rr - 2.0).abs() < 0.01, "RR should be 2.0, got {}", rr);
+        assert!((tp - 98.0).abs() < 0.01, "TP should not change, got {}", tp);
+    }
+
+    #[test]
+    fn test_enforce_rr_zero_risk() {
+        let (tp, rr) = enforce_min_risk_reward(
+            cotrader_core::TradeDirection::Long,
+            100.0,
+            100.0,  // SL = entry → zero risk
+            105.0,
+            1.5,
+        );
+        assert!(rr == 0.0, "Zero risk should return 0.0 RR, got {}", rr);
+        assert!((tp - 105.0).abs() < 0.01, "TP should be unchanged, got {}", tp);
     }
 
     // ═══ Volume Profile Tests ═══

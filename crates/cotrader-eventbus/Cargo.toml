@@ -1,0 +1,14 @@
+[package]
+name = "cotrader-eventbus"
+version.workspace = true
+description = "cotrader-eventbus — subject-based pub-sub for the rat trading system"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+tokio = { version = "1", features = ["sync", "macros", "rt", "time"] }
+serde = { version = "1.0", features = ["derive"] }
+chrono = { workspace = true }
+tracing = "0.1"
+thiserror = "1.0"

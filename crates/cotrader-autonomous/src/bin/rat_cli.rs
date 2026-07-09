@@ -94,7 +94,7 @@ async fn run_demo(
         async fn close_position(&self, _id: &str, _price: f64) -> Result<cotrader_core::paper_engine::ClosedTrade, String> {
             Ok(cotrader_core::paper_engine::ClosedTrade {
                 id: "closed-1".to_string(), symbol: "TEST".to_string(),
-                direction: cotrader_core::TradeDirection::Long, qty: 1,
+                direction: cotrader_core::TradeDirection::Long, qty: 1.0,
                 entry_price: 100.0, exit_price: 100.0, realized_pnl: 0.0, realized_pnl_pct: 0.0,
                 close_reason: cotrader_core::paper_engine::CloseReason::Manual,
                 opened_at: chrono::Utc::now(), closed_at: chrono::Utc::now(),
@@ -197,7 +197,7 @@ async fn run_self_evolution(
         async fn close_position(&self, _id: &str, _price: f64) -> Result<cotrader_core::paper_engine::ClosedTrade, String> {
             Ok(cotrader_core::paper_engine::ClosedTrade {
                 id: "closed-1".to_string(), symbol: "TEST".to_string(),
-                direction: cotrader_core::TradeDirection::Long, qty: 1,
+                direction: cotrader_core::TradeDirection::Long, qty: 1.0,
                 entry_price: 100.0, exit_price: 100.0, realized_pnl: 0.0, realized_pnl_pct: 0.0,
                 close_reason: cotrader_core::paper_engine::CloseReason::Manual,
                 opened_at: chrono::Utc::now(), closed_at: chrono::Utc::now(),

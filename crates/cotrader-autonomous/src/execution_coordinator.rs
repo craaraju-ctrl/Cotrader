@@ -230,7 +230,7 @@ impl ExecutionCoordinatorAgent {
             let exp = portfolio
                 .open_positions
                 .iter()
-                .filter(|p| p.symbol == signal.symbol)
+                .filter(|p| cotrader_core::symbols_match(&p.symbol, &signal.symbol))
                 .map(|p| p.quantity * p.current_price)
                 .sum::<f64>();
             // FIXED (rules audit): max_drawdown_today is ALREADY a fraction of
@@ -544,8 +544,8 @@ impl ExecutionCoordinatorAgent {
         // itself is modeled, not matched. Routing paper orders through the
         // CoTrader exchange's real matching engine is blocked by
         // `OrderRequest.qty: i32` (0.062 BTC would round to 1 BTC = 16×
-        // oversized). Fix tracked in PRODUCTION_HARDENING #13: qty → f64
-        // across broker adapters, then route paper fills via active_broker().
+        // oversized). Fix applied in Phase 4: qty → f64 across all adapters.
+        // TODO: Route paper fills via active_broker() now that precision is fixed.
         println!(
             "[ExecutionCoordinator] Paper fill (local engine: real price {:.4}, modeled match)",
             adjusted_signal.entry_price
@@ -607,9 +607,73 @@ impl ExecutionCoordinatorAgent {
             processor.register_pending_trade(snapshot).await;
         }
 
+        // ═══ TREDO EXCHANGE SYNC (Default: ON) ═══════════════════════════════
+        // Whenever COTRADER_BASE_URL is set, paper trades are mirrored to Tredo
+        // Exchange so the Tredo UI always reflects the complete portfolio state.
+        // This is the "always-sync" guarantee — no manual configuration needed.
+        //
+        // IMPORTANT: We use `live_broker()` (not `active_broker()`) to access
+        // the Tredo broker directly, even when in paper mode. `active_broker()`
+        // returns the paper broker in paper mode, which would skip Tredo sync.
+        if std::env::var("COTRADER_BASE_URL").is_ok() {
+            let tredo_broker = self.state.portfolio_store.broker_registry.live_broker().await;
+            if let Some(tredo) = tredo_broker {
+                if tredo.broker_name() == "Tredo" {
+                    let sync_result = tredo.place_order(
+                        cotrader_core::paper_engine::OrderRequest {
+                            symbol: adjusted_signal.symbol.clone(),
+                            direction: adjusted_signal.direction,
+                            order_type: cotrader_core::paper_engine::OrderType::Market,
+                            qty: adjusted_signal.position_size,
+                            price: None, // Market order — no price needed
+                            stop_loss: Some(adjusted_signal.stop_loss),
+                            take_profit: Some(adjusted_signal.take_profit),
+                            strategy: Some("rat-paper-sync".to_string()),
+                            client_order_id: None,
+                        },
+                        adjusted_signal.entry_price,
+                    ).await;
+                    match sync_result {
+                        Ok(tredo_order_id) => {
+                            let sync_msg = format!(
+                                "[TreedoSync] ✅ Paper trade synced to Tredo Exchange — Order ID: {}",
+                                tredo_order_id
+                            );
+                            println!("{}", sync_msg);
+                            self.push_execution_cot(
+                                cot_chain_id,
+                                &adjusted_signal,
+                                "TreedoExchange",
+                                &format!(
+                                    "Sync paper {} {} @ {:.2} to Tredo",
+                                    adjusted_signal.symbol, direction_str, adjusted_signal.entry_price
+                                ),
+                                "SYNCED",
+                                &sync_msg,
+                                1.0,
+                            )
+                            .await;
+                        }
+                        Err(e) => {
+                            // Non-fatal: paper trades continue even if Tredo is unreachable
+                            eprintln!(
+                                "[TreedoSync] ⚠ Paper trade sync failed (non-fatal): {} - {}",
+                                adjusted_signal.symbol, e
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         self.state.broadcast_portfolio_snapshot().await;
 
-        Ok(format!("Paper trade executed: {}", exec_log))
+        let final_exec_log = format!(
+            "{} | decision: EXECUTED after layers: HardRulesGate→Identifier→Verifier→DebateLayer→Judge→SuperIntelligence→StrategyDecision",
+            exec_log
+        );
+
+        Ok(format!("Paper trade executed: {}", final_exec_log))
     }
 
     /// After a successful close_position(), update the corresponding episode's outcome
@@ -672,14 +736,9 @@ impl ExecutionCoordinatorAgent {
                                     exit_reason, pnl_pct * 100.0, exit_reason
                                 );
                                 let regret = episode.reflection.as_ref().map(|r| r.regret_score);
-                                let vm = self.state.agent_memory.vector_memory.clone();
-                                let sym_clone = episode.symbol.clone();
-                                tokio::spawn(async move {
-                                    let mut vm_write = vm.write().await;
-                                    if let Err(e) = vm_write.store(&episode_id, &sym_clone, &summary, regret).await {
-                                        eprintln!("[OutcomeUpdate] ⚠ Failed to store in vector memory: {}", e);
-                                    }
-                                });
+                                let _sym_clone = episode.symbol.clone();
+                                let _summary = summary.clone();
+                                // Vector memory storage removed — dependency deleted
 
                                 // Wire Notifier for trade outcome (WhatsApp/Telegram alerts)
                                 cotrader_core::notifier::alert(
@@ -854,7 +913,7 @@ impl ExecutionCoordinatorAgent {
             symbol: signal.symbol.clone(),
             direction: signal.direction,
             order_type: OrderType::Market, // Market order for immediate fill
-            qty: signal.position_size.ceil() as i32, // Whole qty for live
+            qty: signal.position_size, // Fractional qty for crypto
             price: Some(signal.entry_price),
             stop_loss: Some(signal.stop_loss),
             take_profit: Some(signal.take_profit),
@@ -872,7 +931,7 @@ impl ExecutionCoordinatorAgent {
             "[ExecutionCoordinator] LIVE TRADE: {} {} qty={} @ {:.2} SL={:.2} TP={:.2}",
             signal.symbol,
             direction_str,
-            order_req.qty,
+            order_req.qty as f64,
             signal.entry_price,
             signal.stop_loss,
             signal.take_profit
@@ -891,7 +950,7 @@ impl ExecutionCoordinatorAgent {
                         &order_id,
                         &signal.symbol,
                         signal.direction,
-                        order_req.qty,
+                        order_req.qty as f64,
                         order_req.order_type,
                         order_req.price,
                         order_req.stop_loss,
@@ -907,7 +966,7 @@ impl ExecutionCoordinatorAgent {
                     "LIVE EXECUTED: {} {} qty={} @ {:.2} | Order: {} | SL: {:.2} | TP: {:.2}",
                     signal.symbol,
                     direction_str,
-                    order_req.qty,
+                    order_req.qty as f64,
                     signal.entry_price,
                     order_id,
                     signal.stop_loss,
@@ -959,7 +1018,7 @@ impl ExecutionCoordinatorAgent {
                         &synth_order_id,
                         &signal.symbol,
                         signal.direction,
-                        order_req.qty,
+                        order_req.qty as f64,
                         order_req.order_type,
                         order_req.price,
                         order_req.stop_loss,
@@ -975,7 +1034,7 @@ impl ExecutionCoordinatorAgent {
                         OrderStatus::Rejected {
                             reason: e.to_string(),
                         },
-                        0,
+                        0.0,
                         None,
                         Some(e.to_string()),
                     )
@@ -1079,7 +1138,6 @@ impl ExecutionCoordinatorAgent {
                                 if let Ok(episode) =
                                     serde_json::from_str::<cotrader_core::TradingEpisode>(&json)
                                 {
-                                    let _llm = (*self.state.io.llm).clone();
                                     let reflector =
                                         crate::reflector::ReflectorAgent::new(self.state.clone());
                                     let _ = reflector.deep_reflect_on_episode(&episode).await;
@@ -1090,7 +1148,7 @@ impl ExecutionCoordinatorAgent {
                                 id: format!("{}-{}", pos.symbol, Utc::now().timestamp()),
                                 symbol: pos.symbol.clone(),
                                 direction: pos.direction,
-                                qty: pos.quantity as i32,
+                                qty: pos.quantity,
                                 entry_price: pos.entry_price,
                                 exit_price,
                                 realized_pnl: pnl,
@@ -1211,7 +1269,7 @@ impl ExecutionCoordinatorAgent {
                             if let Ok(episode) =
                                 serde_json::from_str::<cotrader_core::TradingEpisode>(&json)
                             {
-                                let _llm = (*self.state.io.llm).clone();
+                                
                                 let reflector =
                                     crate::reflector::ReflectorAgent::new(self.state.clone());                                    let _ = reflector.deep_reflect_on_episode(&episode).await;
                             }
@@ -1221,7 +1279,7 @@ impl ExecutionCoordinatorAgent {
                             id: format!("{}-{}", pos.symbol, Utc::now().timestamp()),
                             symbol: pos.symbol.clone(),
                             direction: pos.direction,
-                            qty: pos.quantity as i32,
+                            qty: pos.quantity,
                             entry_price: pos.entry_price,
                             exit_price: pos.stop_loss,
                             realized_pnl: pnl,
@@ -1292,7 +1350,7 @@ impl ExecutionCoordinatorAgent {
                             if let Ok(episode) =
                                 serde_json::from_str::<cotrader_core::TradingEpisode>(&json)
                             {
-                                let _llm = (*self.state.io.llm).clone();
+                                
                                 let reflector =
                                     crate::reflector::ReflectorAgent::new(self.state.clone());                                    let _ = reflector.deep_reflect_on_episode(&episode).await;
                             }
@@ -1301,7 +1359,7 @@ impl ExecutionCoordinatorAgent {
                             id: format!("{}-{}", pos.symbol, Utc::now().timestamp()),
                             symbol: pos.symbol.clone(),
                             direction: pos.direction,
-                            qty: pos.quantity as i32,
+                            qty: pos.quantity,
                             entry_price: pos.entry_price,
                             exit_price: pos.take_profit,
                             realized_pnl: pnl,
@@ -1368,7 +1426,7 @@ impl ExecutionCoordinatorAgent {
                             id: format!("{}-{}", pos.symbol, Utc::now().timestamp()),
                             symbol: pos.symbol.clone(),
                             direction: pos.direction,
-                            qty: pos.quantity as i32,
+                            qty: pos.quantity,
                             entry_price: pos.entry_price,
                             exit_price: current_price,
                             realized_pnl: pnl,

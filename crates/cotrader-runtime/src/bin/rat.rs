@@ -13,9 +13,7 @@
 //!     cotrader stop                          # Stop all running services
 //!     cotrader status                        # Show all service health
 //!     cotrader build                         # Build the project
-//!     cotrader start-kronos                  # Start Kronos forecast server
-//!     cotrader start-kronos --port 8000      # Start Kronos on custom port
-//!     cotrader download                      # Download Chronos model
+//!     cotrader download                      # Download Chronos-Bolt model
 //!     cotrader list                          # List available brokers
 //!     cotrader configure <broker_id>         # Configure a broker
 //!     cotrader cache                         # Show policy cache stats
@@ -28,6 +26,7 @@ use colored::*;
 use std::sync::Arc;
 use cotrader_autonomous::AutonomousOrchestrator;
 use cotrader_core::paper_engine::{BrokerAdapter, BrokerRegistry};
+use cotrader_ml::models::chronos_bolt;
 use cotrader_runtime::broker::{BrokerConfig, BrokerPluginManager};
 use cotrader_runtime::engine::RuntimeEngine;
 use cotrader_runtime::mode::{ModeConfig, TradingMode};
@@ -119,15 +118,18 @@ enum Command {
     /// Show policy cache health and top performers
     Cache,
 
-    /// Start only the Kronos forecast server
-    StartKronos {
-        /// Port to run the server on (default: 8000)
-        #[arg(long, default_value_t = 8000)]
-        port: u16,
-    },
-
     /// Download the Chronos-Bolt model from HuggingFace Hub
     Download,
+
+    /// Download the Llama-3.2-3B reasoning engine (GGUF, ~2GB)
+    DownloadLlm,
+
+    /// Run the bootstrap setup wizard (model backend selection)
+    Setup {
+        /// Force re-run even if setup_completed
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
 
     /// Generate shell completions
     Completions {
@@ -147,7 +149,7 @@ enum Shell {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Helper: find the project root directory containing kronos_service/
+// Helper: find the project root directory
 // ═══════════════════════════════════════════════════════════════════════════════
 
 fn find_project_root() -> std::path::PathBuf {
@@ -155,30 +157,13 @@ fn find_project_root() -> std::path::PathBuf {
     if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
         let p = std::path::PathBuf::from(&manifest);
         // CARGO_MANIFEST_DIR is .../crates/cotrader-runtime; project root is ../..
-        let root = p.parent().and_then(|p| p.parent()).map(|p| p.to_path_buf());
-        if let Some(root) = root {
-            if root.join("kronos_service").join("main.py").exists() {
-                return root;
-            }
+        if let Some(root) = p.parent().and_then(|p| p.parent()) {
+            return root.to_path_buf();
         }
     }
 
     // Try current working directory
-    let cwd = std::env::current_dir().unwrap_or_default();
-    if cwd.join("kronos_service").join("main.py").exists() {
-        return cwd;
-    }
-
-    // Try parent of cwd
-    if let Some(parent) = cwd.parent() {
-        if parent.join("kronos_service").join("main.py").exists() {
-            return parent.to_path_buf();
-        }
-    }
-
-    // Fallback: return cwd
-    eprintln!("[cotrader] Could not locate kronos_service/ directory. Using current directory.");
-    cwd
+    std::env::current_dir().unwrap_or_default()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -208,24 +193,6 @@ fn write_pid(pid_file: &std::path::Path, pid: u32) {
 
 fn remove_pid(pid_file: &std::path::Path) {
     std::fs::remove_file(pid_file).ok();
-}
-
-async fn wait_for_port(port: u16, name: &str, max_secs: u64) -> bool {
-    for i in 0..max_secs {
-        if tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
-            .await
-            .is_ok()
-        {
-            println!("  {} {} listening on port {}", "✓".green().bold(), name.green(), port);
-            return true;
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        if i % 5 == 4 {
-            println!("  {} Waiting for {} on port {} ({}s)...", "..".dimmed(), name, port, i + 1);
-        }
-    }
-    println!("  {} {} did not respond on port {} after {}s", "⚠".yellow(), name.yellow(), port, max_secs);
-    false
 }
 
 async fn handle_start_all(
@@ -399,184 +366,7 @@ async fn handle_status() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Attempt to find a working `python3` or `python` executable.
-fn find_python() -> Option<String> {
-    for candidate in &["python3", "python"] {
-        if std::process::Command::new(candidate)
-            .arg("--version")
-            .output()
-            .is_ok()
-        {
-            return Some(candidate.to_string());
-        }
-    }
-    None
-}
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// Handler: rat start-kronos
-// ═══════════════════════════════════════════════════════════════════════════════
-
-async fn handle_start_kronos(port: u16) -> anyhow::Result<()> {
-    let python = find_python().ok_or_else(|| {
-        anyhow::anyhow!("Python not found. Install Python 3 and ensure `python3` is on your PATH.")
-    })?;
-
-    let root = find_project_root();
-    let script = root.join("kronos_service").join("main.py");
-    if !script.exists() {
-        anyhow::bail!(
-            "Kronos service script not found at: {}\n\
-             Make sure you're running from the rat project root.",
-            script.display()
-        );
-    }
-
-    // Check if requirements are installed
-    println!("[cotrader] 🐍 Using: {} from: {}", python, script.display());
-    println!(
-        "[cotrader] 🌐 Starting Kronos forecast server on port {}...",
-        port
-    );
-    println!("[cotrader]    To stop: Ctrl+C\n");
-
-    let mut restart_delay = std::time::Duration::from_millis(500);
-    const MAX_RESTART_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
-
-    loop {
-        let mut child = tokio::process::Command::new(&python)
-            .arg(&script)
-            .env("KRONOS_PORT", port.to_string())
-            .current_dir(&root)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .context("Failed to spawn python3 kronos_service/main.py")?;
-
-        let pid = child.id().unwrap_or(0);
-        println!("[cotrader] Kronos PID {} started", pid);
-
-        // Spawn stdout reader
-        let stdout = child.stdout.take();
-        if let Some(stdout) = stdout {
-            tokio::spawn(async move {
-                use tokio::io::AsyncBufReadExt;
-                let reader = tokio::io::BufReader::new(stdout);
-                let mut lines = reader.lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    println!("[cotrader] {}", line);
-                }
-            });
-        }
-
-        // Spawn stderr reader
-        let stderr = child.stderr.take();
-        if let Some(stderr) = stderr {
-            tokio::spawn(async move {
-                use tokio::io::AsyncBufReadExt;
-                let reader = tokio::io::BufReader::new(stderr);
-                let mut lines = reader.lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    eprintln!("[cotrader:err] {}", line);
-                }
-            });
-        }
-
-        // Wait for the child to exit OR for Ctrl+C
-        let status = tokio::select! {
-            status = child.wait() => status?,
-            _ = tokio::signal::ctrl_c() => {
-                println!("\n[cotrader] ⏹ Shutting down Kronos server...");
-                // kill_on_drop will handle the subprocess when `child` drops
-                drop(child);
-                // Small wait for graceful shutdown
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                println!("[cotrader] Kronos server stopped.");
-                return Ok(());
-            }
-        };
-
-        if let Some(code) = status.code() {
-            println!(
-                "[kronos] ⚠ Process exited with code {}. Restarting in {:.1}s...",
-                code,
-                restart_delay.as_secs_f64()
-            );
-        } else {
-            println!(
-                "[kronos] ⚠ Process terminated by signal. Restarting in {:.1}s...",
-                restart_delay.as_secs_f64()
-            );
-        }
-
-        // Wait before restarting (exponential backoff, capped)
-        tokio::time::sleep(restart_delay).await;
-        restart_delay = (restart_delay * 2).min(MAX_RESTART_DELAY);
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Handler: rat download-model
-// ═══════════════════════════════════════════════════════════════════════════════
-
-async fn handle_download_model() -> anyhow::Result<()> {
-    let python = find_python().ok_or_else(|| {
-        anyhow::anyhow!("Python not found. Install Python 3 and ensure `python3` is on your PATH.")
-    })?;
-
-    let root = find_project_root();
-    let script = root.join("kronos_service").join("download.py");
-    if !script.exists() {
-        anyhow::bail!(
-            "Download script not found at: {}\n\
-             Make sure you're running from the rat project root.",
-            script.display()
-        );
-    }
-
-    println!("[cotrader] 🐍 Using: {} from: {}", python, script.display());
-
-    // Optionally check/install requirements first
-    let reqs = root.join("kronos_service").join("requirements.txt");
-    if reqs.exists() {
-        println!("[cotrader] 📦 Checking Python dependencies...");
-        let check = tokio::process::Command::new(&python)
-            .args(["-m", "pip", "install", "-r", &reqs.to_string_lossy()])
-            .current_dir(&root)
-            .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
-            .status()
-            .await
-            .context("Failed to run pip install")?;
-
-        if !check.success() {
-            eprintln!("[cotrader] ⚠ pip install had issues — continuing anyway...");
-        }
-    }
-
-    println!("[cotrader] ⬇ Downloading Chronos-Bolt model from HuggingFace Hub...\n");
-
-    let status = tokio::process::Command::new(&python)
-        .arg(&script)
-        .current_dir(&root)
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .status()
-        .await
-        .context("Failed to run download.py")?;
-
-    if status.success() {
-        println!("\n[cotrader] Model downloaded successfully. Start the Kronos server with:");
-        println!("   cotrader start-kronos");
-        Ok(())
-    } else {
-        anyhow::bail!(
-            "Download failed with exit code {:?}",
-            status.code().unwrap_or(-1)
-        );
-    }
-}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Subcommand Handlers
@@ -586,13 +376,79 @@ async fn handle_download_model() -> anyhow::Result<()> {
 async fn handle_command(cmd: &Command) -> anyhow::Result<()> {
     // Service commands exit early
     match cmd {
-        Command::StartKronos { port } => return handle_start_kronos(*port).await,
-        Command::Download => return handle_download_model().await,
         Command::Start { mode, symbols, tui, confirm_live } => {
             return handle_start_all(*mode, symbols.clone(), *tui, *confirm_live).await;
         }
         Command::Stop => return handle_stop().await,
         Command::Status => return handle_status().await,
+        Command::Download => {
+            println!("\n  Downloading Chronos-Bolt model from HuggingFace Hub...\n");
+            match chronos_bolt::download_model() {
+                Ok(path) => {
+                    println!("  ✅ Model downloaded and cached at: {}", path);
+                    // Load into global CHRONOS_MODEL for immediate use by the trend layer
+                    let _ = cotrader_autonomous::tri_level_validator::load_chronos_global();
+                    println!("  ✅ Chronos-Bolt model loaded and ready for inference.\n");
+                    return Ok(());
+                }
+                Err(e) => {
+                    eprintln!("  ❌ Download failed: {}", e);
+                    anyhow::bail!("Model download failed");
+                }
+            }
+        }
+        Command::Setup { force } => {
+            let sys = cotrader_core::config::SystemConfig::load();
+            if sys.setup_completed && !force {
+                println!("\n  Setup already completed. Use --force to re-run: `cotrader setup --force`\n");
+                println!("  Current backend: {:?}", sys.llama_backend);
+                return Ok(());
+            }
+            println!("\n  Running bootstrap setup wizard...\n");
+            match cotrader_autonomous::setup::run_setup_wizard() {
+                Ok(_) => {
+                    println!("  ✅ Setup completed. Run `cotrader serve` to start trading.\n");
+                    return Ok(());
+                }
+                Err(e) => {
+                    eprintln!("  ❌ Setup failed: {}", e);
+                    anyhow::bail!("Setup failed");
+                }
+            }
+        }
+        Command::DownloadLlm => {
+            // Check if Ollama is available first — suggest using it
+            let ollama_models = cotrader_autonomous::setup::discover_ollama_models("http://localhost:11434");
+            match ollama_models {
+                Ok(models) if !models.is_empty() => {
+                    let suitable = cotrader_autonomous::setup::filter_suitable_models(&models);
+                    if let Some(best) = suitable.first() {
+                        println!("\n  ✅ Ollama detected with compatible model: {}", best.name);
+                        println!("     (zero additional download needed, zero RAM overhead)");
+                        println!("     Run `cotrader setup` to switch to Ollama backend.\n");
+                    }
+                }
+                _ => {
+                    println!("  ℹ No Ollama instance detected.");
+                }
+            }
+
+            println!("  Downloading Llama-3.2-3B reasoning engine (GGUF, ~2GB)...");
+            println!("  This will take a few minutes depending on your connection.\n");
+            match cotrader_ml::models::reasoning_engine::download_model() {
+                Ok(path) => {
+                    println!("  ✅ LLM model downloaded and cached at: {}", path);
+                    // Load into global LLM backend for immediate use
+                    let _ = cotrader_autonomous::tri_level_validator::load_llm_global();
+                    println!("  ✅ LLM reasoning engine loaded and ready for arbitration.\n");
+                    return Ok(());
+                }
+                Err(e) => {
+                    eprintln!("  ❌ Download failed: {}", e);
+                    anyhow::bail!("LLM model download failed");
+                }
+            }
+        }
         Command::Completions { shell } => {
             let shell_name = match shell {
                 Shell::Bash => clap_complete::Shell::Bash,
@@ -703,11 +559,12 @@ async fn handle_command(cmd: &Command) -> anyhow::Result<()> {
             let paper_broker: Arc<dyn BrokerAdapter> = Arc::new(
                 cotrader_runtime::broker::plugin_registry::PaperBroker::new()
             );
+            let storage = cotrader_core::config::StorageConfig::default();
             let state = cotrader_autonomous::state::SharedState::new(
-                cotrader_core::MemoryStore::new("rat.redb")?,
+                cotrader_core::MemoryStore::new(&*storage.memory_db().to_string_lossy())?,
                 cotrader_core::DisciplineRules::default(),
                 cotrader_core::Config::default(),
-                "rat_history.db",
+                &storage.main_db().to_string_lossy(),
                 paper_broker,
             )?;
             let cache = cotrader_runtime::policy_cache::PolicyCache::from_disk(state);
@@ -745,9 +602,8 @@ async fn handle_command(cmd: &Command) -> anyhow::Result<()> {
             println!("    min_confidence: {:.2}", cache.config().min_confidence);
         }
         // These are handled in main or above
-        Command::StartKronos { .. } | Command::Download | Command::Serve { .. }
-        | Command::Start { .. } | Command::Stop | Command::Status | Command::Build { .. }
-        | Command::Completions { .. } => unreachable!(),
+        Command::Download | Command::DownloadLlm | Command::Serve { .. } | Command::Start { .. } | Command::Stop
+        | Command::Status | Command::Build { .. } | Command::Completions { .. } | Command::Setup { .. } => unreachable!(),
     }
     Ok(())
 }
@@ -806,6 +662,33 @@ async fn build_live_broker_registry() -> anyhow::Result<Option<BrokerRegistry>> 
         }
     }
 
+    // Check for Tredo Exchange via env var (COTRADER_BASE_URL)
+    if let Ok(tredo_url) = std::env::var("COTRADER_BASE_URL") {
+        if !tredo_url.is_empty() {
+            eprintln!("Found Tredo Exchange at {}", tredo_url);
+            let tredo_broker: Arc<dyn BrokerAdapter> = Arc::new(
+                cotrader_runtime::broker::plugin_registry::TredoBroker::from_env()
+            );
+            match tredo_broker.connect().await {
+                Ok(()) => {
+                    let paper_broker: Arc<dyn BrokerAdapter> = Arc::new(
+                        cotrader_runtime::broker::plugin_registry::PaperBroker::new()
+                    );
+                    let br = BrokerRegistry::new(paper_broker);
+                    br.register_live_broker(tredo_broker).await;
+                    br.set_mode(cotrader_core::paper_engine::TradingMode::Live)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Failed to set live mode: {}", e))?;
+                    eprintln!("Tredo Exchange connected — live trading enabled");
+                    return Ok(Some(br));
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to connect Tredo Exchange: {}", e);
+                }
+            }
+        }
+    }
+
     eprintln!("No saved broker config found. Use `cotrader configure <broker_id>` first.");
     Ok(None)
 }
@@ -829,7 +712,7 @@ async fn main() -> anyhow::Result<()> {
                 capital,
             } => {
                 // Run the trading system with these args
-                let mode_config = ModeConfig {
+                let mut mode_config = ModeConfig {
                     mode: *mode,
                     require_trade_confirmation: true,
                     max_daily_loss: *max_daily_loss,
@@ -868,13 +751,41 @@ async fn main() -> anyhow::Result<()> {
     let paper_broker: Arc<dyn cotrader_core::paper_engine::BrokerAdapter> = {
         Arc::new(cotrader_runtime::broker::plugin_registry::PaperBroker::new())
     };
+    let storage = cotrader_core::config::StorageConfig::default();
     let state = cotrader_autonomous::state::SharedState::new(
-                    cotrader_core::MemoryStore::new("rat.redb")?,
+                    cotrader_core::MemoryStore::new(&*storage.memory_db().to_string_lossy())?,
                     cotrader_core::DisciplineRules::default(),
                     cotrader_core::Config::default(),
-                    "rat_history.db",
+                    &storage.main_db().to_string_lossy(),
                     paper_broker,
                 )?;
+                // ── Bootstrap & Setup Mode ────────────────────────────
+                let system_config = cotrader_core::config::SystemConfig::load();
+                if !system_config.setup_completed {
+                    eprintln!("  First boot detected — launching setup wizard...");
+                    match cotrader_autonomous::setup::run_setup_wizard() {
+                        Ok(_) => {
+                            // Wizard saved config to disk; fresh Config picks it up
+                            let fresh_config = cotrader_core::Config::load();
+                            if fresh_config.llama_backend == cotrader_core::config::LlamaBackend::CandleGGUF {
+                                let _ = cotrader_autonomous::tri_level_validator::load_chronos_global();
+                            }
+                            let _ = cotrader_autonomous::tri_level_validator::load_llm_from_config(&fresh_config);
+                        }
+                        Err(e) => {
+                            eprintln!("  ⚠ Setup wizard failed: {} (run `cotrader setup --force` to retry)", e);
+                        }
+                    }
+                } else {
+                    // Eager-load AI models according to saved config
+                    if let Err(e) = cotrader_autonomous::tri_level_validator::load_chronos_global() {
+                        eprintln!("  ⚠ Chronos-Bolt: {} (trend layer uses fallback)", e);
+                    }
+                    if let Err(e) = cotrader_autonomous::tri_level_validator::load_llm_from_config(&cotrader_core::Config::load()) {
+                        eprintln!("  ⚠ LLM backend: {} (run `cotrader setup --force` to reconfigure)", e);
+                    }
+                }
+
                 let mut orchestrator = AutonomousOrchestrator::new(state);
                 orchestrator.init_rat();
 
@@ -896,32 +807,50 @@ async fn main() -> anyhow::Result<()> {
                 }
                 let symbols = orchestrator.state.market_data.watchlist.read().await.clone();
 
-                // Build broker registry (for live mode)
-                let broker_registry: Option<Arc<BrokerRegistry>> =
-                    if *mode == TradingMode::Live {
+                // Build broker registry — auto-detect TredoExchange when COTRADER_BASE_URL is set
+                let broker_registry: Option<Arc<BrokerRegistry>> = {
+                    let should_try_live = *mode == TradingMode::Live
+                        || std::env::var("COTRADER_BASE_URL").is_ok();
+                    if should_try_live {
                         match build_live_broker_registry().await {
                             Ok(Some(registry)) => {
-                                println!(
-                                    "✓ Live broker registered: {}",
-                                    registry.current_broker_name().await
-                                );
-                                Some(Arc::new(registry))
+                                let name = registry.current_broker_name().await;
+                                println!("✓ Live broker registered: {}", name);
+                                // Auto-upgrade mode to Live when broker connects
+                                mode_config.mode = TradingMode::Live;
+                                let arc_reg = Arc::new(registry);
+                                // Sync the live registry into the orchestrator's state
+                                // so ExecutionCoordinator reads the correct mode
+                                {
+                                    let state_reg = &orchestrator.state.portfolio_store.broker_registry;
+                                    // Replace the PaperBroker inside the state's registry
+                                    // with the live TredoBroker
+                                    let live = arc_reg.live_broker().await.expect("live broker must exist");
+                                    state_reg.register_live_broker(live).await;
+                                    state_reg.set_mode(cotrader_core::paper_engine::TradingMode::Live).await.ok();
+                                }
+                                Some(arc_reg)
                             }
                             Ok(None) => {
-                                eprintln!(
-                                    "⚠ No live broker configured. Use `rat configure <broker_id>` first."
-                                );
+                                if *mode == TradingMode::Live {
+                                    eprintln!(
+                                        "⚠ No live broker configured. Use `cotrader configure <broker_id>` first."
+                                    );
+                                }
                                 None
                             }
                             Err(e) => {
                                 eprintln!("⚠ Failed to configure live broker: {}", e);
-                                eprintln!("  Falling back to paper mode for execution.");
+                                if *mode == TradingMode::Live {
+                                    eprintln!("  Falling back to paper mode for execution.");
+                                }
                                 None
                             }
                         }
                     } else {
                         None
-                    };
+                    }
+                };
 
                 // Run
                 let engine = RuntimeEngine::new(

@@ -293,7 +293,7 @@ impl SelfEvolutionValidator {
                 let _price = {
                     let portfolio = self.orchestrator.state.portfolio_store.portfolio.read().await;
                     let s = symbol.to_string();
-                    if let Some(pos) = portfolio.open_positions.iter().find(|p| p.symbol == s) {
+                    if let Some(pos) = portfolio.open_positions.iter().find(|p| cotrader_core::symbols_match(&p.symbol, &s)) {
                         pos.current_price
                     } else {
                         let history = self.orchestrator.state.market_data.ohlcv_history.read().await;

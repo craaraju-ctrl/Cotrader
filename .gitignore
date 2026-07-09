@@ -1,47 +1,82 @@
-# Rust build artifacts
-/target/
-**/*.rs.bk
+# ══════════════════════════════════════════════════════════════════════════════
+# CoTrader .gitignore
+# ══════════════════════════════════════════════════════════════════════════════
 
-# Environment and secrets
+# ── Build Artifacts ──────────────────────────────────────────────────────────
+target/
+*.o
+*.d
+*.rlib
+*.rmeta
+*.pdb
+
+# ── Environment & Secrets ────────────────────────────────────────────────────
 .env
-.env.local
+.env.*
+rat.env
 config/rat.env
+*.secret
+*.key
 
-# Database files
+# ── Local Databases ──────────────────────────────────────────────────────────
 *.db
-*.db-shm
+*.db-journal
 *.db-wal
+*.db-shm
+storage/*.db
+storage/*.db-journal
+storage/*.db-wal
+storage/*.db-shm
 
-# Log files
+# ── Logs & Temporary Files ───────────────────────────────────────────────────
+*.log
 logs/
+data/logs/
+*.jsonl
+tri_level_reasoning.jsonl
 
-# Data directory
-data/
+# ── Model Cache ──────────────────────────────────────────────────────────────
+.fastembed_cache/
+data/cache/
+models/
+*.safetensors
+*.gguf
 
-# IDE
+# ── OS-Specific ──────────────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# ── IDE & Editor ─────────────────────────────────────────────────────────────
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
+.project
+.classpath
+.settings/
 
-# OS
-.DS_Store
-Thumbs.db
+# ── Rust-Specific ────────────────────────────────────────────────────────────
+Cargo.lock
 
-# Redb files
-*.redb
+# ── Runtime Artifacts ────────────────────────────────────────────────────────
+*.pid
+*.sock
+*.tmp
 
-# Python
-__pycache__/
-*.pyc
-.venv/
+# ── Research Artifacts (not for production) ──────────────────────────────────
+survey/
+*.research.json
 
-# Node
-node_modules/
-dist/
+# ── Docker ───────────────────────────────────────────────────────────────────
+docker-compose.override.yml
 
-# Kronos model cache
-kronos/models/
-.fastembed_cache/
-memory/data.db
+# ── Node (for MiMoCode tooling) ─────────────────────────────────────────────
+.mimocode/node_modules/
+.mimocode/plans/

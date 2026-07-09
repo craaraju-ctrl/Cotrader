@@ -235,7 +235,7 @@ pub struct App {
     pub show_help: bool,
     pub show_search: bool,
     pub search_query: String,
-    pub last_tick: Option<std::time::Instant>,
+
     pub ws_connected: bool,
     pub error: Option<String>,
     /// Per-source data freshness: source name → (last fetch ok?, when).
@@ -321,10 +321,6 @@ impl App {
         state
     }
 
-    pub fn set_error(&mut self, msg: String) {
-        self.error = Some(msg);
-    }
-
     pub fn clear_error(&mut self) {
         self.error = None;
     }
@@ -334,30 +330,6 @@ impl App {
         const MAX_SCROLL: usize = 500;
         if self.scroll_offset > MAX_SCROLL {
             self.scroll_offset = MAX_SCROLL;
-        }
-    }
-
-    /// Set max scroll based on content length and visible height
-    pub fn set_scroll_max(&mut self, content_len: usize, visible_height: usize) {
-        let max = content_len.saturating_sub(visible_height);
-        if self.scroll_offset > max {
-            self.scroll_offset = max;
-        }
-        self.clamp_scroll();
-    }
-
-    /// Add a new alert to the notification queue
-    pub fn add_alert(&mut self, level: AlertLevel, title: String, message: String) {
-        self.alerts.push_front(Alert {
-            level,
-            title,
-            message,
-            timestamp: chrono::Local::now(),
-            read: false,
-        });
-        // Cap at 50 alerts
-        while self.alerts.len() > 50 {
-            self.alerts.pop_back();
         }
     }
 

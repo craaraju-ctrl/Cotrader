@@ -13,7 +13,6 @@ pub struct AutonomousOrchestrator {
     pub market_intel: Arc<crate::market_intelligence::MarketIntelligenceAgent>,
     pub risk_psych: Arc<crate::risk_psychology::RiskPsychologyAgent>,
     pub reflector: Arc<crate::reflector::ReflectorAgent>,
-    pub strategy: Arc<crate::strategy_decision::StrategyDecisionAgent>,
     pub portfolio: Arc<crate::portfolio_manager::PortfolioManagerAgent>,
     pub execution: Arc<crate::execution_coordinator::ExecutionCoordinatorAgent>,
     pub risk_calc: Arc<crate::risk_calculator::RiskCalculatorAgent>,
@@ -53,9 +52,6 @@ impl AutonomousOrchestrator {
                 state.clone(),
             )),
             reflector: Arc::new(crate::reflector::ReflectorAgent::new(state.clone())),
-            strategy: Arc::new(crate::strategy_decision::StrategyDecisionAgent::new(
-                state.clone(),
-            )),
             portfolio: Arc::new(crate::portfolio_manager::PortfolioManagerAgent::new(
                 state.clone(),
             )),

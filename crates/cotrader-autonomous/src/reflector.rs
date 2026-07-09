@@ -3,8 +3,21 @@ use async_trait::async_trait;
 use chrono::Utc;
 use std::error::Error;
 use cotrader_core::{
-    Agent, AgentInput, AgentOutput, AgentTier, PostTradeReflection, TradingEpisode,
+    Agent, AgentInput, AgentOutput, AgentTier, TradingEpisode,
 };
+
+/// Local definition of PostTradeReflection (removed from cotrader-core).
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct PostTradeReflection {
+    pub timestamp: chrono::DateTime<Utc>,
+    pub lesson: String,
+    pub violated_assumptions: Vec<String>,
+    pub regret_score: f64,
+    pub what_went_wrong: Vec<String>,
+    pub what_went_right: Vec<String>,
+    pub suggested_rule_change: Option<String>,
+    pub should_alert: bool,
+}
 
 pub struct ReflectorAgent {
     pub state: SharedState,
@@ -65,7 +78,7 @@ impl ReflectorAgent {
     pub async fn deep_reflect_on_episode(
         &self,
         episode: &TradingEpisode,
-    ) -> Result<PostTradeReflection, Box<dyn Error + Send + Sync>> {
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
         println!(
             "[Reflector] 🔬 Deep reflecting on episode {}...",
             episode.episode_id
@@ -151,16 +164,7 @@ impl ReflectorAgent {
             "{} reflection: lesson={} regret={:.2}",
             episode.symbol, lesson, regret
         );
-        // Store reflection in vector memory for future semantic recall
-        let vm = self.state.agent_memory.vector_memory.clone();
-        let eid = episode.episode_id.clone();
-        let sym = episode.symbol.clone();
-        tokio::spawn(async move {
-            let mut vm_write = vm.write().await;
-            if let Err(e) = vm_write.store(&eid, &sym, &summary, Some(regret)).await {
-                eprintln!("[Reflector] ⚠ Failed to store reflection in vector memory: {}", e);
-            }
-        });
+        // Store reflection in vector memory (removed — dependency deleted)
 
         if should_alert {
             println!("[Reflector] 🚨 CRITICAL LESSON: {}", lesson);
@@ -179,7 +183,7 @@ impl ReflectorAgent {
             regret, lesson
         );
 
-        Ok(reflection)
+        Ok(())
     }
 }
 

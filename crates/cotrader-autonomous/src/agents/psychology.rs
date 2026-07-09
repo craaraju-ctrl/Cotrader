@@ -1,14 +1,11 @@
 //! Psychology Agent — Behavioral bias → emotional state → discipline enforcement.
-//!
-//! Merges: BehavioralPsychology, RiskPsychology
-//! Detects: revenge trading, overconfidence, FOMO, loss aversion, recency bias
 
 use super::reasoning::ReasoningChain;
-use crate::state::SharedState;
+use crate::types::{AgentOutputEvent, CacheFrame};
 
 #[derive(Clone)]
 pub struct PsychologyAgent {
-    pub state: SharedState,
+    pub cot_tx: tokio::sync::broadcast::Sender<AgentOutputEvent>,
 }
 
 #[derive(Debug, Clone)]
@@ -22,7 +19,7 @@ pub struct PsychologyState {
 #[derive(Debug, Clone)]
 pub struct Bias {
     pub name: String,
-    pub severity: f64, // 0.0-1.0
+    pub severity: f64,
     pub evidence: String,
     pub recommendation: String,
 }
@@ -38,13 +35,14 @@ pub enum EmotionalState {
 }
 
 impl PsychologyAgent {
-    pub fn new(state: SharedState) -> Self {
-        Self { state }
+    pub fn new(cot_tx: tokio::sync::broadcast::Sender<AgentOutputEvent>) -> Self {
+        Self { cot_tx }
     }
 
-    /// Assess current psychological state and detect biases.
-    pub async fn assess(&self) -> PsychologyState {
-        let portfolio = self.state.portfolio_store.portfolio.read().await;
+    /// Assess psychological state from CacheFrame portfolio data.
+    pub async fn assess(&self, frame: &CacheFrame) -> PsychologyState {
+        let portfolio = &frame.portfolio;
+        let stats = &frame.daily_stats;
         let mut biases = Vec::new();
         let mut adjustments = Vec::new();
 
@@ -54,51 +52,55 @@ impl PsychologyAgent {
                 name: "Revenge Trading".to_string(),
                 severity: 0.8,
                 evidence: format!("{} consecutive losses", portfolio.consecutive_losses),
-                recommendation: "Pause trading for 30 minutes. Reduce position size by 50%.".to_string(),
+                recommendation: "Pause trading for 30 minutes. Reduce position size by 50%."
+                    .to_string(),
             });
             adjustments.push("Reduce position size 50% — cooling off period".to_string());
         }
 
         // 2. Overconfidence Detection
-        if portfolio.winning_trades_today >= 5 && portfolio.losing_trades_today == 0 {
+        if stats.winning_trades_today >= 5 && stats.losing_trades_today == 0 {
             biases.push(Bias {
                 name: "Overconfidence".to_string(),
                 severity: 0.6,
-                evidence: format!("{} wins, 0 losses today", portfolio.winning_trades_today),
+                evidence: format!("{} wins, 0 losses today", stats.winning_trades_today),
                 recommendation: "Tighten stop losses. Remember: winning streaks end.".to_string(),
             });
             adjustments.push("Tighten stops — protect accumulated profits".to_string());
         }
 
         // 3. FOMO Detection
-        if portfolio.total_trades_today >= 15 {
+        if stats.total_trades_today >= 15 {
             biases.push(Bias {
                 name: "FOMO (Fear Of Missing Out)".to_string(),
                 severity: 0.7,
-                evidence: format!("{} trades today (high frequency)", portfolio.total_trades_today),
-                recommendation: "No new trades for 1 hour. Review if trades are justified.".to_string(),
+                evidence: format!("{} trades today (high frequency)", stats.total_trades_today),
+                recommendation: "No new trades for 1 hour. Review if trades are justified."
+                    .to_string(),
             });
             adjustments.push("No new trades for 1 hour — FOMO detected".to_string());
         }
 
         // 4. Loss Aversion Detection
-        if portfolio.daily_pnl < -portfolio.total_equity * 0.02 {
+        if stats.daily_pnl < -stats.total_equity * 0.02 {
             biases.push(Bias {
                 name: "Loss Aversion".to_string(),
                 severity: 0.5,
-                evidence: format!("Daily PnL: {:.2}% (losses feel twice as painful)",
-                    portfolio.daily_pnl / portfolio.total_equity * 100.0),
+                evidence: format!(
+                    "Daily PnL: {:.2}% (losses feel twice as painful)",
+                    stats.daily_pnl / stats.total_equity * 100.0
+                ),
                 recommendation: "Stick to rules. Don't hold losers hoping for recovery.".to_string(),
             });
         }
 
         // 5. Recency Bias Detection
-        // (would need trade history to detect — placeholder)
-        if portfolio.consecutive_losses >= 2 && portfolio.total_trades_today >= 8 {
+        if portfolio.consecutive_losses >= 2 && stats.total_trades_today >= 8 {
             biases.push(Bias {
                 name: "Recency Bias".to_string(),
                 severity: 0.4,
-                evidence: "Recent losses may be disproportionately influencing decisions".to_string(),
+                evidence: "Recent losses may be disproportionately influencing decisions"
+                    .to_string(),
                 recommendation: "Review 20+ trade history, not just recent trades.".to_string(),
             });
         }
@@ -107,24 +109,45 @@ impl PsychologyAgent {
         let discipline = if biases.is_empty() {
             0.95
         } else {
-            let avg_severity: f64 = biases.iter().map(|b| b.severity).sum::<f64>() / biases.len() as f64;
+            let avg_severity: f64 =
+                biases.iter().map(|b| b.severity).sum::<f64>() / biases.len() as f64;
             (1.0 - avg_severity).max(0.1)
         };
 
         // Determine emotional state
         let emotional_state = if portfolio.consecutive_losses >= 4 {
             EmotionalState::Frustrated
-        } else if portfolio.winning_trades_today >= 5 && portfolio.losing_trades_today == 0 {
+        } else if stats.winning_trades_today >= 5 && stats.losing_trades_today == 0 {
             EmotionalState::Overconfident
         } else if portfolio.consecutive_losses >= 2 {
             EmotionalState::Anxious
-        } else if portfolio.daily_pnl > portfolio.total_equity * 0.03 {
+        } else if stats.daily_pnl > stats.total_equity * 0.03 {
             EmotionalState::Excited
-        } else if portfolio.daily_pnl < -portfolio.total_equity * 0.02 {
+        } else if stats.daily_pnl < -stats.total_equity * 0.02 {
             EmotionalState::Fearful
         } else {
             EmotionalState::Calm
         };
+
+        // Emit COT event
+        let _ = self
+            .cot_tx
+            .send(AgentOutputEvent::Cot {
+                agent: "Psychology".to_string(),
+                symbol: "ALL".to_string(),
+                action: if biases.is_empty() {
+                    "HEALTHY".to_string()
+                } else {
+                    "BIAS_DETECTED".to_string()
+                },
+                reason: format!(
+                    "State: {:?}, biases: {}, discipline: {:.0}%",
+                    emotional_state,
+                    biases.len(),
+                    discipline * 100.0
+                ),
+                confidence: discipline,
+            });
 
         PsychologyState {
             biases_detected: biases,

@@ -773,7 +773,7 @@ impl HardRulesGate {
             let sym_positions = portfolio
                 .open_positions
                 .iter()
-                .filter(|p| p.symbol == symbol)
+                .filter(|p| cotrader_core::symbols_match(&p.symbol, symbol))
                 .count();
             let passed = sym_positions < 3;
             traces.push(RuleTrace {
@@ -1063,7 +1063,7 @@ impl HardRulesGate {
             let mut worst_mae_ratio = 0.0_f64;
             let mut worst_symbol = String::new();
             for pos in &portfolio.open_positions {
-                if pos.symbol == symbol && pos.risk_amount > 0.0 {
+                if cotrader_core::symbols_match(&pos.symbol, symbol) && pos.risk_amount > 0.0 {
                     let unrealised_loss = pos.unrealized_pnl.min(0.0).abs();
                     let mae_ratio = unrealised_loss / pos.risk_amount;
                     if mae_ratio > worst_mae_ratio {
@@ -1212,7 +1212,7 @@ impl HardRulesGate {
             let sym_positions: Vec<_> = portfolio
                 .open_positions
                 .iter()
-                .filter(|p| p.symbol == symbol)
+                .filter(|p| cotrader_core::symbols_match(&p.symbol, symbol))
                 .collect();
             // Compute ATR from snapshot for volatility reference
             let atr = if snapshot.len() >= 14 {
@@ -1485,7 +1485,7 @@ impl HardRulesGate {
             let sym_value: f64 = portfolio
                 .open_positions
                 .iter()
-                .filter(|p| p.symbol == symbol)
+                .filter(|p| cotrader_core::symbols_match(&p.symbol, symbol))
                 .map(|p| p.quantity * p.current_price)
                 .sum();
             let sym_pct = sym_value / eq;
@@ -1550,7 +1550,9 @@ impl HardRulesGate {
             };
             let min_notional = 50_000.0;
             // Only enforce when volume data actually exists (some feeds omit it).
-            let has_volume = bars.iter().rev().take(window).any(|b| b.volume > 0.0);
+            // Require at least 50% of bars to have volume to avoid single-spike false positives.
+            let volume_bar_count = bars.iter().rev().take(window).filter(|b| b.volume > 0.0).count();
+            let has_volume = volume_bar_count as f64 / window.max(1) as f64 >= 0.5;
             let passed = !has_volume || avg_notional >= min_notional;
             traces.push(RuleTrace {
                 rule_name: "liquidity_floor".to_string(),
@@ -1774,10 +1776,7 @@ mod tests {
         let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
         let redb_path = format!("file:test_hrg_{}.redb?mode=memory", id);
         let memory = MemoryStore::new(&redb_path).expect("MemoryStore creation");
-        let config = Config {
-            kronos_service_url: "http://127.0.0.1:19999".to_string(),
-            ..Config::default()
-        };
+        let config = Config::default();
         let rules = DisciplineRules::default();
         let paper_broker: Arc<dyn BrokerAdapter> = Arc::new(DemoBroker);
         let state = SharedState::new(memory, rules, config, ":memory:", paper_broker).expect("SharedState init");

@@ -8,6 +8,26 @@ use crate::disciplined_core::{DisciplineCheck, MarketContext, PivotLevels};
 pub enum AgentTier {
     Main,
     Sub,
+    /// High-frequency: 100 ms – 5,000 ms cache TTL.
+    DayTrading,
+    /// High-frequency: 100 ms – 5,000 ms cache TTL.
+    Arbitrage,
+    /// Paged holding: 1 hour – 24 hours cache TTL.
+    SwingTrading,
+    /// Fixed 60-second window for Greek calculations.
+    OptionsExpiry,
+}
+
+impl AgentTier {
+    /// Returns (min_ms, max_ms) cache TTL bounds for this tier.
+    pub fn cache_ttl_bounds_ms(&self) -> (u64, u64) {
+        match self {
+            AgentTier::Main | AgentTier::Sub => (1_000, 5_000),
+            AgentTier::DayTrading | AgentTier::Arbitrage => (100, 5_000),
+            AgentTier::SwingTrading => (3_600_000, 86_400_000),
+            AgentTier::OptionsExpiry => (60_000, 60_000),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -6,6 +6,7 @@
 //! 3. Win Probability — GBT predicts per-setup win rate for Kelly sizing
 //! 4. Pattern Detection — CNN detects complex multi-candle patterns
 //! 5. Strategy Selection — RandomForest picks best strategy per regime
+//! 6. Chronos-Bolt — Zero-shot time series forecasting using T5
 //!
 //! All models have deterministic fallbacks. If no model is trained yet,
 //! the system works exactly as before (threshold-based logic).

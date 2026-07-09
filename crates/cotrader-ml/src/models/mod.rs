@@ -1,3 +1,5 @@
+pub mod chronos_bolt;
+pub mod reasoning_engine;
 pub mod regime_classifier;
 pub mod signal_scorer;
 pub mod win_probability;

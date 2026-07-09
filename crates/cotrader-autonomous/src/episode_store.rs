@@ -182,8 +182,9 @@ impl EpisodeStore {
             if attempt > 0 {
                 let _ = std::fs::remove_file(path.with_extension("db-shm"));
                 let _ = std::fs::remove_file(path.with_extension("db-wal"));
-                let _ = std::fs::remove_file("rat_history.db-shm");
-                let _ = std::fs::remove_file("rat_history.db-wal");
+                let storage = cotrader_core::StorageConfig::default();
+                let _ = std::fs::remove_file(storage.main_db().with_extension("db-shm"));
+                let _ = std::fs::remove_file(storage.main_db().with_extension("db-wal"));
                 eprintln!(
                     "[EpisodeStore] Recovery attempt {} for {} (cleaned WAL/SHM)",
                     attempt + 1,
@@ -413,7 +414,7 @@ impl EpisodeStore {
         let conn = self
             .conn
             .lock()
-            .expect("SQLite connection lock poisoned - this indicates a previous panic in DB code");
+            .unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "INSERT OR REPLACE INTO closed_trades (
                 id, symbol, direction, entry_price, exit_price, stop_loss, take_profit,
@@ -437,7 +438,7 @@ impl EpisodeStore {
         &self,
         snap: &SkillWeightSnapshot,
     ) -> Result<(), rusqlite::Error> {
-        let conn = self.conn.lock().expect("lock");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "INSERT OR REPLACE INTO skill_weight_snapshots (episode_id, initial_weights, updated_weights, timestamp)
              VALUES (?1, ?2, ?3, ?4)",
@@ -453,7 +454,7 @@ impl EpisodeStore {
 
     /// Load the most recent N market_regime values (for regime stability check in MetaControl).
     pub fn load_recent_regimes(&self, n: usize) -> Result<Vec<String>, rusqlite::Error> {
-        let conn = self.conn.lock().expect("lock");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn
             .prepare("SELECT market_regime FROM closed_trades ORDER BY entry_time DESC LIMIT ?1")?;
         let rows = stmt.query_map(params![n as i64], |row| row.get(0))?;
@@ -467,7 +468,7 @@ impl EpisodeStore {
         limit: usize,
         rule_version: Option<u32>,
     ) -> Result<Vec<ClosedEpisode>, rusqlite::Error> {
-        let conn = self.conn.lock().expect("lock");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let sql = if let Some(v) = rule_version {
             format!(
                 "SELECT id, symbol, direction, entry_price, exit_price, stop_loss, take_profit, position_size, pnl, pnl_pct, outcome, exit_reason, regret_score, lesson, confluence_score, portfolio_heat, market_regime, session, agent_reasoning, consecutive_losses_at_entry, entry_time, exit_time, rule_version, was_correct FROM closed_trades WHERE rule_version = {} ORDER BY entry_time DESC LIMIT ?1",
@@ -514,7 +515,7 @@ impl EpisodeStore {
 
     /// Get a RuleSnapshot by version for revert logic.
     pub fn get_rule_snapshot(&self, version: u32) -> Result<Option<RuleSnapshot>, rusqlite::Error> {
-        let conn = self.conn.lock().expect("lock");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT version, config_json, baseline_win_rate, baseline_avg_regret, timestamp
              FROM rule_snapshots WHERE version = ?1",
@@ -534,7 +535,7 @@ impl EpisodeStore {
 
     /// Fetch recent regret scores (for high regret detection in evaluate_and_adapt).
     pub fn fetch_recent_regret_scores(&self, limit: usize) -> Result<Vec<f64>, rusqlite::Error> {
-        let conn = self.conn.lock().expect("lock");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn
             .prepare("SELECT regret_score FROM closed_trades ORDER BY entry_time DESC LIMIT ?1")?;
         let rows = stmt.query_map(params![limit as i64], |row| row.get(0))?;
@@ -543,7 +544,7 @@ impl EpisodeStore {
 
     /// Insert a new RuleSnapshot for versioning and rollback.
     pub fn insert_rule_snapshot(&self, snapshot: RuleSnapshot) -> Result<(), rusqlite::Error> {
-        let conn = self.conn.lock().expect("lock");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "INSERT OR REPLACE INTO rule_snapshots (version, config_json, baseline_win_rate, baseline_avg_regret, timestamp)
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -599,7 +600,7 @@ impl EpisodeStore {
     // Helper for cot if needed; assume existing insert_cot_log_row or similar.
     // For compatibility, add a simple insert.
     fn insert_cot_log_row(&self, cot: &CotLogRow) -> Result<(), rusqlite::Error> {
-        let conn = self.conn.lock().expect("lock");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "INSERT INTO cot_logs (chain_id, agent, action, reason, confidence, symbol, ts) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![cot.chain_id as i64, cot.agent, cot.action, cot.reason, cot.confidence, cot.symbol, cot.ts],
@@ -652,7 +653,7 @@ impl EpisodeStore {
         let conn = self
             .conn
             .lock()
-            .expect("SQLite connection lock poisoned - this indicates a previous panic in DB code");
+            .unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "INSERT INTO regret_events (episode_id, symbol, regret_score, lesson, rule_violated, recorded_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -664,7 +665,7 @@ impl EpisodeStore {
     /// Prune COT entries older than the given cutoff timestamp.
     /// Returns the number of deleted rows.
     pub fn prune_cot_entries(&self, cutoff_ts: &str) -> Result<usize, rusqlite::Error> {
-        let conn = self.conn.lock().expect("SQLite connection lock poisoned");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let deleted = conn.execute("DELETE FROM cot_logs WHERE ts < ?1", params![cutoff_ts])?;
         Ok(deleted)
     }
@@ -697,7 +698,7 @@ impl EpisodeStore {
         let conn = self
             .conn
             .lock()
-            .expect("SQLite connection lock poisoned - this indicates a previous panic in DB code");
+            .unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "INSERT INTO rule_changes (rule_name, old_value, new_value, reason, applied_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -716,7 +717,7 @@ impl EpisodeStore {
 
     /// Insert a learned neurosymbolic rule.
     pub fn insert_neurosymbolic_rule(&self, rule: &NeurosymbolicRuleRow) -> Result<(), rusqlite::Error> {
-        let conn = self.conn.lock().expect("lock");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "INSERT OR REPLACE INTO neurosymbolic_rules (
                 id, name, condition, action, priority, source, confidence,
@@ -733,7 +734,7 @@ impl EpisodeStore {
 
     /// Load all active neurosymbolic rules.
     pub fn load_active_neurosymbolic_rules(&self) -> Result<Vec<NeurosymbolicRuleRow>, rusqlite::Error> {
-        let conn = self.conn.lock().expect("lock");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT id, name, condition, action, priority, source, confidence,
                     times_applied, times_correct, created_at, last_applied, active
@@ -768,7 +769,7 @@ impl EpisodeStore {
         applied: bool,
         correct: bool,
     ) -> Result<(), rusqlite::Error> {
-        let conn = self.conn.lock().expect("lock");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         if applied {
             conn.execute(
                 "UPDATE neurosymbolic_rules
@@ -784,7 +785,7 @@ impl EpisodeStore {
 
     /// Deactivate a rule (soft delete).
     pub fn deactivate_neurosymbolic_rule(&self, rule_id: &str) -> Result<(), rusqlite::Error> {
-        let conn = self.conn.lock().expect("lock");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "UPDATE neurosymbolic_rules SET active = 0 WHERE id = ?1",
             params![rule_id],
@@ -794,7 +795,7 @@ impl EpisodeStore {
 
     /// Count active neurosymbolic rules.
     pub fn count_active_neurosymbolic_rules(&self) -> Result<usize, rusqlite::Error> {
-        let conn = self.conn.lock().expect("lock");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM neurosymbolic_rules WHERE active = 1",
             [],
@@ -819,7 +820,7 @@ impl EpisodeStore {
         let conn = self
             .conn
             .lock()
-            .expect("SQLite connection lock poisoned - this indicates a previous panic in DB code");
+            .unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT id, symbol, direction, entry_price, exit_price, stop_loss, take_profit,
                     position_size, pnl, pnl_pct, outcome, exit_reason, regret_score, lesson,
@@ -855,7 +856,7 @@ impl EpisodeStore {
         let conn = self
             .conn
             .lock()
-            .expect("SQLite connection lock poisoned - this indicates a previous panic in DB code");
+            .unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT episode_id, symbol, regret_score, lesson, rule_violated, recorded_at
              FROM regret_events
@@ -887,7 +888,7 @@ impl EpisodeStore {
         let conn = self
             .conn
             .lock()
-            .expect("SQLite connection lock poisoned - this indicates a previous panic in DB code");
+            .unwrap_or_else(|e| e.into_inner());
         conn.query_row(
             "SELECT COUNT(*) FROM regret_events WHERE recorded_at LIKE ?1",
             params![format!("{}%", today_str)],
@@ -896,44 +897,12 @@ impl EpisodeStore {
         .unwrap_or(0) as usize
     }
 
-    /// Fetch all closed episodes in lightweight form for KnowledgeGraph construction.
-    /// Returns ClosedEpisodeLite structs with only the fields needed for graph building.
-    pub fn fetch_closed_episodes_lite(
-        &self,
-    ) -> Result<Vec<cotrader_core::graph_rag::ClosedEpisodeLite>, rusqlite::Error> {
-        let conn = self.conn.lock().expect("SQLite connection lock poisoned");
-        let mut stmt = conn.prepare(
-            "SELECT symbol, direction, outcome, pnl_pct, regret_score, market_regime,
-                    confluence_score, was_correct
-             FROM closed_trades
-             ORDER BY entry_time ASC",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            let was_correct_i64: i64 = row.get(7)?;
-            Ok(cotrader_core::graph_rag::ClosedEpisodeLite {
-                symbol: row.get(0)?,
-                direction: row.get(1)?,
-                outcome: row.get(2)?,
-                pnl_pct: row.get(3)?,
-                regret_score: row.get(4)?,
-                was_correct: was_correct_i64 != 0,
-                market_regime: row.get(5)?,
-                confluence_score: row.get(6)?,
-            })
-        })?;
-        let mut results = Vec::new();
-        for row in rows {
-            results.push(row?);
-        }
-        Ok(results)
-    }
-
     /// Get the most recently closed trade for a symbol (used by SelfEvolutionValidator).
     pub fn get_most_recent_closed(
         &self,
         symbol: &str,
     ) -> Result<Option<ClosedEpisode>, rusqlite::Error> {
-        let conn = self.conn.lock().expect("SQLite connection lock poisoned");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT id, symbol, direction, entry_price, exit_price, stop_loss, take_profit,
                     position_size, pnl, pnl_pct, outcome, exit_reason, regret_score, lesson,
@@ -978,7 +947,7 @@ impl EpisodeStore {
         direction: &str,
         conviction: f64,
     ) -> Result<(), rusqlite::Error> {
-        let conn = self.conn.lock().expect("SQLite connection lock poisoned");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "INSERT INTO mtf_snapshots (
                 episode_id, timeframe, rsi_14, macd_hist, atr_pct, obv_direction, adx, cci,
@@ -1004,7 +973,7 @@ impl EpisodeStore {
         confidence: f64,
         episode_id: Option<&str>,
     ) -> Result<(), rusqlite::Error> {
-        let conn = self.conn.lock().expect("SQLite connection lock poisoned");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "INSERT INTO mtf_accuracy (timeframe, predicted_dir, actual_outcome, confidence, episode_id, recorded_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -1021,7 +990,7 @@ impl EpisodeStore {
         &self,
         episode_id: &str,
     ) -> Result<Vec<(String, String, f64)>, rusqlite::Error> {
-        let conn = self.conn.lock().expect("SQLite connection lock poisoned");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT timeframe, direction, conviction FROM mtf_snapshots WHERE episode_id = ?1",
         )?;
@@ -1045,7 +1014,7 @@ impl EpisodeStore {
         since: &DateTime<Utc>,
     ) -> Result<Vec<(String, usize, usize, f64)>, rusqlite::Error> {
         let since_str = since.to_rfc3339();
-        let conn = self.conn.lock().expect("lock");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT timeframe,
                     COUNT(*) as total,
@@ -1078,7 +1047,7 @@ impl EpisodeStore {
         &self,
         limit: usize,
     ) -> Result<Vec<RuleChangeSnapshot>, rusqlite::Error> {
-        let conn = self.conn.lock().expect("SQLite connection lock poisoned");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT rule_name, old_value, new_value, reason, applied_at
              FROM rule_changes
@@ -1103,7 +1072,7 @@ impl EpisodeStore {
 
     /// Get all rule changes (used for full report generation).
     pub fn get_all_rule_changes(&self) -> Result<Vec<RuleChangeSnapshot>, rusqlite::Error> {
-        let conn = self.conn.lock().expect("SQLite connection lock poisoned");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT rule_name, old_value, new_value, reason, applied_at
              FROM rule_changes
@@ -1135,7 +1104,7 @@ impl EpisodeStore {
         let conn = self
             .conn
             .lock()
-            .expect("SQLite connection lock poisoned - this indicates a previous panic in DB code");
+            .unwrap_or_else(|e| e.into_inner());
         conn.execute(
             "INSERT INTO skill_performance (episode_id, skill_name, direction, weight_used, confidence, score, was_correct, recorded_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -1162,7 +1131,7 @@ impl EpisodeStore {
         let conn = self
             .conn
             .lock()
-            .expect("SQLite connection lock poisoned - this indicates a previous panic in DB code");
+            .unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT id, episode_id, skill_name, direction, weight_used, confidence, score, was_correct, recorded_at
              FROM skill_performance
@@ -1198,7 +1167,7 @@ impl EpisodeStore {
         let conn = self
             .conn
             .lock()
-            .expect("SQLite connection lock poisoned - this indicates a previous panic in DB code");
+            .unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
             "SELECT skill_name,
                     COUNT(*) as total,
@@ -1238,7 +1207,7 @@ impl EpisodeStore {
         let conn = self
             .conn
             .lock()
-            .expect("SQLite connection lock poisoned - this indicates a previous panic in DB code");
+            .unwrap_or_else(|e| e.into_inner());
         let today = Utc::now().format("%Y-%m-%d").to_string();
 
         let total: i64 = conn
@@ -1287,7 +1256,7 @@ impl EpisodeStore {
 
     /// Trade statistics for Kelly criterion position sizing (recent closed trades).
     pub fn kelly_trade_stats(&self, limit: usize) -> KellyTradeStats {
-        let conn = self.conn.lock().expect("SQLite connection lock poisoned");
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = match conn
             .prepare("SELECT pnl, outcome FROM closed_trades ORDER BY exit_time DESC LIMIT ?1")
         {

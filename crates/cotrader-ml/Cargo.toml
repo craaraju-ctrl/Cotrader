@@ -11,7 +11,7 @@ readme.workspace = true
 
 [features]
 default = ["ml"]
-ml = ["dep:candle-core", "dep:candle-nn", "dep:linfa", "dep:linfa-trees"]
+ml = ["dep:candle-core", "dep:candle-nn", "dep:candle-transformers", "dep:hf-hub", "dep:linfa", "dep:linfa-trees", "dep:tokenizers"]
 
 [dependencies]
 cotrader-core = { path = "../cotrader-core" }
@@ -27,9 +27,14 @@ async-trait = "0.1"
 rusqlite = { version = "0.39", features = ["bundled"] }
 rand = "0.8"
 
-# ML — Candle (neural networks: MLP, CNN)
+# ML — Candle (neural networks: MLP, CNN, Transformers)
 candle-core = { version = "0.8", optional = true }
 candle-nn = { version = "0.8", optional = true }
+candle-transformers = { version = "0.8", optional = true }
+hf-hub = { version = "0.4", optional = true, features = ["tokio"] }
+
+# LLM Tokenizer
+tokenizers = { version = "0.21", optional = true }
 
 # ML — Linfa (classical ML: GBT, RandomForest)
 linfa = { version = "0.7", optional = true }

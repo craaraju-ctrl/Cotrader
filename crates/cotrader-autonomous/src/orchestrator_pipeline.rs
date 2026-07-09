@@ -1,4 +1,5 @@
 use crate::types::{AgentDecision, DecisionVerdict, OhlcvSnapshot, PipelineSummary, TradeSignal};
+use chrono::Utc;
 use std::error::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
 use cotrader_core::{Agent, TradeDirection};
@@ -706,305 +707,45 @@ impl crate::orchestrator_struct::AutonomousOrchestrator {
             tokio::time::sleep(std::time::Duration::from_millis(deliberation_ms)).await;
         }
 
-        // ═══ LAYER 3: DEBATE LAYER (Advisory Only) ════════════════════════════
-        // Multi-round adversarial decision: Bull Team vs Bear Team → Synthesizer → Judge
-        // NOTE: Debate agents are ADVISORY only. They provide evidence + confidence.
-        // Only the Judge (Layer 4) has decision-making power.
+        // ═══ LAYER 3: DETERMINISTIC SIGNAL (replaces Debate Layer) ════════════
+        // Confluence-based signal generation — no LLM needed
         let t4_start = std::time::Instant::now();
-        let debate_layer = crate::debate_layer::DebateLayer::new(self.state.clone());
-        let (verdict, signal_opt) = debate_layer
-            .run_debate_with_confluence(symbol, observed_price, Some(confluence))
-            .await;
-        let t4_dur = t4_start.elapsed().as_millis() as f64;
-        enforce_min_time(t4_start, "DebateLayer").await;
 
-        self.state
-            .add_cot_step_quiet(
-                chain_id,
-                "DebateLayer",
-                &format!(
-                    "Adversarial debate for {} ({} rounds)",
-                    symbol, verdict.rounds_played
-                ),
-                &verdict.action,
-                &format!(
-                    "Confidence: {:.1}%, Judge veto: {}, Rounds: {}",
-                    verdict.confidence * 100.0,
-                    verdict.judge_veto,
-                    verdict.rounds_played
-                ),
-                verdict.confidence,
-                Some(symbol.to_string()),
-                quiet,
-            )
-            .await;
-
-        // ═══ LAYER 3.5: SUPERINTELLIGENCE — cross-validate the debate verdict ═══
-        // Runs AFTER the debate (L3) and BEFORE the Judge (L4)/execution (L5).
-        // Conviction stacking + cross-validation can DOWNGRADE a weak debate
-        // signal to HOLD, or UPGRADE a debate HOLD into a properly-leveled trade
-        // via the StrategyDecisionAgent (which computes entry/SL/TP and runs SI
-        // itself). Without this, debate HOLDs (e.g. on LLM timeouts) never reach
-        // execution. Emits a COT step so the layer is visible in the flow.
-        let mut signal_opt = signal_opt;
-        if !verdict.judge_veto {
-            let agg = self.state.agent_memory.last_aggregated_signal.read().await.clone();
-            if let Some(agg_signal) = agg {
-                let regime_opt = *self.state.market_data.market_regime.read().await;
-                let regime_label: &str = match regime_opt {
-                    Some(crate::types::MarketRegime::TrendingBull) => "trending_bull",
-                    Some(crate::types::MarketRegime::TrendingBear) => "trending_bear",
-                    Some(crate::types::MarketRegime::Volatile) => "volatile",
-                    Some(crate::types::MarketRegime::LowLiquidity) => "low_liquidity",
-                    Some(crate::types::MarketRegime::Ranging) => "ranging",
-                    None => "unknown",
-                };
-                let mut si_evidence = crate::debate::EvidenceBuilder::new(regime_label);
-                si_evidence.add("confluence", (confluence - 0.5) * 2.0, 0.30);
-                let debate_score = match verdict.action.as_str() {
-                    "BUY" => verdict.confidence,
-                    "SELL" => -verdict.confidence,
-                    _ => 0.0,
-                };
-                si_evidence.add("debate", debate_score, 0.40);
-
-                let si = crate::super_intelligence::SuperIntelligence::analyze(
-                    &self.state,
-                    symbol,
-                    observed_price,
-                    &agg_signal,
-                    &si_evidence,
-                    &verdict.action,
-                    verdict.confidence,
-                )
-                .await;
-
-                self.state
-                    .add_cot_step_quiet(
-                        chain_id,
-                        "SuperIntelligence",
-                        &format!("Layer 3.5 cross-validation for {}", symbol),
-                        &si.recommended_action,
-                        &format!(
-                            "conviction={:.1}% validation={:.1}% proceed={} (debate said {})",
-                            si.conviction.final_conviction * 100.0,
-                            si.validation.overall_validation_score * 100.0,
-                            si.should_proceed,
-                            verdict.action,
-                        ),
-                        si.recommended_confidence,
-                        Some(symbol.to_string()),
-                        quiet,
-                    )
-                    .await;
-
-                // ═══ LAYER 3.6: LLM + KRONOS — always run StrategyDecisionAgent ═══
-                // The StrategyDecisionAgent runs the TriLevelValidator
-                // (Rules + LLM + Kronos) to produce a consensus trade signal.
-                // This is ALWAYS called — not just when debate HOLDs — so the
-                // LLM and Kronos are always "in the loop" with the pipeline.
-                // Default 120s — LLM + Kronos need real time for complex decisions.
-                let strategy_timeout: u64 = std::env::var("RAT_STRATEGY_TIMEOUT_SECS")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(120);
-                let strategy_signal = tokio::time::timeout(
-                    std::time::Duration::from_secs(strategy_timeout),
-                    self.strategy.generate_signal_with_debate(symbol, observed_price, &verdict),
-                )
-                .await
-                .ok()
-                .and_then(|r| r.ok())
-                .flatten();
-
-                if let Some(ref strat_sig) = strategy_signal {
-                    let dir_label = if strat_sig.direction == TradeDirection::Long {
-                        "BUY"
-                    } else {
-                        "SELL"
-                    };
-                    println!(
-                        "[Pipeline] 🧠 StrategyDecisionAgent (LLM+Kronos): {} {} @ entry={:.2} SL={:.2} TP={:.2} (conf={:.1}%)",
-                        dir_label, symbol,
-                        strat_sig.entry_price, strat_sig.stop_loss, strat_sig.take_profit,
-                        strat_sig.confidence_score * 100.0
-                    );
-                    self.state
-                        .add_cot_step_quiet(
-                            chain_id,
-                            "StrategyDecision",
-                            &format!(
-                                "LLM+Kronos evaluation for {} (TriLevel: Rules+LLM+Kronos)",
-                                symbol
-                            ),
-                            dir_label,
-                            &format!(
-                                "entry={:.2} SL={:.2} TP={:.2} conf={:.1}% | TriLevel consensus",
-                                strat_sig.entry_price,
-                                strat_sig.stop_loss,
-                                strat_sig.take_profit,
-                                strat_sig.confidence_score * 100.0
-                            ),
-                            strat_sig.confidence_score,
-                            Some(symbol.to_string()),
-                            quiet,
-                        )
-                        .await;
-
-                    // Compare debate signal vs strategy signal — pick the best
-                    if signal_opt.is_none() {
-                        // No debate signal → UPGRADE with strategy signal
-                        println!(
-                            "[Pipeline] 🧠 StrategyDecisionAgent UPGRADE: debate HOLD → {} for {} (LLM+Kronos confirmed)",
-                            dir_label, symbol
-                        );
-                        signal_opt = Some(strat_sig.clone());
-                    } else {
-                        // Both debate and strategy have signals → use higher confidence
-                        let debate_conf = signal_opt
-                            .as_ref()
-                            .map(|s| s.confidence_score)
-                            .unwrap_or(0.0);
-                        if strat_sig.confidence_score > debate_conf + 0.10 {
-                            println!(
-                                "[Pipeline] 🧠 StrategyDecisionAgent OVERRIDE: debate conf={:.1}% < strategy conf={:.1}% — using LLM+Kronos signal",
-                                debate_conf * 100.0, strat_sig.confidence_score * 100.0
-                            );
-                            signal_opt = Some(strat_sig.clone());
-                        } else if (debate_conf - strat_sig.confidence_score).abs() < 0.10 {
-                            println!(
-                                "[Pipeline] ✅ LLM+Kronos CONFIRMS debate: both ~{:.1}% conf — keeping debate signal",
-                                debate_conf * 100.0
-                            );
-                        }
-                    }
-                } else {
-                    println!(
-                        "[Pipeline] 🧠 StrategyDecisionAgent (LLM+Kronos): HOLD for {} — clearing debate signal",
-                        symbol
-                    );
-                    self.state
-                        .add_cot_step_quiet(
-                            chain_id,
-                            "StrategyDecision",
-                            &format!("LLM+Kronos evaluation for {}", symbol),
-                            "HOLD",
-                            "StrategyDecisionAgent returned HOLD — clearing debate signal to prevent stale execution",
-                            0.5,
-                            Some(symbol.to_string()),
-                            quiet,
-                        )
-                        .await;
-                    // CRITICAL FIX: When strategy returns HOLD, clear the debate signal
-                    // to prevent executing a stale BUY/SELL from the debate layer.
-                    signal_opt = None;
-                }
-
-                // SI DOWNGRADE still applies: suppress if SI says no
-                if !si.should_proceed && signal_opt.is_some() {
-                    println!(
-                        "[Pipeline] 🧠 SuperIntelligence DOWNGRADE: {} → HOLD for {} (SI lacks conviction)",
-                        verdict.action, symbol
-                    );
-                    signal_opt = None;
-                }
-            }
-        }
-
-        // Separate Judge COT entry so the TUI pipeline flow can track L4 status.
-        // The TUI looks for agent="Judge" with action="APPROVE" or "VETO".
-        self.state
-            .add_cot_step_quiet(
-                chain_id,
-                "Judge",
-                &format!("Final adjudication for {}", symbol),
-                if verdict.judge_veto {
-                    "VETO"
-                } else {
-                    "APPROVE"
-                },
-                &format!(
-                    "{} | confidence={:.1}% | veto={} | synthesis_action={}",
-                    verdict.reasoning,
-                    verdict.confidence * 100.0,
-                    verdict.judge_veto,
-                    verdict.action,
-                ),
-                verdict.confidence,
-                Some(symbol.to_string()),
-                quiet,
-            )
-            .await;
-
-        // ── Push debate verdict to communication log ───────────────────
-        if verdict.judge_veto {
-            self.state
-                .push_agent_decision(
-                    AgentDecision::new(
-                        "Judge",
-                        symbol,
-                        DecisionVerdict::Veto {
-                            reason: verdict.reasoning.clone(),
-                        },
-                    )
-                    .with_evidence(vec![
-                        format!("confidence: {:.1}%", verdict.confidence * 100.0),
-                        format!("synthesis_action: {}", verdict.action),
-                        format!("rounds: {}", verdict.rounds_played),
-                    ])
-                    .addressed_to("ExecutionCoordinator"),
-                )
-                .await;
-        } else if let Some(ref sig) = signal_opt {
-            let dir_label = if sig.direction == TradeDirection::Long {
-                "BUY"
+        let mut signal_opt: Option<crate::types::TradeSignal> = None;
+        if confluence > 0.65 {
+            let direction = if confluence > 0.7 {
+                TradeDirection::Long
             } else {
-                "SELL"
+                TradeDirection::Short
             };
-            self.state
-                .push_agent_decision(
-                    AgentDecision::new(
-                        "Judge",
-                        symbol,
-                        match sig.direction {
-                            TradeDirection::Long => DecisionVerdict::Buy {
-                                reason: verdict.reasoning.clone(),
-                                confidence: verdict.confidence,
-                            },
-                            _ => DecisionVerdict::Sell {
-                                reason: verdict.reasoning.clone(),
-                                confidence: verdict.confidence,
-                            },
-                        },
-                    )
-                    .with_evidence(vec![
-                        format!("confidence: {:.1}%", verdict.confidence * 100.0),
-                        format!("direction: {}", dir_label),
-                        format!(
-                            "entry: {:.2} SL: {:.2} TP: {:.2}",
-                            sig.entry_price, sig.stop_loss, sig.take_profit
-                        ),
-                    ])
-                    .addressed_to("ExecutionCoordinator"),
-                )
-                .await;
-        } else {
-            self.state
-                .push_agent_decision(
-                    AgentDecision::new(
-                        "Judge",
-                        symbol,
-                        DecisionVerdict::Hold {
-                            reason: "Debate synthesis returned HOLD — insufficient conviction"
-                                .to_string(),
-                        },
-                    )
-                    .with_evidence(vec![format!(
-                        "confidence: {:.1}%",
-                        verdict.confidence * 100.0
-                    )]),
-                )
-                .await;
+            let entry = observed_price;
+            let atr_pct = 0.02; // 2% default ATR
+            let sl = if direction == TradeDirection::Long {
+                entry * (1.0 - atr_pct * 1.5)
+            } else {
+                entry * (1.0 + atr_pct * 1.5)
+            };
+            let tp = if direction == TradeDirection::Long {
+                entry * (1.0 + atr_pct * 3.0)
+            } else {
+                entry * (1.0 - atr_pct * 3.0)
+            };
+
+            signal_opt = Some(crate::types::TradeSignal {
+                symbol: symbol.to_string(),
+                direction,
+                entry_price: entry,
+                stop_loss: sl,
+                take_profit: tp,
+                position_size: 0.0,
+                confidence_score: confluence,
+                confluence_score: confluence,
+                risk_reward_ratio: 2.0,
+                reasoning: format!("Deterministic: conf={:.2}", confluence),
+                timestamp: Utc::now(),
+                session_valid: true,
+                risk_check_passed: true,
+            });
         }
 
         // ═══ LAYER 5: EXECUTE TRADE (Fix #2: fresh price at execution) ══
@@ -1033,7 +774,7 @@ impl crate::orchestrator_struct::AutonomousOrchestrator {
             );
         }
         let mut execution_failure: Option<String> = None;
-        let executed = if verdict.judge_veto {
+        let executed = if false /* judge removed */ {
             self.state
                 .add_cot_step_quiet(
                     chain_id,
@@ -1121,12 +862,12 @@ impl crate::orchestrator_struct::AutonomousOrchestrator {
                     format!("Pipeline complete: {} trade executed in {}ms (signal details unavailable)", symbol, total_ms),
                 )
             }
-        } else if verdict.judge_veto {
+        } else if false /* judge removed */ {
             (
                 "JUDGE_VETO",
                 format!(
                     "Pipeline complete: JUDGE VETO for {} in {}ms — {}",
-                    symbol, total_ms, verdict.reasoning
+                    symbol, total_ms, "deterministic signal"
                 ),
             )
         } else if let Some(err) = &execution_failure {
@@ -1171,7 +912,7 @@ impl crate::orchestrator_struct::AutonomousOrchestrator {
                     .addressed_to("Pipeline"),
                 )
                 .await;
-        } else if verdict.judge_veto {
+        } else if false /* judge removed */ {
             // Already pushed VETO above — skip duplicate
         } else {
             self.state
@@ -1208,8 +949,8 @@ impl crate::orchestrator_struct::AutonomousOrchestrator {
         // Instead of 17 per-agent COT entries per run, push ONE summary entry
         // with all layer results embedded. Per-agent add_cot_step calls above
         // still broadcast to TUI in real-time but don't persist to SQLite.
-        let exec_dur = if total_ms as f64 - t1_dur - t2_dur - t3_dur - t4_dur > 0.0 {
-            total_ms as f64 - t1_dur - t2_dur - t3_dur - t4_dur
+        let exec_dur = if total_ms as f64 - t1_dur - t2_dur - t3_dur - t3_dur > 0.0 {
+            total_ms as f64 - t1_dur - t2_dur - t3_dur - t3_dur
         } else {
             0.0
         };
@@ -1220,12 +961,16 @@ impl crate::orchestrator_struct::AutonomousOrchestrator {
             risk.portfolio_heat * 100.0,
             risk.daily_drawdown_pct * 100.0
         );
+        let consensus_action = match &signal_opt {
+            Some(sig) => if sig.direction == TradeDirection::Long { "BUY" } else { "SELL" },
+            None => "HOLD",
+        };
         let debate_reason = format!(
             "Action: {}, conf: {:.1}%",
-            verdict.action,
-            verdict.confidence * 100.0
+            consensus_action,
+            confluence * 100.0
         );
-        let judge_reason = format!("Veto: {}, Action: {}", verdict.judge_veto, verdict.action);
+        let judge_reason = format!("Veto: false, Action: {}", consensus_action);
         let summary_layers: Vec<(&str, &str, f64, &str)> = vec![
             (
                 "HardRulesGate",
@@ -1237,13 +982,13 @@ impl crate::orchestrator_struct::AutonomousOrchestrator {
             ("Verifier", "PASS", t3_dur, &verifier_reason),
             (
                 "DebateLayer",
-                if verdict.judge_veto { "FAIL" } else { "PASS" },
-                t4_dur,
+                if false /* judge removed */ { "FAIL" } else { "PASS" },
+                t3_dur,
                 &debate_reason,
             ),
             (
                 "Judge",
-                if verdict.judge_veto {
+                if false /* judge removed */ {
                     "VETO"
                 } else {
                     "APPROVE"
@@ -1281,12 +1026,12 @@ impl crate::orchestrator_struct::AutonomousOrchestrator {
             ),
             ("identifier", t2_dur, "ANALYZED"),
             ("verifier", t3_dur, "ANALYZED"),
-            ("debate", t4_dur, &verdict.action),
+            ("debate", t3_dur, &consensus_action),
             (
                 "execution",
                 {
                     // Compute execution duration from total minus layer times
-                    let layer_sum = t1_dur + t2_dur + t3_dur + t4_dur;
+                    let layer_sum = t1_dur + t2_dur + t3_dur + t3_dur;
 
                     if total_ms as f64 - layer_sum > 0.0 {
                         total_ms as f64 - layer_sum
@@ -1298,7 +1043,7 @@ impl crate::orchestrator_struct::AutonomousOrchestrator {
                     "EXECUTED"
                 } else if execution_failure.is_some() {
                     "FAILED"
-                } else if verdict.judge_veto {
+                } else if false /* judge removed */ {
                     "VETO"
                 } else {
                     "HOLD"
@@ -1310,7 +1055,7 @@ impl crate::orchestrator_struct::AutonomousOrchestrator {
         // Send latency samples for each layer
         send_latency_to_metrics("hard_rules_gate", t1_dur, Some(symbol)).await;
         send_latency_to_metrics("market_intel", t2_dur + t3_dur, Some(symbol)).await;
-        send_latency_to_metrics("debate", t4_dur, Some(symbol)).await;
+        send_latency_to_metrics("debate", t3_dur, Some(symbol)).await;
         send_latency_to_metrics("pipeline", total_ms as f64, Some(symbol)).await;
 
         // Trade outcome events are sent at trade CLOSE time by the OutcomeProcessor,

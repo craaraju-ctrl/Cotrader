@@ -1,13 +1,14 @@
-//! Broker plugin registry — simplified version supporting only existing brokers.
+//! Broker plugin registry — supports paper and Tredo Exchange brokers.
 //!
 //! Built-in plugins:
 //! - `paper` — Virtual money via PaperEngine
-//! - `binance` — Binance spot/futures
-//! - `ibkr` — Interactive Brokers (global markets)
-//! - `zerodha` — Indian markets via Zerodha Kite
+//! - `tredo` — Tredo Exchange (live trading via REST API)
 
 use cotrader_core::paper_engine::{BrokerAdapter, TradingMode};
 use std::collections::HashMap;
+
+// Re-export the Tredo broker adapter
+pub use cotrader_broker_cotrader::TredoBroker;
 
 pub struct BrokerHandle {
     pub plugin: String,
@@ -49,8 +50,7 @@ impl PluginRegistry {
     pub fn list_plugins() -> Vec<(&'static str, &'static str)> {
         vec![
             ("paper", "Virtual money broker"),
-            ("binance", "Binance spot/futures"),
-            ("ibkr", "Interactive Brokers (global)"),
+            ("tredo", "Tredo Exchange (live trading)"),
         ]
     }
 }
@@ -95,7 +95,7 @@ impl BrokerAdapter for PaperBroker {
     async fn close_position(&self, _id: &str, _price: f64) -> Result<cotrader_core::paper_engine::ClosedTrade, String> {
         Ok(cotrader_core::paper_engine::ClosedTrade {
             id: "closed-1".to_string(), symbol: "TEST".to_string(),
-            direction: cotrader_core::TradeDirection::Long, qty: 1,
+            direction: cotrader_core::TradeDirection::Long, qty: 1.0,
             entry_price: 100.0, exit_price: 100.0, realized_pnl: 0.0, realized_pnl_pct: 0.0,
             close_reason: cotrader_core::paper_engine::CloseReason::Manual,
             opened_at: chrono::Utc::now(), closed_at: chrono::Utc::now(),
@@ -154,45 +154,22 @@ impl BrokerPluginManager {
             config_schema: std::collections::HashMap::new(),
         });
         mgr.register(BrokerConfig {
-            id: "binance".to_string(),
-            display_name: "Binance".to_string(),
-            description: "Binance spot/futures (HMAC-SHA256 auth)".to_string(),
-            implementation: "binance".to_string(),
-            fields: std::collections::HashMap::new(),
-            config_schema: {
+            id: "tredo".to_string(),
+            display_name: "Tredo Exchange".to_string(),
+            description: "Tredo Exchange — live trading via REST API (prices, orders, positions)".to_string(),
+            implementation: "tredo".to_string(),
+            fields: {
                 let mut m = std::collections::HashMap::new();
-                m.insert("api_key".to_string(), "Binance API key".to_string());
-                m.insert("secret_key".to_string(), "Binance secret key".to_string());
-                m.insert("testnet".to_string(), "false".to_string());
+                m.insert("base_url".to_string(), std::env::var("COTRADER_BASE_URL").unwrap_or_else(|_| "http://localhost:8080".into()));
+                m.insert("api_key".to_string(), std::env::var("COTRADER_API_KEY").unwrap_or_default());
+                m.insert("user_id".to_string(), std::env::var("COTRADER_USER_ID").unwrap_or_else(|_| "orchestra".into()));
                 m
             },
-        });
-        mgr.register(BrokerConfig {
-            id: "ibkr".to_string(),
-            display_name: "Interactive Brokers".to_string(),
-            description: "IB TWS/Gateway (global markets)".to_string(),
-            implementation: "ibkr".to_string(),
-            fields: std::collections::HashMap::new(),
             config_schema: {
                 let mut m = std::collections::HashMap::new();
-                m.insert("host".to_string(), "127.0.0.1".to_string());
-                m.insert("port".to_string(), "7497".to_string());
-                m.insert("client_id".to_string(), "1".to_string());
-                m.insert("paper".to_string(), "true".to_string());
-                m
-            },
-        });
-        mgr.register(BrokerConfig {
-            id: "zerodha".to_string(),
-            display_name: "Zerodha Kite".to_string(),
-            description: "Indian markets via Kite Connect v3".to_string(),
-            implementation: "zerodha".to_string(),
-            fields: std::collections::HashMap::new(),
-            config_schema: {
-                let mut m = std::collections::HashMap::new();
-                m.insert("api_key".to_string(), "Kite API key".to_string());
-                m.insert("api_secret".to_string(), "Kite API secret".to_string());
-                m.insert("request_token".to_string(), "OAuth request token".to_string());
+                m.insert("base_url".to_string(), "Tredo Exchange URL".to_string());
+                m.insert("api_key".to_string(), "Tredo API key (trd_...)".to_string());
+                m.insert("user_id".to_string(), "User ID on Tredo".to_string());
                 m
             },
         });

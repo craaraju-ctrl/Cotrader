@@ -208,7 +208,7 @@ impl MemoryStore {
                     tier.to_string(),
                     importance,
                     now,
-                    ttl_seconds,
+                    ttl_seconds.map(|v| v as i64),
                     parent_id,
                     namespace_id,
                 ],
@@ -578,8 +578,8 @@ impl MemoryStore {
             params![tier.to_string()],
             |row| {
                 Ok(TierConfig {
-                    max_records: row.get(0)?,
-                    default_ttl_seconds: row.get(1)?,
+                    max_records: row.get::<_, i64>(0)? as usize,
+                    default_ttl_seconds: row.get::<_, Option<i64>>(1)?.map(|v| v as u64),
                     promotion_threshold: row.get(2)?,
                     demotion_threshold: row.get(3)?,
                     auto_promote: row.get::<_, i32>(4)? != 0,
@@ -991,8 +991,8 @@ impl MemoryStore {
                 Ok((
                     tier_name,
                     TierConfig {
-                        max_records: row.get(1)?,
-                        default_ttl_seconds: row.get(2)?,
+                        max_records: row.get::<_, i64>(1)? as usize,
+                        default_ttl_seconds: row.get::<_, Option<i64>>(2)?.map(|v| v as u64),
                         promotion_threshold: row.get(3)?,
                         demotion_threshold: row.get(4)?,
                         auto_promote: row.get::<_, i32>(5)? != 0,
@@ -1963,6 +1963,94 @@ impl MemoryStore {
         )?;
         Ok(deleted > 0)
     }
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  STRATEGY RATING PERSISTENCE
+    // ══════════════════════════════════════════════════════════════════════
+
+    /// Persist a strategy rating to the database.
+    pub fn store_strategy_rating(
+        &self,
+        id: &str,
+        namespace_id: &str,
+        confidence_tier: &str,
+        raw_importance: f64,
+        blended_score: f64,
+        sample_size: u64,
+    ) -> rusqlite::Result<()> {
+        let conn = self.lock_db()?;
+        conn.execute(
+            "INSERT OR REPLACE INTO strategy_ratings
+             (id, namespace_id, confidence_tier, raw_importance, blended_score, sample_size)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, namespace_id, confidence_tier, raw_importance, blended_score, sample_size as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Get star rating distribution grouped by confidence_tier.
+    /// Returns a map of tier name → count.
+    pub fn strategy_rating_distribution(&self) -> rusqlite::Result<std::collections::HashMap<String, u64>> {
+        let conn = self.lock_db()?;
+        let mut stmt = conn.prepare(
+            "SELECT confidence_tier, COUNT(*) FROM strategy_ratings GROUP BY confidence_tier",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
+        })?;
+        let mut dist = std::collections::HashMap::new();
+        for row in rows {
+            let (tier, count) = row?;
+            dist.insert(tier, count);
+        }
+        Ok(dist)
+    }
+
+    /// Get star rating distribution for a specific namespace.
+    pub fn strategy_rating_distribution_for_namespace(
+        &self,
+        namespace_id: &str,
+    ) -> rusqlite::Result<std::collections::HashMap<String, u64>> {
+        let conn = self.lock_db()?;
+        let mut stmt = conn.prepare(
+            "SELECT confidence_tier, COUNT(*) FROM strategy_ratings
+             WHERE namespace_id = ?1 GROUP BY confidence_tier",
+        )?;
+        let rows = stmt.query_map(params![namespace_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
+        })?;
+        let mut dist = std::collections::HashMap::new();
+        for row in rows {
+            let (tier, count) = row?;
+            dist.insert(tier, count);
+        }
+        Ok(dist)
+    }
+
+    /// Check if a strategy rating already exists for a record with the same confidence tier.
+    /// Used by consolidation Phase 6 to skip redundant writes.
+    pub fn has_strategy_rating(&self, rating_id: &str, confidence_tier: &str) -> rusqlite::Result<bool> {
+        let conn = self.lock_db()?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM strategy_ratings WHERE id = ?1 AND confidence_tier = ?2",
+            params![rating_id, confidence_tier],
+            |r| r.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Clean up orphaned strategy ratings whose record_id no longer exists.
+    /// Called during Phase 5 eviction to prevent table bloat.
+    pub fn cleanup_orphaned_ratings(&self) -> rusqlite::Result<u64> {
+        let conn = self.lock_db()?;
+        let deleted = conn.execute(
+            "DELETE FROM strategy_ratings WHERE id NOT IN (
+                SELECT 'sr_' || id FROM records
+            )",
+            [],
+        )?;
+        Ok(deleted as u64)
+    }
 }
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -2027,9 +2115,9 @@ fn row_to_tiered_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<TieredRecor
         },
         tier,
         importance: row.get(7)?,
-        access_count: row.get(8)?,
+        access_count: row.get::<_, i64>(8)? as u64,
         last_accessed: row.get(9)?,
-        ttl_seconds: row.get(10)?,
+        ttl_seconds: row.get::<_, Option<i64>>(10)?.map(|v| v as u64),
         parent_id: row.get(11)?,
         tags: {
             // Robust tag deserialization with logging on failure
@@ -2082,7 +2170,7 @@ fn row_to_reasoning_chain(row: &rusqlite::Row<'_>) -> rusqlite::Result<Reasoning
         consulted_records,
         tags,
         created_at: row.get(8)?,
-        duration_ms: row.get(9)?,
+        duration_ms: row.get::<_, i64>(9)? as u64,
     })
 }
 

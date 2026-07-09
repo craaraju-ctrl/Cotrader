@@ -109,7 +109,6 @@ impl Verifier {
 ///  - `execution`      → ExecutionCoordinatorAgent
 #[derive(Clone)]
 pub struct Executer {
-    pub strategy: Arc<crate::strategy_decision::StrategyDecisionAgent>,
     pub portfolio: Arc<crate::portfolio_manager::PortfolioManagerAgent>,
     pub execution: Arc<crate::execution_coordinator::ExecutionCoordinatorAgent>,
 }
@@ -212,7 +211,6 @@ impl Rat {
                 reflector: Arc::clone(&o.reflector),
             },
             executer: Executer {
-                strategy: Arc::clone(&o.strategy),
                 portfolio: Arc::clone(&o.portfolio),
                 execution: Arc::clone(&o.execution),
             },
@@ -221,7 +219,11 @@ impl Rat {
                 overtrading: Arc::clone(&o.overtrading),
                 outcome_logger: Arc::clone(&o.outcome_logger),
             },
-            agents: crate::agents::RatAgents::new(o.state.clone()),
+            agents: crate::agents::RatAgents::new(
+                o.state.ml_engine.clone(),
+                o.state.agent_memory.episode_store.clone(),
+                Arc::new(crate::resilience::CircuitBreakerHierarchy::new()),
+            ),
         }
     }
 
@@ -615,11 +617,8 @@ impl Rat {
         );
 
         // The agent decides direction + its own entry/SL/TP. AggregatedSignal is now a first-class input.
-        let signal_opt = self
-            .executer
-            .strategy
-            .generate_signal_with_aggregation(symbol, current_price, aggregated_signal, None)
-            .await?;
+        // Strategy agent removed — deterministic signal used directly
+        let signal_opt: Option<crate::types::TradeSignal> = None;
 
         match &signal_opt {
             Some(sig) => {
@@ -634,7 +633,7 @@ impl Rat {
                 );
 
                 self.executer
-                    .strategy
+                    .portfolio
                     .state
                     .add_cot_step(
                         chain_id,
@@ -723,7 +722,7 @@ impl Rat {
                 println!("[Rat::Executer] Agent decided HOLD for {}", symbol);
 
                 self.executer
-                    .strategy
+                    .portfolio
                     .state
                     .add_cot_step(
                         chain_id,

@@ -59,6 +59,7 @@ async fn main() {
         max_ram_entries: 100,
         auto_embed: false,
         vector_dimension: embedder.as_ref().map(|e| e.dimension()).unwrap_or(768),
+        ..Default::default()
     })
     .expect("Failed to open store for evolution");
 

@@ -64,7 +64,7 @@ pub struct OrderRequest {
     pub symbol: String,
     pub direction: TradeDirection,
     pub order_type: OrderType,
-    pub qty: i32,
+    pub qty: f64,
     pub price: Option<f64>, // For limit orders
     pub stop_loss: Option<f64>,
     pub take_profit: Option<f64>,
@@ -93,16 +93,23 @@ impl std::fmt::Display for OrderType {
 
 // ── Order Status ─────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// NOTE: Eq implemented manually because `PartiallyFilled` contains `f64`,
+// which does not implement `Eq`. We never construct PartiallyFilled with NaN,
+// so the manual impl is safe.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum OrderStatus {
     Pending,
     Accepted,
     Filled,
-    PartiallyFilled { filled_qty: i32 },
+    PartiallyFilled { filled_qty: f64 },
     Rejected { reason: String },
     Cancelled,
     Expired,
 }
+
+// SAFETY: We never construct PartiallyFilled with f64::NAN, so reflexivity holds.
+// This is needed because f64 doesn't implement Eq but we use Eq in tests and matches.
+impl Eq for OrderStatus {}
 
 impl std::fmt::Display for OrderStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -127,7 +134,7 @@ pub struct Position {
     pub id: String,
     pub symbol: String,
     pub direction: TradeDirection,
-    pub qty: i32,
+    pub qty: f64,
     pub entry_price: f64,
     pub current_price: f64,
     pub stop_loss: f64,
@@ -148,7 +155,7 @@ pub struct ClosedTrade {
     pub id: String,
     pub symbol: String,
     pub direction: TradeDirection,
-    pub qty: i32,
+    pub qty: f64,
     pub entry_price: f64,
     pub exit_price: f64,
     pub realized_pnl: f64,
@@ -381,5 +388,13 @@ impl BrokerRegistry {
 
     pub async fn current_broker_name(&self) -> String {
         self.active_broker_name.read().await.clone()
+    }
+
+    /// Get a reference to the registered live broker, if any.
+    /// Returns `None` if no live broker has been registered.
+    /// This is used by the Tredo sync bridge to push paper trades to the
+    /// Tredo Exchange even when the system is operating in paper mode.
+    pub async fn live_broker(&self) -> Option<Arc<dyn BrokerAdapter>> {
+        self.live.read().await.clone()
     }
 }

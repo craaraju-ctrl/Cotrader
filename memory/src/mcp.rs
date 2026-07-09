@@ -1093,8 +1093,8 @@ pub async fn execute_tool(call: &McpToolCall, api_url: &str) -> McpToolResult {
                     if resp.status().is_success() {
                         match resp.json::<serde_json::Value>().await {
                             Ok(json) => Ok(format!(
-                                "Context Window ({} tokens used / {} max):\n\n{}",
-                                json["token_usage"], json["max_tokens"], json["context"]
+                                "Context Window ({} bytes used / {} capacity):\n\n{}",
+                                json["size_bytes"], json["capacity_bytes"], json["context"]
                             )),
                             Err(e) => Err(format!("Parse error: {}", e)),
                         }

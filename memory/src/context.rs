@@ -12,11 +12,11 @@ use std::collections::HashMap;
 use crate::store::MemoryStore;
 use crate::types::{ContextBlock, ContextConfig, ContextSummary};
 
-/// The context window manager handles memory paging.
+/// The context window manager handles physical block caching and structural syncing.
 pub struct ContextManager {
     store: MemoryStore,
     config: ContextConfig,
-    /// In-memory active context blocks (the "context window")
+    /// In-memory active context blocks
     active_blocks: HashMap<String, ContextBlock>,
 }
 
@@ -73,11 +73,12 @@ impl ContextManager {
     /// Add or update a context block.
     /// Persists to SQLite and syncs active blocks.
     pub fn upsert_block(&mut self, block: ContextBlock) -> Result<(), String> {
-        let current_tokens: usize = self.active_blocks.values().map(|b| b.current_tokens).sum();
-        let block_tokens = block.content.split_whitespace().count();
+        let block_size = block.content.len();
+        let current_size: usize = self.active_blocks.values().map(|b| b.content.len()).sum();
 
-        if current_tokens + block_tokens > self.config.max_tokens && !block.pinned {
-            self.evict_to_fit(block_tokens)?;
+        // Capacity-based eviction (physical bytes, not token budget)
+        if current_size + block_size > self.capacity_bytes() && !block.pinned {
+            self.evict_to_fit(block_size)?;
         }
 
         self.active_blocks.insert(block.block_id.clone(), block.clone());
@@ -89,7 +90,7 @@ impl ContextManager {
         Ok(())
     }
 
-    /// Read the current context as a formatted string (what the LLM sees).
+    /// Render the current context as a formatted string.
     pub fn render_context(&self) -> String {
         let mut parts = Vec::new();
 
@@ -130,20 +131,20 @@ impl ContextManager {
         parts.join("\n\n")
     }
 
-    /// Get total current token usage.
-    pub fn token_usage(&self) -> usize {
-        self.active_blocks.values().map(|b| b.current_tokens).sum()
+    /// Get total current content size in bytes.
+    pub fn current_size_bytes(&self) -> usize {
+        self.active_blocks.values().map(|b| b.content.len()).sum()
     }
 
-    /// Get available token budget.
-    pub fn token_budget(&self) -> usize {
-        self.config
-            .max_tokens
-            .saturating_sub(self.token_usage())
+    /// Get total capacity in bytes (derived from config).
+    /// Maximum block capacity in bytes. Uses a 4:1 byte-to-token heuristic
+    /// (approx. 4 bytes per token for English text).
+    pub fn capacity_bytes(&self) -> usize {
+        self.config.max_tokens * 4
     }
 
-    /// Evict lowest-priority non-pinned blocks to fit `needed_tokens`.
-    fn evict_to_fit(&mut self, needed_tokens: usize) -> Result<(), String> {
+    /// Evict lowest-priority non-pinned blocks to free at least `needed_bytes`.
+    fn evict_to_fit(&mut self, needed_bytes: usize) -> Result<(), String> {
         let mut freed = 0usize;
         let mut to_evict: Vec<String> = Vec::new();
 
@@ -155,10 +156,10 @@ impl ContextManager {
         dynamic.sort_by_key(|(_, b)| b.priority);
 
         for (id, block) in &dynamic {
-            if freed >= needed_tokens {
+            if freed >= needed_bytes {
                 break;
             }
-            freed += block.current_tokens;
+            freed += block.content.len();
             to_evict.push((*id).clone());
         }
 
@@ -269,10 +270,10 @@ mod tests {
     }
 
     #[test]
-    fn test_token_usage() {
+    fn test_current_size_bytes() {
         let manager = setup();
-        let usage = manager.token_usage();
-        assert!(usage > 0);
+        let size = manager.current_size_bytes();
+        assert!(size > 0);
     }
 
     #[test]

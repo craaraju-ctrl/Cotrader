@@ -10,6 +10,7 @@
 //! - **Promotion Pipeline** — Move important records up the tier hierarchy
 
 use serde::{Deserialize, Serialize};
+use crate::experts::StrategyConfidence;
 use crate::store::MemoryStore;
 use crate::temporal::TemporalEngine;
 use crate::types::{
@@ -232,6 +233,29 @@ impl FinancialRegretScorer {
 
         self.score(&context, &record.record.metadata)
     }
+
+    /// Compute a star rating from an importance score and return a StrategyReference.
+    /// The star rating is stamped into record metadata for later query-time retrieval.
+    /// It is returned as an isolated reference parameter — NOT as a hard override.
+    pub fn stamp_star_rating(
+        &self,
+        importance: f64,
+        namespace_id: &str,
+        sample_size: u64,
+        current_volatility: f64,
+    ) -> crate::experts::StrategyReference {
+        let confidence = StrategyConfidence::from_importance(importance);
+        // Blend star weight with current market volatility:
+        // star_weight (0.33, 0.67, 1.0) * (1.0 - 0.5 * sigma) to produce a blended score
+        let blended = confidence.normalized_score() * (1.0 - 0.5 * current_volatility);
+        crate::experts::StrategyReference {
+            confidence,
+            raw_importance: importance,
+            namespace_id: namespace_id.to_string(),
+            sample_size,
+            blended_score: blended.clamp(0.0, 1.0),
+        }
+    }
 }
 
 
@@ -284,7 +308,9 @@ impl ConsolidationEngine {
             duration_ms: 0,
         };
 
-        // Phase 1: Update importance scores for all records (temporal-decay aware)
+        // Phase 1: Update importance scores for all records (temporal-decay aware).
+        // Collects (id, importance, access_count, namespace_id) for Phase 6 reuse.
+        let mut phase1_records: Vec<(String, f64, u64, String)> = Vec::new();
         if let Ok(records) = self.store.all(10000, 0) {
             report.records_processed = records.len() as u64;
             for record in &records {
@@ -300,6 +326,14 @@ impl ConsolidationEngine {
                     let new_importance = (base_importance * 0.6 + effective * 0.4).clamp(0.0, 1.0);
 
                     let _ = self.store.update_importance(&record.id, new_importance);
+
+                    // Cache for Phase 6 star-rating stamping
+                    phase1_records.push((
+                        record.id.clone(),
+                        new_importance,
+                        tiered.access_count,
+                        tiered.record.metadata.get("namespace_id").cloned().unwrap_or_else(|| "default".to_string()),
+                    ));
                 }
             }
         }
@@ -373,6 +407,52 @@ impl ConsolidationEngine {
             }
         }
 
+        // Phase 6: Stamp star ratings on high-importance records.
+        // Reuses (id, importance, access_count, namespace_id) collected in Phase 1
+        // to avoid a redundant full-table scan. Skips records where the confidence
+        // tier hasn't changed since the last stamp to avoid DB churn.
+        {
+            let financial_scorer = crate::consolidation::FinancialRegretScorer::new();
+            for (id, importance, access_count, namespace_id) in &phase1_records {
+                // Only stamp records above the SingleStar threshold (> 0.1)
+                if *importance > 0.1 {
+                    let reference = financial_scorer.stamp_star_rating(
+                        *importance,
+                        namespace_id,
+                        *access_count,
+                        0.0, // default volatility; caller can override via API
+                    );
+                    let rating_id = format!("sr_{}", id);
+                    let tier_label = reference.confidence.as_str();
+                    // Skip if this record already has the same confidence tier stamped
+                    if let Ok(exists) = self.store.has_strategy_rating(&rating_id, &tier_label) {
+                        if exists {
+                            continue;
+                        }
+                    }
+                    let _ = self.store.store_strategy_rating(
+                        &rating_id,
+                        &reference.namespace_id,
+                        tier_label,
+                        reference.raw_importance,
+                        reference.blended_score,
+                        reference.sample_size,
+                    );
+                }
+            }
+        }
+
+        // Phase 6b: Clean up orphaned strategy ratings (only if records were evicted in Phase 5)
+        if report.records_evicted > 0 {
+            if let Ok(cleaned) = self.store.cleanup_orphaned_ratings() {
+                if cleaned > 0 {
+                    report.insights_generated.push(
+                        format!("Cleaned {} orphaned strategy ratings", cleaned),
+                    );
+                }
+            }
+        }
+
         report.completed_at = chrono::Utc::now().to_rfc3339();
         report.duration_ms = start_time.elapsed().as_millis() as u64;
         report
@@ -428,31 +508,44 @@ impl ConsolidationEngine {
         dedup_count
     }
 
-    /// Simple content similarity: ratio of shared words (Jaccard-like).
+    /// Hash-based content similarity optimized for trading logs and raw order parameters.
+    /// Uses normalized key-token hashing instead of word-level Jaccard.
+    /// Tokens are canonicalized: stripped of punctuation, lowercased, and deduplicated.
     fn content_similarity(&self, a: &str, b: &str) -> f64 {
-        let words_a: Vec<String> = a
-            .to_lowercase()
-            .split_whitespace()
-            .map(|s| s.to_string())
-            .collect();
-        let words_b: Vec<String> = b
-            .to_lowercase()
-            .split_whitespace()
-            .map(|s| s.to_string())
-            .collect();
+        fn tokenize_canonical(text: &str) -> Vec<u64> {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut tokens: Vec<u64> = text
+                .to_lowercase()
+                .split_whitespace()
+                .map(|word| {
+                    let cleaned: String = word.chars().filter(|c| c.is_alphanumeric()).collect();
+                    let mut hasher = DefaultHasher::new();
+                    cleaned.hash(&mut hasher);
+                    hasher.finish()
+                })
+                .collect();
+            tokens.sort();
+            tokens.dedup();
+            tokens
+        }
 
-        if words_a.is_empty() && words_b.is_empty() {
+        let hash_a = tokenize_canonical(a);
+        let hash_b = tokenize_canonical(b);
+
+        if hash_a.is_empty() && hash_b.is_empty() {
             return 1.0;
         }
-        if words_a.is_empty() || words_b.is_empty() {
+        if hash_a.is_empty() || hash_b.is_empty() {
             return 0.0;
         }
 
-        let set_a: std::collections::HashSet<String> = words_a.into_iter().collect();
-        let set_b: std::collections::HashSet<String> = words_b.into_iter().collect();
+        let intersection = hash_a.iter().filter(|h| hash_b.contains(h)).count();
+        let union = hash_a.len() + hash_b.len() - intersection;
 
-        let intersection = set_a.intersection(&set_b).count();
-        let union = set_a.union(&set_b).count();
+        if union == 0 {
+            return 0.0;
+        }
 
         intersection as f64 / union as f64
     }

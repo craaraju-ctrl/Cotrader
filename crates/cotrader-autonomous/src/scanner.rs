@@ -31,7 +31,7 @@ impl WatchlistScannerAgent {
             let from_open = portfolio
                 .open_positions
                 .iter()
-                .find(|p| p.symbol == *sym)
+                .find(|p| cotrader_core::symbols_match(&p.symbol, sym))
                 .map(|p| p.current_price);
             drop(portfolio);
 

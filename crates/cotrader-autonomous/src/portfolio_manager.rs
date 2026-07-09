@@ -49,7 +49,7 @@ impl PortfolioManagerAgent {
         let mut pnl = 0.0;
         let mut updated = false;
         for pos in &mut portfolio.open_positions {
-            if pos.symbol == symbol {
+            if cotrader_core::symbols_match(&pos.symbol, symbol) {
                 pos.current_price = current_price;
                 pos.unrealized_pnl = match pos.direction {
                     cotrader_core::TradeDirection::Long => {
@@ -132,7 +132,7 @@ impl PortfolioManagerAgent {
         if portfolio
             .open_positions
             .iter()
-            .any(|p| p.symbol == signal.symbol)
+            .any(|p| cotrader_core::symbols_match(&p.symbol, &signal.symbol))
         {
             return Err("Position already open for this symbol".into());
         }
@@ -240,7 +240,7 @@ impl PortfolioManagerAgent {
         if let Some(idx) = portfolio
             .open_positions
             .iter()
-            .position(|p| p.symbol == symbol)
+            .position(|p| cotrader_core::symbols_match(&p.symbol, symbol))
         {
             let pos = portfolio.open_positions.remove(idx);
 

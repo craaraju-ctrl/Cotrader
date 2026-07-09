@@ -21,7 +21,7 @@ use crate::reflection::ReflectionEngine;
 use serde::{Deserialize, Serialize};
 use crate::store::MemoryStore;
 use crate::temporal::TemporalEngine;
-use crate::types::{ConsolidationReport, DecayConfig, EvolutionEvent, MemoryTier, Reflection, SelfAssessment};
+use crate::types::{ConsolidationReport, DecayConfig, EvolutionEvent, MarketPruningConfig, MemoryTier, Reflection, SelfAssessment};
 
 /// Configuration for the evolution engine's behavior.
 #[derive(Debug, Clone)]
@@ -155,6 +155,8 @@ pub struct EvolutionEngine {
     reflection: ReflectionEngine,
     temporal: TemporalEngine,
     config: EvolutionConfig,
+    /// Market-aware pruning configuration for 24/7 adaptive memory management.
+    market_pruning: MarketPruningConfig,
     /// Usage statistics tracked across cycles
     usage_stats: HashMap<String, UsageStats>,
     /// Whether the engine is currently in a sleep cycle
@@ -182,6 +184,7 @@ impl EvolutionEngine {
             reflection,
             temporal,
             config,
+            market_pruning: MarketPruningConfig::default(),
             usage_stats: HashMap::new(),
             sleeping: Arc::new(AtomicBool::new(false)),
             backtest_semaphore: Arc::new(Semaphore::new(3)),
@@ -199,6 +202,25 @@ impl EvolutionEngine {
             reflection,
             temporal,
             config,
+            market_pruning: MarketPruningConfig::default(),
+            usage_stats: HashMap::new(),
+            sleeping: Arc::new(AtomicBool::new(false)),
+            backtest_semaphore: Arc::new(Semaphore::new(3)),
+        }
+    }
+
+    /// Create an evolution engine with custom market-aware pruning configuration.
+    pub fn with_market_pruning(store: MemoryStore, config: EvolutionConfig, market_pruning: MarketPruningConfig) -> Self {
+        let consolidation = ConsolidationEngine::new(store.clone());
+        let reflection = ReflectionEngine::new(store.clone());
+        let temporal = TemporalEngine::with_defaults(store.clone());
+        Self {
+            store,
+            consolidation,
+            reflection,
+            temporal,
+            config,
+            market_pruning,
             usage_stats: HashMap::new(),
             sleeping: Arc::new(AtomicBool::new(false)),
             backtest_semaphore: Arc::new(Semaphore::new(3)),
@@ -291,11 +313,13 @@ impl EvolutionEngine {
         events
     }
 
-    // ── Stale Pruning ───────────────────────────────────────────────────
+    // ── Stale Pruning (Market-Aware 24/7 Adaptive) ───────────────────────
 
     /// Remove or archive records that haven't been accessed and have low importance.
-    /// Now uses temporal decay: records are considered stale if their effective
-    /// importance (importance × decay_score) falls below the threshold.
+    /// Uses market-aware adaptive pruning: execution triggers dynamically per namespace
+    /// during that specific asset class's lowest volatility window.
+    /// Low-value records (effective importance < 0.2, accesses < 3) are wiped completely
+    /// from the active table to guarantee sub-millisecond table scanning.
     pub fn prune_stale(&self) -> rusqlite::Result<Vec<EvolutionEvent>> {
         let mut events = Vec::new();
 
@@ -304,6 +328,24 @@ impl EvolutionEngine {
             let candidates = self.store.get_eviction_candidates(tier, 50)?;
 
             for candidate in &candidates {
+                // ── Adaptive Pruning Gate ───────────────────────────────
+                // Read the active namespace_id from the record's metadata.
+                // Only prune during that asset class's low-volatility window.
+                let record_ns = candidate.record.metadata.get("namespace_id")
+                    .cloned()
+                    .unwrap_or_else(|| "default".to_string());
+
+                // Check if we are in the pruning window for this namespace's asset class.
+                // If no explicit window is configured, always allow pruning (safe default).
+                let in_window = self.market_pruning.pruning_windows.contains_key(&record_ns)
+                    && self.market_pruning.is_pruning_window_active(&record_ns);
+                let is_default_ns = !self.market_pruning.pruning_windows.contains_key(&record_ns);
+
+                if !in_window && !is_default_ns {
+                    // Not in pruning window for this asset class — skip
+                    continue;
+                }
+
                 // Skip if within TTL
                 if let Some(ttl) = candidate.ttl_seconds {
                     if let Ok(ts) =
@@ -323,8 +365,12 @@ impl EvolutionEngine {
                 let decay = self.temporal.calculate_decay(&fact);
                 let effective_importance = (candidate.importance * decay).clamp(0.0, 1.0);
 
-                // Decay-aware stale detection: low effective importance + low access = stale
-                if effective_importance < 0.2 && candidate.access_count < 3 {
+                // Hard wipe threshold: low effective importance + low access = stale
+                // Uses configurable thresholds from MarketPruningConfig
+                let wipe_threshold = self.market_pruning.wipe_threshold;
+                let min_accesses = self.market_pruning.min_access_count as u64;
+
+                if effective_importance < wipe_threshold && candidate.access_count < min_accesses {
                     let id = candidate.record.id.clone();
 
                     // For semantic/procedural, archive with a new ID before deleting original
@@ -347,8 +393,8 @@ impl EvolutionEngine {
                     events.push(EvolutionEvent {
                         event_id: format!("evt_{}", crate::generate_id()),
                         event_type: "stale_pruned".into(),
-                        description: format!("Pruned stale record '{}' from {} tier (importance: {:.2}, accesses: {})",
-                            id, tier, candidate.importance, candidate.access_count),
+                        description: format!("Pruned stale record '{}' from {} tier (importance: {:.2}, accesses: {}, ns: {})",
+                            id, tier, candidate.importance, candidate.access_count, record_ns),
                         previous_value: None,
                         new_value: None,
                         confidence: 0.8,

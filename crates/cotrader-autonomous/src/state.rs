@@ -13,9 +13,8 @@ use tokio::sync::RwLock;
 use cotrader_core::paper_engine::BrokerRegistry;
 use cotrader_core::memory_integration::MemoryIntegration;
 use cotrader_core::{
-    AdvancedPattern, CalendarEvent, Config, DisciplineRules, KnowledgeGraph, LlmExecutor,
+    AdvancedPattern, CalendarEvent, Config, DisciplineRules,
     MemoryStore, NewsContext, OhlcvBar, PivotLevels, ServiceManager, SkillVote, TradingGoals,
-    VectorMemory,
 };
 use cotrader_core::{CandlestickPattern, MultiTfPatternConfirmation};
 use cotrader_ml::MLEngine;
@@ -71,7 +70,7 @@ impl PortfolioStore {
             broker_registry: Arc::new(BrokerRegistry::new(paper_broker)),
             circuit_breaker: Arc::new(CircuitBreaker::new(CircuitBreakerConfig::default())),
             live_order_manager: Arc::new(
-                LiveOrderManager::open(Some("rat_orders.db")).unwrap_or_else(|e| {
+                LiveOrderManager::open(Some(&cotrader_core::StorageConfig::default().orders_db().to_string_lossy().to_string())).unwrap_or_else(|e| {
                     eprintln!("[LiveOrderManager] ⚠ Failed to open order DB: {}", e);
                     LiveOrderManager::open(Some(":memory:")).expect("In-memory fallback failed")
                 }),
@@ -87,7 +86,6 @@ pub struct MarketDataStore {
     pub ohlcv_history: Arc<RwLock<HashMap<String, Vec<OhlcvBar>>>>,
     pub market_regime: Arc<RwLock<Option<MarketRegime>>>,
     pub latest_metrics: Arc<RwLock<HashMap<String, crate::market_metrics_meter::MetricsSnapshot>>>,
-    pub last_forecast: Arc<RwLock<Option<serde_json::Value>>>,
     pub multi_timeframe_data: Arc<RwLock<HashMap<String, Vec<TimeframeData>>>>,
     pub multi_tf_analyses: Arc<RwLock<HashMap<String, HashMap<String, TimeframeAnalysis>>>>,
     pub multi_tf_aggregate: Arc<RwLock<HashMap<String, MultiTfAggregate>>>,
@@ -106,7 +104,6 @@ impl MarketDataStore {
             ohlcv_history: Arc::new(RwLock::new(HashMap::new())),
             market_regime: Arc::new(RwLock::new(None)),
             latest_metrics: Arc::new(RwLock::new(HashMap::new())),
-            last_forecast: Arc::new(RwLock::new(None)),
             multi_timeframe_data: Arc::new(RwLock::new(HashMap::new())),
             multi_tf_analyses: Arc::new(RwLock::new(HashMap::new())),
             multi_tf_aggregate: Arc::new(RwLock::new(HashMap::new())),
@@ -190,13 +187,11 @@ impl RuleEngine {
     }
 }
 
-/// Agent Memory — episode store, vector memory, knowledge graph, COT.
+/// Agent Memory — episode store, COT.
 #[derive(Debug, Clone)]
 pub struct AgentMemoryStore {
     pub memory: Arc<MemoryStore>,
     pub episode_store: Arc<EpisodeStore>,
-    pub vector_memory: Arc<tokio::sync::RwLock<cotrader_core::VectorMemory>>,
-    pub knowledge_graph: Arc<RwLock<KnowledgeGraph>>,
     pub latest_episode: Arc<RwLock<HashMap<String, String>>>,
     pub latest_news: Arc<RwLock<HashMap<String, NewsContext>>>,
     pub last_skill_votes: Arc<RwLock<Vec<SkillVote>>>,
@@ -211,8 +206,6 @@ impl AgentMemoryStore {
         Self {
             memory: Arc::new(memory),
             episode_store,
-            vector_memory: Arc::new(tokio::sync::RwLock::new(VectorMemory::new("rat_vectors.json"))),
-            knowledge_graph: Arc::new(RwLock::new(KnowledgeGraph::new())),
             latest_episode: Arc::new(RwLock::new(HashMap::new())),
             latest_news: Arc::new(RwLock::new(HashMap::new())),
             last_skill_votes: Arc::new(RwLock::new(Vec::new())),
@@ -230,7 +223,6 @@ pub struct IoStore {
     pub update_tx: Arc<tokio::sync::broadcast::Sender<String>>,
     pub service_manager: Arc<cotrader_core::ServiceManager>,
     pub config: Arc<Config>,
-    pub llm: Arc<LlmExecutor>,
     pub agent_tasks: Arc<RwLock<Vec<AgentTask>>>,
     pub last_watchlist_scan: Arc<RwLock<Option<DateTime<Utc>>>>,
     pub communication_log: Arc<RwLock<CommunicationLog>>,
@@ -244,7 +236,6 @@ impl IoStore {
             update_tx: Arc::new(update_tx),
             service_manager: Arc::new(ServiceManager::new()),
             config: Arc::new(config.clone()),
-            llm: Arc::new(LlmExecutor::from_config(config)),
             agent_tasks: Arc::new(RwLock::new(vec![
                 AgentTask::new("price_scan", 5),
                 AgentTask::new("position_monitor", 10),
@@ -349,6 +340,73 @@ pub struct SharedState {
 }
 
 impl SharedState {
+    /// Build an immutable CacheFrame snapshot for agent evaluation.
+    /// This captures all shared state at a point in time so agents
+    /// see a consistent view without holding locks.
+    pub async fn build_cache_frame(
+        &self,
+        symbol: &str,
+        current_price: f64,
+        epoch_id: crate::types::EpochId,
+    ) -> crate::types::CacheFrame {
+        let metrics = {
+            let m = self.market_data.latest_metrics.read().await;
+            m.get(symbol).cloned()
+        };
+        let regime = {
+            self.market_data.market_regime.read().await
+                .unwrap_or(cotrader_core::MarketRegime::Ranging)
+        };
+        let patterns = {
+            let p = self.market_data.last_patterns.read().await;
+            p.get(symbol)
+                .map(|ps| ps.iter().map(|p| p.name.clone()).collect::<Vec<_>>())
+                .unwrap_or_default()
+        };
+        let ohlcv_bars = {
+            let h = self.market_data.ohlcv_history.read().await;
+            h.get(symbol).cloned().unwrap_or_default()
+        };
+        let (portfolio, open_positions, daily_stats) = {
+            let p = self.portfolio_store.portfolio.read().await;
+            let stats = crate::types::DailyStats {
+                total_trades_today: p.total_trades_today,
+                winning_trades_today: p.winning_trades_today,
+                losing_trades_today: p.losing_trades_today,
+                consecutive_losses: p.consecutive_losses,
+                daily_pnl: p.daily_pnl,
+                max_drawdown_today: p.max_drawdown_today,
+                total_equity: p.total_equity,
+            };
+            (p.clone(), p.open_positions.clone(), stats)
+        };
+        let discipline_rules = {
+            self.rule_engine.rules.read().await.clone()
+        };
+        let latest_news = {
+            let n = self.agent_memory.latest_news.read().await;
+            n.get(symbol).cloned()
+        };
+        let rule_version = 1; // Simplified; would come from versioned rules in production
+
+        crate::types::CacheFrame {
+            epoch_id,
+            symbol: symbol.to_string(),
+            current_price,
+            metrics,
+            regime,
+            patterns,
+            ohlcv_bars,
+            portfolio,
+            discipline_rules: Arc::new(discipline_rules),
+            open_positions,
+            latest_news,
+            rule_version,
+            timestamp: chrono::Utc::now(),
+            daily_stats,
+        }
+    }
+
     /// Get current skill weights (for FSM coordinator).
     pub fn get_skill_weights(&self) -> std::collections::HashMap<String, f64> {
         let mut weights = std::collections::HashMap::new();
@@ -543,42 +601,9 @@ impl SharedState {
     ) -> String {
         let mut parts = vec!["── HIERARCHICAL TRAINED MEMORY RECALL ──".to_string()];
 
-        // Layer 1: Knowledge Graph (relationship-based recall)
-        {
-            let kg = self.agent_memory.knowledge_graph.read().await;
-            if kg.is_built() {
-                let graph_result = self.graph_recall_from_context(&kg, query_context);
-                if graph_result.total_episodes > 0 {
-                    parts.push(graph_result.summary);
-                }
-            }
-        }
+        // Layer 1: Knowledge Graph (removed — dependency deleted)
 
-        // Layer 2: Local vector RAG (semantic search for similar episodes)
-        {
-            let vm = self.agent_memory.vector_memory.read().await;
-            if !vm.is_empty() {
-                match vm.search(query_context, top_k).await {
-                    Ok(results) if !results.is_empty() => {
-                        parts.push("LOCAL VECTOR (recent trained episodes):".to_string());
-                        for r in results {
-                            let regret = r
-                                .regret_score
-                                .map(|s| format!(" regret={:.2}", s))
-                                .unwrap_or_default();
-                            parts.push(format!(
-                                "  - {} (sim {:.0}%{}): {}",
-                                r.timestamp.format("%m/%d"),
-                                r.similarity * 100.0,
-                                regret,
-                                r.summary_text
-                            ));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
+        // Layer 2: Local vector RAG (removed — dependency deleted)
 
         // Layer 3: Long-term agentmemory (cross-session trained intelligence)
         {
@@ -605,54 +630,6 @@ impl SharedState {
         }
 
         parts.join("\n")
-    }
-
-    /// Build the knowledge graph from closed episode store data.
-    pub async fn rebuild_knowledge_graph(&self) {
-        let episodes = match self.agent_memory.episode_store.fetch_closed_episodes_lite() {
-            Ok(ep) => ep,
-            Err(e) => {
-                eprintln!("[GraphRAG] ⚠ Failed to fetch episodes for graph: {}", e);
-                return;
-            }
-        };
-        if episodes.is_empty() {
-            return;
-        }
-        let mut kg = self.agent_memory.knowledge_graph.write().await;
-        kg.build_from_episodes(&episodes);
-    }
-
-    /// Extract symbol/regime/direction from query context and run targeted graph traversal.
-    fn graph_recall_from_context(
-        &self,
-        kg: &KnowledgeGraph,
-        query_context: &str,
-    ) -> cotrader_core::graph_rag::GraphRecallResult {
-        let qc = query_context.to_uppercase();
-        let symbol_nodes = kg.symbol_nodes();
-        let found_symbol = symbol_nodes.iter().find(|s| qc.contains(s.as_str()));
-        let known_regimes = ["TRENDINGBULL", "TRENDINGBEAR", "RANGING", "VOLATILE"];
-        let found_regime = known_regimes.iter().find(|r| qc.contains(*r));
-
-        match (found_symbol, found_regime) {
-            (Some(sym), Some(reg)) => kg.query_symbol_regime(sym, reg),
-            (Some(sym), None) => {
-                let start = cotrader_core::graph_rag::GraphNode::Symbol(sym.to_string());
-                kg.query_relationship(&start, None, 2)
-            }
-            (None, Some(reg)) => {
-                let start = cotrader_core::graph_rag::GraphNode::Regime(reg.to_string());
-                kg.query_relationship(&start, None, 2)
-            }
-            (None, None) => cotrader_core::graph_rag::GraphRecallResult {
-                relationships: vec![],
-                total_episodes: 0,
-                aggregate_win_rate: 0.0,
-                aggregate_avg_pnl: 0.0,
-                summary: String::new(),
-            },
-        }
     }
 
     /// Start a new COT chain (root node) — creates an entry with chain_id = own id.
@@ -736,21 +713,10 @@ impl SharedState {
         .await
     }
 
-    /// Register external services (LLM, Kronos) with the ServiceManager
+    /// Register external services with the ServiceManager
     /// and spawn the background health check loop with WS status broadcasts.
     pub async fn register_and_monitor_services(&self) {
-        // Register LLM server
-        let llm_endpoint = self.io.config.llm_endpoint.clone();
-        let llm_name = format!("llm_{}", self.io.config.llm_provider);
-        self.io.service_manager
-            .register_service(&llm_name, &llm_endpoint)
-            .await;
-
-        // Register Kronos forecast server
-        let kronos_endpoint = self.io.config.kronos_service_url.clone();
-        self.io.service_manager
-            .register_service("kronos", &kronos_endpoint)
-            .await;
+        // System runs on ML + rules only (no external LLM/Kronos services)
 
         // Register Broker API — determine endpoint from env vars
         let (broker_id, broker_endpoint) = detect_broker_endpoint();
@@ -1017,15 +983,17 @@ fn detect_broker_endpoint() -> (String, String) {
 pub async fn initialize_autonomous_system(
     paper_broker: Arc<dyn cotrader_core::paper_engine::BrokerAdapter>,
 ) -> Result<crate::AutonomousOrchestrator, Box<dyn std::error::Error + Send + Sync>> {
-    let memory = MemoryStore::new("rat.redb")?;
+    let storage = cotrader_core::StorageConfig::default();
+    let memory = MemoryStore::new(&storage.memory_db().to_string_lossy().to_string())?;
     let rules = DisciplineRules::default();
     let config = Config::default();
+    let model_config = config.clone(); // clone for model loading after config is moved into SharedState
 
     let state = SharedState::with_event_bus(
         memory,
         rules,
         config,
-        "rat_history.db",
+        &storage.main_db().to_string_lossy().to_string(),
         None,
         paper_broker,
     )
@@ -1037,8 +1005,47 @@ pub async fn initialize_autonomous_system(
     // Register external services with the ServiceManager
     state.register_and_monitor_services().await;
 
-    // Build knowledge graph from closed episodes immediately (so recall has graph data from start)
-    state.rebuild_knowledge_graph().await;
+    // ── Bootstrap & Setup Mode ────────────────────────────────────────
+    // Check system config; run setup wizard on first boot
+    let system_config = cotrader_core::config::SystemConfig::load();
+    if !system_config.setup_completed {
+        eprintln!("[System] First boot detected — launching setup wizard...");
+        match crate::setup::run_setup_wizard() {
+            Ok(_) => {
+                // Wizard saved config to disk; create fresh Config to pick it up
+                let fresh_config = cotrader_core::Config::load();
+                match &fresh_config.llama_backend {
+                    cotrader_core::config::LlamaBackend::CandleGGUF => {
+                        let _ = crate::tri_level_validator::load_chronos_global();
+                        let _ = crate::tri_level_validator::load_llm_from_config(&fresh_config);
+                    }
+                    cotrader_core::config::LlamaBackend::Ollama { .. } => {
+                        let _ = crate::tri_level_validator::load_llm_from_config(&fresh_config);
+                    }
+                    cotrader_core::config::LlamaBackend::None => {
+                        println!("[System] LLM arbitration disabled — consensus-only mode.");
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("[System] ⚠ Setup wizard failed: {}", e);
+                eprintln!("[System]    Run `cotrader setup --force` to retry.");
+            }
+        }
+    } else {
+        // ── Load models according to saved config ──────────────────────
+        // Eager-load Chronos-Bolt into RAM (fails fast if not cached)
+        if let Err(e) = crate::tri_level_validator::load_chronos_global() {
+            eprintln!("[System] ⚠ Chronos-Bolt: {}", e);
+            eprintln!("[System]    Run `cotrader download` to cache it.");
+        }
+
+        // Eager-load LLM backend according to config preference
+        if let Err(e) = crate::tri_level_validator::load_llm_from_config(&model_config) {
+            eprintln!("[System] ⚠ LLM backend: {}", e);
+            eprintln!("[System]    Run `cotrader setup --force` to reconfigure.");
+        }
+    }
 
     Ok(crate::AutonomousOrchestrator::new(state))
 }
