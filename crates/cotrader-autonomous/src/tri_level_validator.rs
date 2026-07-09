@@ -27,13 +27,14 @@ use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::sync::Mutex;
+use std::time::Instant;
 use cotrader_core::{
     calculate_confluence_score, calculate_pivot_points,
     TradeDirection, VaRConfig, VaRResult,
     compute_cornish_fisher_var, check_var_emergency_gate,
     SentimentConfig, SentimentResult, extract_sentiment,
 };
-use cotrader_core::config::LlamaBackend;
+use cotrader_core::config::{LlamaBackend, SystemMode, LatencyConfig};
 
 // ── Global Model Storage (Continuous On — loaded once at startup, kept hot in RAM) ──
 /// Runtime model for Chronos-Bolt time series forecasting.
@@ -294,6 +295,63 @@ impl TriLevelValidator {
         .await
     }
 
+    /// Get the current system mode from config.
+    fn system_mode(&self) -> SystemMode {
+        self.state.io.config.system_mode.clone()
+    }
+
+    /// Get latency config for current mode.
+    fn latency_config(&self) -> LatencyConfig {
+        self.state.io.config.latency_config.clone()
+    }
+
+    /// Enforce inspection mode latency gate — blocks for the specified duration.
+    /// Logs the gate activity with timestamp and layer name.
+    async fn inspection_gate(layer_name: &str, delay_ms: u64, symbol: &str) {
+        if delay_ms == 0 {
+            return;
+        }
+        let start = Instant::now();
+        eprintln!(
+            "[INSPECTION] ⏳ {} | Layer: {} | Enforcing {}ms latency gate...",
+            symbol, layer_name, delay_ms
+        );
+        tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+        eprintln!(
+            "[INSPECTION] ✅ {} | Layer: {} | Gate completed in {:?}",
+            symbol, layer_name, start.elapsed()
+        );
+    }
+
+    /// Emit verbose telemetry for layer results in inspection mode.
+    fn emit_layer_telemetry(symbol: &str, layer: &str, signal: &LayerSignal) {
+        eprintln!(
+            "[TELEMETRY] {} | {} → action={} signal={:+.3} conf={:.2} available={} | {}",
+            symbol,
+            layer,
+            signal.action,
+            signal.signal,
+            signal.confidence,
+            signal.available,
+            signal.reasoning
+        );
+    }
+
+    /// Emit memory server diagnostics with fallback warning.
+    fn emit_memory_diagnostics(symbol: &str, success: bool, latency_ms: u64) {
+        if success {
+            eprintln!(
+                "[MEMORY] ✅ {} | Port 3111 responded in {}ms → Local cache frame active",
+                symbol, latency_ms
+            );
+        } else {
+            eprintln!(
+                "[MEMORY] ⚠ {} | Server Timeout on Port 3111 ({}ms) → Shifting to Local Cache Frame Fallback",
+                symbol, latency_ms
+            );
+        }
+    }
+
     /// Run all 4 parallel checks using an explicit OHLCV snapshot so all layers
     /// (HardRulesGate, LLM, Kronos, Sentiment) see the identical market data.
     ///
@@ -412,36 +470,76 @@ impl TriLevelValidator {
             }
         };
 
+        // ── Inspection Mode: Emit pipeline start telemetry ─────────────────────
+        let is_inspection = self.system_mode().is_inspection();
+        let latency = self.latency_config();
+        if is_inspection {
+            eprintln!("[INSPECTION] ═══════════════════════════════════════════════════════════════");
+            eprintln!("[INSPECTION] 🚀 {} | Pipeline START | Price: ${:.2} | Regime: {}", symbol, current_price, trend_label);
+            eprintln!("[INSPECTION] 📊 VaR: {} | Emergency: {}", 
+                var_result.as_ref().map(|v| format!("alpha={:.4}", v.var_alpha)).unwrap_or_else(|| "N/A".into()),
+                var_emergency
+            );
+            eprintln!("[INSPECTION] ═══════════════════════════════════════════════════════════════");
+        }
+
         // ── Phase 1: Run four parallel checks (Rules, ML, Trend, Sentiment) ──
         // All 4 layers receive the identical OHLCV data captured at pipeline start.
         // No layer sees stale or different data.
         let snapshot_ref = snapshot.clone();
-        let (rules_sig, ml_sig, trend_sig, sentiment_sig) = tokio::join!(
-            Self::check_rules_layer(state_rules, &sym, current_price, confluence, &snapshot_ref),
-            Self::check_llm_layer(
-                state_llm,
-                &sym,
-                current_price,
-                confluence,
-                &trend,
-                portfolio_heat,
-                session_open,
-                consecutive_losses,
-                &multi_tf_context,
-                &agent_summary,
-                &news_context,
-                &vector_context,
-                &patterns_context,
-                &snapshot_ref,
-            ),
-            Self::check_trend_layer(state_trend, &sym, current_price, &snapshot_ref),
-            Self::check_sentiment_layer(state_sentiment, &sym, &sentiment_result),
-        );
+        
+        // In inspection mode, run layers sequentially with latency gates for visibility
+        let (rules_sig, ml_sig, trend_sig, sentiment_sig) = if is_inspection {
+            let layer_delay = latency.layer_delay_ms;
+            
+            // Rules Layer
+            Self::inspection_gate("Rules Engine", layer_delay, &sym).await;
+            let rules_sig = Self::check_rules_layer(state_rules, &sym, current_price, confluence, &snapshot_ref).await;
+            Self::emit_layer_telemetry(&sym, "Rules", &rules_sig);
+            
+            // ML/Signal Layer
+            Self::inspection_gate("ML Signal", layer_delay, &sym).await;
+            let ml_sig = Self::check_llm_layer(
+                state_llm, &sym, current_price, confluence, &trend,
+                portfolio_heat, session_open, consecutive_losses,
+                &multi_tf_context, &agent_summary, &news_context,
+                &vector_context, &patterns_context, &snapshot_ref,
+            ).await;
+            Self::emit_layer_telemetry(&sym, "ML/Signal", &ml_sig);
+            
+            // Trend Layer (Chronos-Bolt)
+            Self::inspection_gate("Chronos Forecast", layer_delay, &sym).await;
+            let trend_sig = Self::check_trend_layer(state_trend, &sym, current_price, &snapshot_ref).await;
+            Self::emit_layer_telemetry(&sym, "Chronos", &trend_sig);
+            
+            // Sentiment Layer
+            Self::inspection_gate("Sentiment Pipeline", layer_delay, &sym).await;
+            let sentiment_sig = Self::check_sentiment_layer(state_sentiment, &sym, &sentiment_result).await;
+            Self::emit_layer_telemetry(&sym, "Sentiment", &sentiment_sig);
+            
+            (rules_sig, ml_sig, trend_sig, sentiment_sig)
+        } else {
+            // Production mode: run all 4 layers in parallel for speed
+            tokio::join!(
+                Self::check_rules_layer(state_rules, &sym, current_price, confluence, &snapshot_ref),
+                Self::check_llm_layer(
+                    state_llm, &sym, current_price, confluence, &trend,
+                    portfolio_heat, session_open, consecutive_losses,
+                    &multi_tf_context, &agent_summary, &news_context,
+                    &vector_context, &patterns_context, &snapshot_ref,
+                ),
+                Self::check_trend_layer(state_trend, &sym, current_price, &snapshot_ref),
+                Self::check_sentiment_layer(state_sentiment, &sym, &sentiment_result),
+            )
+        };
 
         // ── Phase 2: LLM Arbitration (only on conflict/high-risk) ────────────
         // The escalation gate checks for direction conflicts or high volatility.
         // If triggered, the LLM (Llama-3.2-3B via Candle) resolves the conflict.
         // If not triggered, the ML signal is used directly (fast path).
+        if is_inspection {
+            Self::inspection_gate("LLM Arbitration", latency.layer_delay_ms, &sym).await;
+        }
         let llm_sig = Self::arbitrate_with_llm(
             &self.state,
             &sym,
@@ -452,6 +550,9 @@ impl TriLevelValidator {
             &sentiment_sig,
         )
         .await;
+        if is_inspection {
+            Self::emit_layer_telemetry(&sym, "LLM Arbitration", &llm_sig);
+        }
 
         // ── VaR Emergency Override ─────────────────────────────────────────────
         // If VaR emergency triggered, override any bullish signals to HOLD
@@ -920,9 +1021,10 @@ impl TriLevelValidator {
         // guard dropped here — no lock held during async work
 
         // Phase 2: Dispatch based on snapshot (no lock held)
+        let is_inspection = state.io.config.system_mode.is_inspection();
         let result = if let Some((url, model)) = ollama_config {
             // Ollama HTTP path — fast async call (~100ms)
-            Self::ollama_arbitrate(&url, &model, &input_clone).await
+            Self::ollama_arbitrate(&url, &model, &input_clone, is_inspection).await
         } else if has_candle {
             // Candle GGUF path — spawn_blocking to avoid blocking tokio
             tokio::task::spawn_blocking(move || {
@@ -998,6 +1100,7 @@ impl TriLevelValidator {
         url: &str,
         model: &str,
         input: &cotrader_ml::models::reasoning_engine::ArbitrationInput,
+        inspection_mode: bool,
     ) -> Result<
         cotrader_ml::models::reasoning_engine::FinalSignal,
         Box<dyn std::error::Error + Send + Sync>,
@@ -1010,8 +1113,15 @@ impl TriLevelValidator {
             });
         }
 
-        // Build the same prompt format as Candle GGUF would use
-        let prompt = cotrader_ml::models::reasoning_engine::ReasoningEngine::build_prompt(input);
+        // Build prompt based on mode
+        let prompt = if inspection_mode {
+            cotrader_ml::models::reasoning_engine::ReasoningEngine::build_inspection_prompt(input)
+        } else {
+            cotrader_ml::models::reasoning_engine::ReasoningEngine::build_prompt(input)
+        };
+
+        // Get generation parameters based on mode
+        let (max_tokens, temperature, top_p) = cotrader_ml::models::reasoning_engine::get_generation_params(inspection_mode);
 
         // Call Ollama /api/generate
         let client = reqwest::Client::new();
@@ -1029,6 +1139,7 @@ impl TriLevelValidator {
         struct OllamaOptions {
             temperature: f64,
             top_p: f64,
+            num_predict: usize,
         }
 
         #[derive(serde::Deserialize)]
@@ -1042,15 +1153,18 @@ impl TriLevelValidator {
             prompt,
             stream: false,
             options: OllamaOptions {
-                temperature: 0.3,
-                top_p: 0.9,
+                temperature,
+                top_p,
+                num_predict: max_tokens,
             },
         };
 
+        // Use extended timeout for inspection mode
+        let timeout_secs = if inspection_mode { 60 } else { 30 };
         let resp = client
             .post(&generate_url)
             .json(&req)
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(std::time::Duration::from_secs(timeout_secs))
             .send()
             .await
             .map_err(|e| format!("Ollama request failed: {e}"))?;
@@ -1065,6 +1179,17 @@ impl TriLevelValidator {
             .json()
             .await
             .map_err(|e| format!("Failed to parse Ollama response: {e}"))?;
+
+        // In inspection mode, emit full LLM output to stderr
+        if inspection_mode {
+            eprintln!("[LLM-REASONING] ═══════════════════════════════════════════════════════════════");
+            eprintln!("[LLM-REASONING] {} | Ollama Full Chain-of-Thought:", input.symbol);
+            eprintln!("[LLM-REASONING] ═══════════════════════════════════════════════════════════════");
+            for line in ollama_resp.response.lines() {
+                eprintln!("[LLM-REASONING] {}", line);
+            }
+            eprintln!("[LLM-REASONING] ═══════════════════════════════════════════════════════════════");
+        }
 
         // Parse the structured output using the same parser
         let default = cotrader_ml::models::reasoning_engine::ReasoningEngine::compute_consensus(input);

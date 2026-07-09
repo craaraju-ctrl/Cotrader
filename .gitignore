@@ -42,6 +42,9 @@ models/
 *.safetensors
 *.gguf
 
+# ── Exception: Rust source files in models/ directories ──────────────────────
+!crates/*/src/models/
+
 # ── OS-Specific ──────────────────────────────────────────────────────────────
 .DS_Store
 .DS_Store?

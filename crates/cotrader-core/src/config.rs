@@ -1,6 +1,86 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// System operating mode — controls latency gates and telemetry verbosity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum SystemMode {
+    /// Normal production mode — minimal latency, standard logging.
+    Production,
+    /// Inspection mode — intentional latency gates, verbose CLI telemetry,
+    /// long-context LLM reasoning with full chain-of-thought output.
+    Inspection,
+}
+
+impl Default for SystemMode {
+    fn default() -> Self {
+        Self::Production
+    }
+}
+
+impl SystemMode {
+    /// Check if inspection mode is active (enables latency gates and verbose output).
+    pub fn is_inspection(&self) -> bool {
+        matches!(self, Self::Inspection)
+    }
+
+    /// Load from environment variable `SYSTEM_MODE`.
+    pub fn from_env() -> Self {
+        match std::env::var("SYSTEM_MODE").unwrap_or_default().to_lowercase().as_str() {
+            "inspection" | "inspect" | "debug" => Self::Inspection,
+            _ => Self::Production,
+        }
+    }
+}
+
+/// Latency gate configuration for inspection mode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LatencyConfig {
+    /// Minimum delay per validation layer (ms). Default: 1000ms (1s) in inspection mode.
+    pub layer_delay_ms: u64,
+    /// Maximum delay for Chronos-Bolt inference (ms). Default: 30000ms (30s).
+    pub chronos_timeout_ms: u64,
+    /// Maximum delay for Llama-3.2-3B reasoning (ms). Default: 60000ms (60s).
+    pub llm_timeout_ms: u64,
+    /// Maximum generated tokens for LLM reasoning. Default: 2048 in inspection mode.
+    pub max_gen_tokens: usize,
+    /// Temperature for LLM sampling. Default: 0.7 in inspection mode.
+    pub temperature: f64,
+    /// Top-p nucleus sampling. Default: 0.95.
+    pub top_p: f64,
+}
+
+impl Default for LatencyConfig {
+    fn default() -> Self {
+        Self {
+            layer_delay_ms: 1000,
+            chronos_timeout_ms: 30_000,
+            llm_timeout_ms: 60_000,
+            max_gen_tokens: 2048,
+            temperature: 0.7,
+            top_p: 0.95,
+        }
+    }
+}
+
+impl LatencyConfig {
+    /// Production mode — no delays, standard LLM params.
+    pub fn production() -> Self {
+        Self {
+            layer_delay_ms: 0,
+            chronos_timeout_ms: 10_000,
+            llm_timeout_ms: 30_000,
+            max_gen_tokens: 128,
+            temperature: 0.3,
+            top_p: 0.9,
+        }
+    }
+
+    /// Inspection mode — deliberate pacing, extended reasoning.
+    pub fn inspection() -> Self {
+        Self::default()
+    }
+}
+
 /// Centralized storage configuration — single source of truth for all DB paths.
 ///
 /// All database files are resolved relative to the project root's `storage/` directory.
@@ -103,6 +183,12 @@ pub struct SystemConfig {
     pub setup_completed: bool,
     /// Which LLM backend to use for signal arbitration.
     pub llama_backend: LlamaBackend,
+    /// System operating mode (Production or Inspection).
+    #[serde(default)]
+    pub system_mode: SystemMode,
+    /// Latency gate configuration (used in inspection mode).
+    #[serde(default)]
+    pub latency_config: LatencyConfig,
 }
 
 impl Default for SystemConfig {
@@ -110,7 +196,8 @@ impl Default for SystemConfig {
         Self {
             setup_completed: false,
             llama_backend: LlamaBackend::None,
-
+            system_mode: SystemMode::from_env(),
+            latency_config: LatencyConfig::default(),
         }
     }
 }
@@ -195,6 +282,10 @@ pub struct Config {
     // === LLM/Model Backend (from system config) ===
     pub llama_backend: LlamaBackend,
     pub setup_completed: bool,
+
+    // === System Mode & Latency Gates ===
+    pub system_mode: SystemMode,
+    pub latency_config: LatencyConfig,
 }
 
 impl Default for Config {
@@ -237,8 +328,14 @@ impl Default for Config {
             fred_api_key: std::env::var("FRED_API_KEY").unwrap_or_default(),
 
             paper_mode,
-            llama_backend: sys.llama_backend,
+            llama_backend: sys.llama_backend.clone(),
             setup_completed: sys.setup_completed,
+            system_mode: sys.system_mode.clone(),
+            latency_config: if sys.system_mode.is_inspection() {
+                sys.latency_config.clone()
+            } else {
+                LatencyConfig::production()
+            },
         }
     }
 }

@@ -266,6 +266,7 @@ pub fn run_setup_wizard() -> Result<SetupResult, Box<dyn std::error::Error + Sen
     let system_config = cotrader_core::config::SystemConfig {
         setup_completed: true,
         llama_backend: backend,
+        ..Default::default()
     };
 
     system_config.save()?;
