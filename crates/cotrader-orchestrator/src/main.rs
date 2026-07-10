@@ -2500,8 +2500,22 @@ async fn main() {
         }
     });
 
-    signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
-    info!("Shutdown signal received. Stopping rat...");
+    // Wait for shutdown signal — SIGINT (Ctrl+C) or SIGTERM (Docker)
+    let ctrl_c = signal::ctrl_c();
+    #[cfg(unix)]
+    let sigterm = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let sigterm = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => info!("Received SIGINT, shutting down..."),
+        _ = sigterm => info!("Received SIGTERM, shutting down..."),
+    }
 
     {
         let mut manager = loop_manager.lock().await;

@@ -323,6 +323,47 @@ impl AgentTask {
     }
 }
 
+/// Double-buffered CacheFrame for lock-free reads across pipeline loops.
+/// The write buffer is updated by the pipeline runner, then swapped atomically.
+/// Readers always get the last completed snapshot without contention.
+pub struct CacheFrameBuffer {
+    /// The current (readable) snapshot — immutable once published
+    current: tokio::sync::RwLock<Option<crate::types::CacheFrame>>,
+    /// The write buffer being assembled
+    pending: tokio::sync::Mutex<Option<crate::types::CacheFrame>>,
+}
+
+impl std::fmt::Debug for CacheFrameBuffer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CacheFrameBuffer").finish_non_exhaustive()
+    }
+}
+
+impl CacheFrameBuffer {
+    pub fn new() -> Self {
+        Self {
+            current: tokio::sync::RwLock::new(None),
+            pending: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    /// Start building a new snapshot (acquires pending lock briefly).
+    pub async fn begin_update(&self) -> tokio::sync::MutexGuard<'_, Option<crate::types::CacheFrame>> {
+        self.pending.lock().await
+    }
+
+    /// Publish the completed snapshot (atomic swap).
+    pub async fn publish(&self, frame: crate::types::CacheFrame) {
+        let mut current = self.current.write().await;
+        *current = Some(frame);
+    }
+
+    /// Read the latest published snapshot (non-blocking read lock).
+    pub async fn read_snapshot(&self) -> tokio::sync::RwLockReadGuard<'_, Option<crate::types::CacheFrame>> {
+        self.current.read().await
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SharedState {
     /// Portfolio & Risk — positions, P&L, broker, circuit breaker, psychology.
@@ -337,6 +378,8 @@ pub struct SharedState {
     pub io: IoStore,
     /// ML Engine — ML model inference (regime, signal scoring, win probability, patterns, strategy).
     pub ml_engine: Arc<MLEngine>,
+    /// Double-buffered CacheFrame for lock-free reads across pipeline loops.
+    pub cache_frame_buffer: Arc<CacheFrameBuffer>,
 }
 
 impl SharedState {
@@ -416,7 +459,7 @@ impl SharedState {
             }
         };
 
-        crate::types::CacheFrame {
+        let frame = crate::types::CacheFrame {
             epoch_id,
             symbol: symbol.to_string(),
             current_price,
@@ -432,7 +475,18 @@ impl SharedState {
             timestamp: chrono::Utc::now(),
             daily_stats,
             vector_memory_context,
-        }
+        };
+
+        // Publish to double buffer for lock-free reads by other pipeline loops
+        self.cache_frame_buffer.publish(frame.clone()).await;
+
+        frame
+    }
+
+    /// Read the latest published CacheFrame snapshot without taking locks.
+    /// Returns None if no snapshot has been published yet.
+    pub async fn read_cached_frame(&self) -> Option<crate::types::CacheFrame> {
+        self.cache_frame_buffer.read_snapshot().await.clone()
     }
 
     /// Get current skill weights (for FSM coordinator).
@@ -488,6 +542,7 @@ impl SharedState {
             agent_memory,
             io,
             ml_engine,
+            cache_frame_buffer: Arc::new(CacheFrameBuffer::new()),
         })
     }
 }

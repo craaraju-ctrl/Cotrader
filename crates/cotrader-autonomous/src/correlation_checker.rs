@@ -1,6 +1,7 @@
 // CorrelationChecker (pairs skill/tool)
 // For pairs trading / hedging awareness. Research: Enhances mean-reversion and risk in correlated assets (crypto focus).
-// Now implements AgentSkill for pluggability. Stub improved with basic cross-symbol proxy when history available.
+// Now implements AgentSkill for pluggability. Computes real Pearson correlation coefficients
+// using rolling 100-candle history windows.
 
 use crate::state::SharedState;
 use async_trait::async_trait;
@@ -16,34 +17,92 @@ impl CorrelationChecker {
         Self { state }
     }
 
-    pub async fn check_correlation(&self, symbol: &str) -> f64 {
-        let history = self.state.market_data.ohlcv_history.read().await;
+    /// Compute Pearson product-moment correlation coefficient between two return series.
+    /// Returns None if insufficient data (< 5 points) or zero variance.
+    fn pearson_correlation(x: &[f64], y: &[f64]) -> Option<f64> {
+        let n = x.len().min(y.len());
+        if n < 5 {
+            return None;
+        }
 
-        // If we have history for major crypto pairs, compute a crude proxy correlation vs "BTC" or average.
-        // Real version would keep aligned time-series and use Pearson.
-        let majors = ["BTC", "ETH", "SOL"];
-        if majors.contains(&symbol) {
-            // High baseline corr among major cryptos (typical >0.6-0.8 in practice)
-            if let (Some(bars), Some(btc_bars)) = (history.get(symbol), history.get("BTC")) {
-                if bars.len() >= 10 && btc_bars.len() >= 10 {
-                    // Simple proxy: if recent price moves directionally aligned with BTC, high corr
-                    let sym_change = (bars.last().unwrap().close - bars[bars.len() - 5].close)
-                        / bars[bars.len() - 5].close;
-                    let btc_change = (btc_bars.last().unwrap().close
-                        - btc_bars[btc_bars.len() - 5].close)
-                        / btc_bars[btc_bars.len() - 5].close;
-                    let aligned = (sym_change * btc_change) > 0.0;
-                    return if aligned { 0.78 } else { 0.55 };
+        let mean_x = x.iter().sum::<f64>() / n as f64;
+        let mean_y = y.iter().sum::<f64>() / n as f64;
+
+        let mut cov_xy = 0.0;
+        let mut var_x = 0.0;
+        let mut var_y = 0.0;
+
+        for i in 0..n {
+            let dx = x[i] - mean_x;
+            let dy = y[i] - mean_y;
+            cov_xy += dx * dy;
+            var_x += dx * dx;
+            var_y += dy * dy;
+        }
+
+        let denominator = (var_x * var_y).sqrt();
+        if denominator < 1e-12 {
+            return None; // Zero variance — undefined correlation
+        }
+
+        Some((cov_xy / denominator).clamp(-1.0, 1.0))
+    }
+
+    /// Extract normalized returns from OHLCV bars (close-to-close percentage changes).
+    fn extract_returns(bars: &[cotrader_core::OhlcvBar], lookback: usize) -> Vec<f64> {
+        let start = bars.len().saturating_sub(lookback);
+        let slice = &bars[start..];
+        slice.windows(2)
+            .map(|w| {
+                if w[0].close > 0.0 {
+                    (w[1].close - w[0].close) / w[0].close
+                } else {
+                    0.0
                 }
-            }
-            return 0.72; // default high for majors
+            })
+            .collect()
+    }
+
+    /// Compute rolling correlation of `symbol` vs `reference` (default: BTC) using
+    /// the last `lookback` candles (default: 100).
+    async fn compute_rolling_correlation(
+        &self,
+        symbol: &str,
+        reference: &str,
+        lookback: usize,
+    ) -> Option<f64> {
+        let history = self.state.market_data.ohlcv_history.read().await;
+        let sym_bars = history.get(symbol)?;
+        let ref_bars = history.get(reference)?;
+
+        let sym_returns = Self::extract_returns(sym_bars, lookback);
+        let ref_returns = Self::extract_returns(ref_bars, lookback);
+
+        Self::pearson_correlation(&sym_returns, &ref_returns)
+    }
+
+    pub async fn check_correlation(&self, symbol: &str) -> f64 {
+        // BTC is the universal reference asset for crypto correlation
+        let reference = if symbol == "BTC" { "ETH" } else { "BTC" };
+
+        // Try rolling correlation with 100-candle window
+        if let Some(corr) = self.compute_rolling_correlation(symbol, reference, 100).await {
+            return corr;
         }
 
-        // Fallback symbol-based
-        match symbol {
-            "BTC" | "ETH" | "SOL" => 0.75,
-            _ => 0.5,
+        // Fallback: try shorter window (50 candles)
+        if let Some(corr) = self.compute_rolling_correlation(symbol, reference, 50).await {
+            return corr;
         }
+
+        // Fallback: default correlation based on asset class
+        let majors = ["BTC", "ETH", "SOL", "BNB", "XRP"];
+        if majors.contains(&symbol) {
+            return 0.72; // High baseline corr among major cryptos
+        }
+
+        // Default moderate correlation for non-major assets
+        0.45
     }
 }
 

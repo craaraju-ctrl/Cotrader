@@ -8,11 +8,11 @@ use tokio::time::sleep;
 use tracing::{info, warn};
 use cotrader_autonomous::state::SharedState;
 use cotrader_autonomous::AutonomousOrchestrator;
+use cotrader_autonomous::event_driven_pipeline::EventDrivenPipeline;
 use cotrader_core::episode::{MarketStateSnapshot, ReasoningStep, TradingEpisode};
 use cotrader_core::{
     calculate_confluence_score, calculate_pivot_points, Agent, MarketContext, OhlcvBar, PivotMethod,
 };
-// TODO: Implement cotrader-eventbus crate
 // use cotrader_eventbus::{subjects as event_subjects, EventBus, RatEvent};
 
 /// Read a loop cadence (in seconds) from an env var, falling back to `default`.
@@ -40,10 +40,13 @@ pub async fn fast_loop(
     _assets: Vec<String>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
-    info!("FastLoop started (5s cadence)");
+    info!("FastLoop started (5s cadence) — event-driven pipeline active");
 
     // Rate limiter: max 3 concurrent Binance API calls (reduced from 5 to avoid rate limits)
     let rate_limiter = Arc::new(tokio::sync::Semaphore::new(3));
+
+    // Event-driven pipeline: detects volume spikes, breakouts, volatility expansions
+    let mut event_pipeline = EventDrivenPipeline::new();
 
     loop {
         let now = Utc::now();
@@ -138,6 +141,39 @@ pub async fn fast_loop(
         // Wait for all price fetches to complete
         for handle in handles {
             let _ = handle.await;
+        }
+
+        // ── Event-Driven Pipeline: detect triggers from price ticks ──
+        // Feeds all symbol prices through the event detection engine.
+        // Triggers (volume spike, breakout, volatility expansion) will cause
+        // targeted re-evaluation instead of blanket scans.
+        {
+            let history = orchestrator.state.market_data.ohlcv_history.read().await;
+            let mut triggered_symbols = Vec::new();
+            for symbol in &assets {
+                if let Some(bars) = history.get(symbol.as_str()) {
+                    if let Some(latest) = bars.last() {
+                        let volume = bars.iter().rev().take(20).map(|b| b.volume).sum::<f64>() / 20.0;
+                        let events = event_pipeline.on_tick(symbol, latest.close, volume);
+                        if !events.is_empty() {
+                            tracing::debug!(
+                                symbol = %symbol,
+                                events = ?events,
+                                "Event-driven trigger fired"
+                            );
+                            triggered_symbols.push(symbol.clone());
+                        }
+                    }
+                }
+            }
+            // If events triggered, log for observability
+            if !triggered_symbols.is_empty() {
+                info!(
+                    "Event-driven pipeline triggered for {} symbol(s): {:?}",
+                    triggered_symbols.len(),
+                    triggered_symbols
+                );
+            }
         }
 
         // SL / TP monitoring & auto-exit
