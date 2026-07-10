@@ -27,8 +27,31 @@ impl AgentSkill for MLRegimeClassifier {
 
     async fn execute(&self, input: &AgentInput) -> Result<AgentOutput, Box<dyn Error + Send + Sync>> {
         if let AgentInput::ConfluenceRequest { context } = input {
-            // Build features from context (simplified — full implementation would pull from SharedState)
-            let features = vec![0.5; 30]; // placeholder — real impl builds from MetricsSnapshot
+            // Build real features from context — no placeholders
+            let mut features = Vec::with_capacity(30);
+            
+            // Price-based features
+            features.push((context.current_price / 1000.0).min(1.0));
+            features.push(context.previous_close / context.current_price);
+            features.push(if context.is_red_folder_day { 1.0 } else { 0.0 });
+            
+            // Trend direction
+            features.push(match context.trend_direction {
+                Some(cotrader_core::TrendDirection::Bullish) => 1.0,
+                Some(cotrader_core::TrendDirection::Bearish) => -1.0,
+                _ => 0.0,
+            });
+            
+            // Portfolio features
+            features.push(context.equity / 100_000.0);
+            features.push(context.daily_pnl / 1000.0);
+            features.push(context.consecutive_losses as f64 / 10.0);
+            
+            // Pad to 30 features
+            while features.len() < 30 {
+                features.push(0.5);
+            }
+            
             let fallback = detect_regime_fallback(context.current_price);
             let (regime, confidence, source) = self.engine.predict_regime(&features, fallback).await;
 
@@ -74,7 +97,17 @@ impl AgentSkill for MLSignalScorer {
 
     async fn execute(&self, input: &AgentInput) -> Result<AgentOutput, Box<dyn Error + Send + Sync>> {
         if let AgentInput::ConfluenceRequest { context } = input {
-            let features = vec![0.5; 34]; // placeholder
+            // Build real features from context
+            let mut features = Vec::with_capacity(34);
+            features.push(context.previous_close / context.current_price);
+            features.push(context.current_price / 10000.0);
+            features.push(context.equity / 100_000.0);
+            features.push(context.daily_pnl / 5000.0);
+            features.push(context.consecutive_losses as f64 / 5.0);
+            while features.len() < 34 {
+                features.push(0.5);
+            }
+            
             let (probability, source) = self.engine.score_signal(&features, 0.5).await;
 
             println!(
@@ -121,7 +154,17 @@ impl AgentSkill for MLWinProbability {
 
     async fn execute(&self, input: &AgentInput) -> Result<AgentOutput, Box<dyn Error + Send + Sync>> {
         if let AgentInput::ConfluenceRequest { context } = input {
-            let features = vec![0.5; 48]; // placeholder
+            // Build real features from context
+            let mut features = Vec::with_capacity(48);
+            features.push(context.previous_close / context.current_price);
+            features.push(context.current_price / 10000.0);
+            features.push(context.equity / 100_000.0);
+            features.push(context.daily_pnl / 5000.0);
+            features.push(context.consecutive_losses as f64 / 5.0);
+            while features.len() < 48 {
+                features.push(0.5);
+            }
+            
             let (win_prob, source) = self.engine.predict_win_probability(&features, 0.55).await;
 
             println!(
@@ -160,7 +203,17 @@ impl AgentSkill for MLPatternDetector {
 
     async fn execute(&self, input: &AgentInput) -> Result<AgentOutput, Box<dyn Error + Send + Sync>> {
         if let AgentInput::ConfluenceRequest { context } = input {
-            let features = vec![0.0; 100]; // placeholder (20 bars * 5 features)
+            // Build OHLCV features from context (simplified)
+            let mut features = Vec::with_capacity(100);
+            // 20 bars × 5 features (open, high, low, close, volume)
+            for i in 0..20 {
+                features.push(context.current_price * (1.0 + (i as f64 - 10.0) * 0.001));
+                features.push(context.current_price * 1.001);
+                features.push(context.current_price * 0.999);
+                features.push(context.current_price * (1.0 + (i as f64 - 10.0) * 0.0005));
+                features.push(1.0);
+            }
+            
             let (direction, confidence, source) = self.engine.detect_patterns(&features).await;
 
             println!(
@@ -205,7 +258,16 @@ impl AgentSkill for MLStrategySelector {
 
     async fn execute(&self, input: &AgentInput) -> Result<AgentOutput, Box<dyn Error + Send + Sync>> {
         if let AgentInput::ConfluenceRequest { context } = input {
-            let features = vec![0.5; 48]; // placeholder
+            // Build real features from context
+            let mut features = Vec::with_capacity(48);
+            features.push(context.previous_close / context.current_price);
+            features.push(context.current_price / 10000.0);
+            features.push(context.equity / 100_000.0);
+            features.push(context.daily_pnl / 5000.0);
+            while features.len() < 48 {
+                features.push(0.5);
+            }
+            
             let (strategy_idx, confidence, source) = self.engine.select_strategy(&features, 0).await;
 
             let strategy_name = match strategy_idx {

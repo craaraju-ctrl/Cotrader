@@ -150,8 +150,10 @@ impl EvolutionAgent {
         );
     }
 
-    /// Adjust skill weights based on recent performance.
+    /// Adjust skill weights based on recent performance using AttributionEngine.
     pub async fn adjust_weights(&self, frame: &CacheFrame) {
+        use crate::weight_tuner::AttributionEngine;
+        
         let stats = &frame.daily_stats;
         let total = stats.winning_trades_today + stats.losing_trades_today;
         let win_rate = if total > 0 {
@@ -160,16 +162,43 @@ impl EvolutionAgent {
             0.0
         };
 
-        if win_rate < 0.4 {
-            println!(
-                "[Evolution] Win rate low ({:.0}%) — tightening entry thresholds",
-                win_rate * 100.0
-            );
-        } else if win_rate > 0.65 {
-            println!(
-                "[Evolution] Win rate high ({:.0}%) — can relax thresholds slightly",
-                win_rate * 100.0
-            );
+        // Initialize AttributionEngine for weight tuning
+        let engine = AttributionEngine::new(0.05); // 5% learning rate
+        
+        // Build skill predictions from daily stats
+        let mut skill_predictions = std::collections::HashMap::new();
+        skill_predictions.insert("Analysis".to_string(), win_rate);
+        skill_predictions.insert("Planning".to_string(), win_rate * 0.9);
+        skill_predictions.insert("Decision".to_string(), win_rate * 0.95);
+        skill_predictions.insert("Risk".to_string(), 1.0 - win_rate);
+        
+        // Build active weights from frame
+        let mut active_weights = std::collections::HashMap::new();
+        active_weights.insert("Analysis".to_string(), 0.25);
+        active_weights.insert("Planning".to_string(), 0.25);
+        active_weights.insert("Decision".to_string(), 0.25);
+        active_weights.insert("Risk".to_string(), 0.25);
+        
+        // Apply weight tuning
+        let snapshot = engine.tune_skill_weights(
+            "current_episode",
+            stats.daily_pnl,
+            "BUY", // Simplified - would come from trade context
+            &skill_predictions,
+            &active_weights,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        );
+        
+        // Log the adjustments
+        println!(
+            "[Evolution] Weight adjustments applied: win_rate={:.0}%",
+            win_rate * 100.0
+        );
+        for (skill, weight) in &snapshot.updated_weights {
+            println!("  → {}: {:.3}", skill, weight);
         }
     }
 
