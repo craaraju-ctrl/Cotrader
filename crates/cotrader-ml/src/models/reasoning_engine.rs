@@ -75,6 +75,14 @@ pub struct ArbitrationInput {
     // Sentiment Analysis (from FinBERT pipeline)
     pub sentiment_score: f64,     // -1.0 (hyper-bearish) to +1.0 (hyper-bullish)
     pub sentiment_confidence: f64, // 0.0–1.0
+    // Vector Memory Context (from agentic memory server)
+    pub vector_memory_context: String,
+    // News Context (from news fetcher)
+    pub news_context: String,
+    // Multi-Timeframe Analysis
+    pub multi_tf_context: String,
+    // Agent Market Summary
+    pub agent_summary: String,
 }
 
 impl std::fmt::Display for ArbitrationInput {
@@ -345,7 +353,7 @@ impl ReasoningEngine {
                 sent_conf = input.sentiment_confidence,
             )
         } else {
-            // Production mode — concise output
+            // Production mode — concise output with context
             format!(
                 "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n\
                 You are a trading signal arbitrator. Your job is to reconcile conflicting \
@@ -360,6 +368,9 @@ impl ReasoningEngine {
                 Sentiment:     {sent_score:+.3} ({sent_label}, conf={sent_conf:.2})\n\
                 Market Regime: {regime}\n\
                 Volatility:    {vol:.2}x normal\n\n\
+                Vector Memory: {vector}\n\
+                News Context: {news}\n\
+                Multi-TF Analysis: {mtf}\n\n\
                 Output exactly:\n\
                 DECISION: BUY/SELL/HOLD\n\
                 CONFIDENCE: 0.0-1.0\n\
@@ -383,6 +394,9 @@ impl ReasoningEngine {
                 sent_score = input.sentiment_score,
                 sent_label = sentiment_label,
                 sent_conf = input.sentiment_confidence,
+                vector = input.vector_memory_context,
+                news = input.news_context,
+                mtf = input.multi_tf_context,
             )
         }
     }
@@ -785,6 +799,10 @@ mod tests {
             pattern_confidence: 0.0,
             sentiment_score: 0.0,
             sentiment_confidence: 0.0,
+            vector_memory_context: "Test vector memory".into(),
+            news_context: "Test news context".into(),
+            multi_tf_context: "Test multi-TF context".into(),
+            agent_summary: "Test agent summary".into(),
         }
     }
 
@@ -819,6 +837,10 @@ mod tests {
             pattern_confidence: 0.0,
             sentiment_score: 0.0,
             sentiment_confidence: 0.0,
+            vector_memory_context: "".into(),
+            news_context: "".into(),
+            multi_tf_context: "".into(),
+            agent_summary: "".into(),
         };
         assert!(ReasoningEngine::escalation_triggered(&input));
     }
@@ -843,6 +865,10 @@ mod tests {
             pattern_confidence: 0.0,
             sentiment_score: 0.0,
             sentiment_confidence: 0.0,
+            vector_memory_context: "".into(),
+            news_context: "".into(),
+            multi_tf_context: "".into(),
+            agent_summary: "".into(),
         };
         assert!(ReasoningEngine::escalation_triggered(&input));
     }
@@ -867,6 +893,10 @@ mod tests {
             pattern_confidence: 0.0,
             sentiment_score: 0.0,
             sentiment_confidence: 0.0,
+            vector_memory_context: "".into(),
+            news_context: "".into(),
+            multi_tf_context: "".into(),
+            agent_summary: "".into(),
         };
         assert!(ReasoningEngine::escalation_triggered(&input));
     }
@@ -891,6 +921,10 @@ mod tests {
             pattern_confidence: 0.0,
             sentiment_score: 0.0,
             sentiment_confidence: 0.0,
+            vector_memory_context: "".into(),
+            news_context: "".into(),
+            multi_tf_context: "".into(),
+            agent_summary: "".into(),
         };
         let signal = ReasoningEngine::compute_consensus(&input);
         assert_eq!(signal.direction, "BUY");
@@ -918,6 +952,10 @@ mod tests {
             pattern_confidence: 0.0,
             sentiment_score: 0.0,
             sentiment_confidence: 0.0,
+            vector_memory_context: "".into(),
+            news_context: "".into(),
+            multi_tf_context: "".into(),
+            agent_summary: "".into(),
         };
         let signal = ReasoningEngine::compute_consensus(&input);
         assert_eq!(signal.direction, "HOLD");

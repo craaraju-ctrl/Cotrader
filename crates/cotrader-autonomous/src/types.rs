@@ -402,6 +402,8 @@ pub struct CacheFrame {
     pub rule_version: u64,
     pub timestamp: DateTime<Utc>,
     pub daily_stats: DailyStats,
+    /// Vector memory context from agentic memory server (port 3111).
+    pub vector_memory_context: String,
 }
 
 /// Aggregate daily trading statistics pre-computed for agent evaluation.

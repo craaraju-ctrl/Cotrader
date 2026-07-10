@@ -388,6 +388,33 @@ impl SharedState {
             n.get(symbol).cloned()
         };
         let rule_version = 1; // Simplified; would come from versioned rules in production
+        
+        // Query vector memory server for relevant context
+        let vector_memory_context = {
+            let memory_url = std::env::var("MEMORY_API_URL")
+                .unwrap_or_else(|_| "http://localhost:3111".to_string());
+            
+            match reqwest::Client::new()
+                .get(format!("{}/search/smart?q={}", memory_url, symbol))
+                .timeout(std::time::Duration::from_secs(2))
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    if let Ok(text) = resp.text().await {
+                        let truncated = if text.len() > 500 {
+                            format!("{}...", &text[..500])
+                        } else {
+                            text
+                        };
+                        format!("Vector memory for {}: {}", symbol, truncated)
+                    } else {
+                        "Vector memory: response parse error".to_string()
+                    }
+                }
+                _ => "Vector memory: server unavailable (using local cache)".to_string(),
+            }
+        };
 
         crate::types::CacheFrame {
             epoch_id,
@@ -404,6 +431,7 @@ impl SharedState {
             rule_version,
             timestamp: chrono::Utc::now(),
             daily_stats,
+            vector_memory_context,
         }
     }
 

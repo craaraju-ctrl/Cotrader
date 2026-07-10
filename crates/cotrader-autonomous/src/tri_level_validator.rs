@@ -541,7 +541,34 @@ impl TriLevelValidator {
             }
         };
 
-        let vector_context = "No vector memory (removed — dependency deleted)".to_string();
+        // ── Vector Memory Context (query memory server for relevant embeddings) ──
+        let vector_context = {
+            let memory_url = std::env::var("MEMORY_API_URL")
+                .unwrap_or_else(|_| "http://localhost:3111".to_string());
+            
+            // Query memory server for relevant context about this symbol
+            match reqwest::Client::new()
+                .get(format!("{}/search/smart?q={}", memory_url, symbol))
+                .timeout(std::time::Duration::from_secs(2))
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    if let Ok(text) = resp.text().await {
+                        // Truncate to reasonable length for LLM context
+                        let truncated = if text.len() > 500 {
+                            format!("{}...", &text[..500])
+                        } else {
+                            text
+                        };
+                        format!("Vector memory for {}: {}", symbol, truncated)
+                    } else {
+                        "Vector memory: response parse error".to_string()
+                    }
+                }
+                _ => "Vector memory: server unavailable (using local cache)".to_string(),
+            }
+        };
 
         let patterns_context = {
             let pats = self.state.market_data.last_patterns.read().await;
@@ -1278,6 +1305,41 @@ impl TriLevelValidator {
 
         use cotrader_ml::models::reasoning_engine::{ArbitrationInput, arbitrate_complex_signals};
 
+        // Gather context for LLM arbitration
+        let vector_memory_context = {
+            let memory_url = std::env::var("MEMORY_API_URL")
+                .unwrap_or_else(|_| "http://localhost:3111".to_string());
+            match reqwest::Client::new()
+                .get(format!("{}/search/smart?q={}", memory_url, symbol))
+                .timeout(std::time::Duration::from_secs(2))
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    resp.text().await.unwrap_or_default()
+                }
+                _ => "Vector memory: server unavailable".to_string(),
+            }
+        };
+
+        let news_context = {
+            let news = state.agent_memory.latest_news.read().await;
+            news.get(symbol).map(|ctx| ctx.to_prompt_string()).unwrap_or_default()
+        };
+
+        let multi_tf_context = {
+            let mtf_agg = state.market_data.multi_tf_aggregate.read().await;
+            mtf_agg.get(symbol).map(|agg| {
+                format!("MTF({} TFs): dir={} signal={:.3} agree={:.0}%",
+                    agg.tf_count, agg.aggregate_direction, agg.aggregate_signal, agg.agreement_pct * 100.0)
+            }).unwrap_or_default()
+        };
+
+        let agent_summary = {
+            let s = state.agent_memory.agent_market_summary.read().await;
+            s.clone()
+        };
+
         let input = ArbitrationInput {
             rules_action: rules_sig.action.clone(),
             rules_confidence: rules_sig.confidence,
@@ -1296,6 +1358,10 @@ impl TriLevelValidator {
             pattern_confidence,
             sentiment_score: sentiment_sig.signal,
             sentiment_confidence: sentiment_sig.confidence,
+            vector_memory_context,
+            news_context,
+            multi_tf_context,
+            agent_summary,
         };
 
         // Dispatch to the configured LLM backend
