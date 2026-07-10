@@ -99,7 +99,7 @@ pub use service_manager::{ConnectionStatus, ServiceManager, ServiceStatus};
 pub use skill_aggregator::{AggregatedSignal, SkillAggregator};
 pub use memory_integration::{MemoryIntegration, PolicyEntry};
 pub use market_regime::MarketRegime;
-pub use risk::{compute_cornish_fisher_var, compute_var_from_returns, check_var_emergency_gate, VaRConfig, VaRResult};
+pub use risk::{compute_cornish_fisher_var, compute_var_from_returns, check_var_emergency_gate, VaRConfig, VaRResult, compute_cvar, check_cvar_emergency_gate, CVarResult};
 pub use sentiment::{extract_sentiment, extract_sentiment_from_text, init_embedding_model, SentimentConfig, SentimentResult};
 pub use symbol::{bare_symbol_set, symbols_match, SymbolPair};
 pub mod agentmemory;

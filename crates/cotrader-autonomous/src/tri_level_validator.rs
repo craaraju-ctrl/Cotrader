@@ -32,9 +32,118 @@ use cotrader_core::{
     calculate_confluence_score, calculate_pivot_points,
     TradeDirection, VaRConfig, VaRResult,
     compute_cornish_fisher_var, check_var_emergency_gate,
+    compute_cvar, check_cvar_emergency_gate,
     SentimentConfig, SentimentResult, extract_sentiment,
 };
 use cotrader_core::config::{LlamaBackend, SystemMode, LatencyConfig, AuditConfig, StepTelemetry, BoundaryState, ToolCall, CacheFetch, TaskCompletionGate, FallbackRationale, ZeroFallbackConfig};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Nano-Particle Telemetry Tracer (Batched Logging)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Telemetry event for batched logging.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryEvent {
+    /// Event timestamp (ISO 8601).
+    pub timestamp: String,
+    /// Event type (e.g., "TASK_GATE", "FALLBACK", "MEMORY", "LAYER").
+    pub event_type: String,
+    /// Symbol associated with event.
+    pub symbol: String,
+    /// Layer or component name.
+    pub layer: String,
+    /// Event status (e.g., "SUCCESS", "TIMEOUT", "ERROR").
+    pub status: String,
+    /// Duration in milliseconds.
+    pub duration_ms: u64,
+    /// Additional details.
+    pub details: String,
+    /// Whether fallback was used.
+    pub fallback_used: bool,
+}
+
+/// Telemetry batch logger — accumulates events and writes them periodically.
+pub struct TelemetryBatcher {
+    /// Buffer of pending telemetry events.
+    buffer: Mutex<Vec<TelemetryEvent>>,
+    /// Maximum buffer size before forced flush.
+    max_buffer_size: usize,
+    /// Flush interval in milliseconds.
+    flush_interval_ms: u64,
+}
+
+impl TelemetryBatcher {
+    /// Create a new telemetry batcher.
+    pub fn new(max_buffer_size: usize, flush_interval_ms: u64) -> Self {
+        Self {
+            buffer: Mutex::new(Vec::with_capacity(max_buffer_size)),
+            max_buffer_size,
+            flush_interval_ms,
+        }
+    }
+
+    /// Push a telemetry event to the buffer.
+    pub fn push(&self, event: TelemetryEvent) {
+        let mut buffer = self.buffer.lock().unwrap();
+        buffer.push(event);
+        
+        // Auto-flush if buffer is full
+        if buffer.len() >= self.max_buffer_size {
+            self.flush_internal(&mut buffer);
+        }
+    }
+
+    /// Flush all buffered events to disk.
+    pub fn flush(&self) {
+        let mut buffer = self.buffer.lock().unwrap();
+        self.flush_internal(&mut buffer);
+    }
+
+    /// Internal flush implementation.
+    fn flush_internal(&self, buffer: &mut Vec<TelemetryEvent>) {
+        if buffer.is_empty() {
+            return;
+        }
+
+        let path = "telemetry_batch.jsonl";
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            for event in buffer.drain(..) {
+                if let Ok(line) = serde_json::to_string(&event) {
+                    let _ = writeln!(file, "{}", line);
+                }
+            }
+        }
+    }
+}
+
+/// Global telemetry batcher instance.
+static TELEMETRY_BATCHER: Mutex<Option<TelemetryBatcher>> = Mutex::new(None);
+
+/// Initialize the global telemetry batcher.
+pub fn init_telemetry_batcher(max_buffer_size: usize, flush_interval_ms: u64) {
+    let mut guard = TELEMETRY_BATCHER.lock().unwrap();
+    *guard = Some(TelemetryBatcher::new(max_buffer_size, flush_interval_ms));
+}
+
+/// Push a telemetry event to the global batcher.
+pub fn push_telemetry(event: TelemetryEvent) {
+    let guard = TELEMETRY_BATCHER.lock().unwrap();
+    if let Some(batcher) = guard.as_ref() {
+        batcher.push(event);
+    }
+}
+
+/// Flush all buffered telemetry events.
+pub fn flush_telemetry() {
+    let guard = TELEMETRY_BATCHER.lock().unwrap();
+    if let Some(batcher) = guard.as_ref() {
+        batcher.flush();
+    }
+}
 
 // ── Global Model Storage (Continuous On — loaded once at startup, kept hot in RAM) ──
 /// Runtime model for Chronos-Bolt time series forecasting.

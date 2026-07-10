@@ -257,6 +257,75 @@ impl Default for OrchestratorConfig {
     }
 }
 
+/// CVaR (Conditional Value at Risk) configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CVarConfig {
+    /// Enable CVaR calculation.
+    pub enabled: bool,
+    /// Confidence level (e.g., 0.95 for 95% CVaR).
+    pub confidence: f64,
+    /// Maximum CVaR threshold as fraction of portfolio value.
+    pub max_cvar: f64,
+    /// Minimum number of returns required for CVaR calculation.
+    pub min_observations: usize,
+}
+
+impl Default for CVarConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            confidence: 0.95,
+            max_cvar: 0.10, // 10% maximum CVaR
+            min_observations: 10,
+        }
+    }
+}
+
+/// Telemetry batch configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryConfig {
+    /// Enable telemetry batching.
+    pub enabled: bool,
+    /// Maximum buffer size before forced flush.
+    pub max_buffer_size: usize,
+    /// Flush interval in milliseconds.
+    pub flush_interval_ms: u64,
+    /// Telemetry output path.
+    pub output_path: String,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_buffer_size: 100,
+            flush_interval_ms: 5_000,
+            output_path: "telemetry_batch.jsonl".to_string(),
+        }
+    }
+}
+
+/// State-Guard configuration for preventing duplicate scans.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StateGuardConfig {
+    /// Enable state guard lockout.
+    pub enabled: bool,
+    /// Lockout duration after order placement (ms).
+    pub lockout_duration_ms: u64,
+    /// Maximum pending orders per symbol before suppression.
+    pub max_pending_per_symbol: usize,
+}
+
+impl Default for StateGuardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            lockout_duration_ms: 60_000,
+            max_pending_per_symbol: 3,
+        }
+    }
+}
+
 /// Telemetry event for a single step within a layer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepTelemetry {
@@ -473,6 +542,15 @@ pub struct SystemConfig {
     /// Orchestrator supervisor configuration.
     #[serde(default)]
     pub orchestrator_config: OrchestratorConfig,
+    /// CVaR (Conditional Value at Risk) configuration.
+    #[serde(default)]
+    pub cvar_config: CVarConfig,
+    /// Telemetry batch configuration.
+    #[serde(default)]
+    pub telemetry_config: TelemetryConfig,
+    /// State-Guard configuration for preventing duplicate scans.
+    #[serde(default)]
+    pub state_guard_config: StateGuardConfig,
 }
 
 impl Default for SystemConfig {
@@ -486,6 +564,9 @@ impl Default for SystemConfig {
             task_convergence: ZeroFallbackConfig::default(),
             mtf_config: MtfConfig::default(),
             orchestrator_config: OrchestratorConfig::default(),
+            cvar_config: CVarConfig::default(),
+            telemetry_config: TelemetryConfig::default(),
+            state_guard_config: StateGuardConfig::default(),
         }
     }
 }
@@ -580,6 +661,9 @@ pub struct Config {
     pub task_convergence: ZeroFallbackConfig,
     pub mtf_config: MtfConfig,
     pub orchestrator_config: OrchestratorConfig,
+    pub cvar_config: CVarConfig,
+    pub telemetry_config: TelemetryConfig,
+    pub state_guard_config: StateGuardConfig,
 }
 
 impl Default for Config {
@@ -638,6 +722,9 @@ impl Default for Config {
             task_convergence: sys.task_convergence.clone(),
             mtf_config: sys.mtf_config.clone(),
             orchestrator_config: sys.orchestrator_config.clone(),
+            cvar_config: sys.cvar_config.clone(),
+            telemetry_config: sys.telemetry_config.clone(),
+            state_guard_config: sys.state_guard_config.clone(),
         }
     }
 }

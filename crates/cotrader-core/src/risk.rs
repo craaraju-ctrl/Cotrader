@@ -231,6 +231,135 @@ fn normal_ppf(p: f64) -> f64 {
     -z // Negative because we're looking for left tail
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// Conditional Value at Risk (CVaR / Expected Shortfall)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Result of CVaR computation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CVarResult {
+    /// Expected Shortfall at the specified confidence level.
+    pub cvar: f64,
+    /// Value at Risk at the specified confidence level.
+    pub var: f64,
+    /// Confidence level used (e.g., 0.95).
+    pub confidence: f64,
+    /// Number of tail observations used.
+    pub tail_observations: usize,
+    /// Mean of tail losses.
+    pub tail_mean: f64,
+    /// Standard deviation of tail losses.
+    pub tail_std: f64,
+    /// Whether computation was successful.
+    pub valid: bool,
+    /// Error message if computation failed.
+    pub error: Option<String>,
+}
+
+impl Default for CVarResult {
+    fn default() -> Self {
+        Self {
+            cvar: 0.0,
+            var: 0.0,
+            confidence: 0.95,
+            tail_observations: 0,
+            tail_mean: 0.0,
+            tail_std: 0.0,
+            valid: false,
+            error: Some("No data provided".to_string()),
+        }
+    }
+}
+
+/// Compute CVaR (Expected Shortfall) from returns.
+///
+/// CVaR is the expected loss given that the loss exceeds VaR.
+/// It provides a more comprehensive risk measure than VaR alone.
+///
+/// # Arguments
+/// * `returns` - Slice of period returns
+/// * `confidence` - Confidence level (e.g., 0.95 for 95% CVaR)
+///
+/// # Returns
+/// `CVarResult` with CVaR and diagnostic information.
+pub fn compute_cvar(returns: &[f64], confidence: f64) -> CVarResult {
+    let n = returns.len();
+
+    if n < 10 {
+        return CVarResult {
+            error: Some(format!("Insufficient returns: {} (need >= 10)", n)),
+            ..Default::default()
+        };
+    }
+
+    // Sort returns to find tail
+    let mut sorted = returns.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+    // Calculate VaR (percentile method)
+    let var_index = ((1.0 - confidence) * n as f64).ceil() as usize;
+    let var_index = var_index.min(n - 1).max(1);
+    let var = -sorted[var_index]; // Negative because VaR is a loss
+
+    // Calculate CVaR (average of losses beyond VaR)
+    let tail_observations = sorted[..var_index].to_vec();
+    let tail_count = tail_observations.len();
+
+    if tail_count == 0 {
+        return CVarResult {
+            cvar: var,
+            var,
+            confidence,
+            tail_observations: 0,
+            tail_mean: 0.0,
+            tail_std: 0.0,
+            valid: true,
+            error: None,
+        };
+    }
+
+    let tail_mean = tail_observations.iter().sum::<f64>() / tail_count as f64;
+    let tail_variance = tail_observations.iter()
+        .map(|r| (r - tail_mean).powi(2))
+        .sum::<f64>() / tail_count as f64;
+    let tail_std = tail_variance.sqrt();
+
+    // CVaR is the expected value of losses in the tail
+    let cvar = -tail_mean;
+
+    CVarResult {
+        cvar,
+        var,
+        confidence,
+        tail_observations: tail_count,
+        tail_mean,
+        tail_std,
+        valid: true,
+        error: None,
+    }
+}
+
+/// Check if CVaR exceeds risk tolerance.
+///
+/// Returns `Some(reason)` if the CVaR emergency gate should trigger, `None` otherwise.
+pub fn check_cvar_emergency_gate(
+    cvar_result: &CVarResult,
+    max_cvar: f64,
+) -> Option<String> {
+    if !cvar_result.valid {
+        return None;
+    }
+
+    if cvar_result.cvar > max_cvar {
+        return Some(format!(
+            "CVaR emergency: CVaR={:.4} exceeds max={:.4} (tail_mean={:.4}, tail_std={:.4}, observations={})",
+            cvar_result.cvar, max_cvar, cvar_result.tail_mean, cvar_result.tail_std, cvar_result.tail_observations
+        ));
+    }
+
+    None
+}
+
 /// Check if VaR exceeds risk tolerance and volatility is within bounds.
 ///
 /// Returns `Some(reason)` if the emergency gate should trigger, `None` otherwise.
