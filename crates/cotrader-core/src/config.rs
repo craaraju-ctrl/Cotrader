@@ -115,6 +115,148 @@ impl AuditConfig {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// Task-Driven Event Convergence (Institutional Architecture)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Task completion gate — each layer emits this when fully resolved.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskCompletionGate {
+    /// Unique task identifier.
+    pub task_id: String,
+    /// Layer that completed.
+    pub layer: String,
+    /// Whether the task completed successfully.
+    pub success: bool,
+    /// Duration in milliseconds.
+    pub duration_ms: u64,
+    /// Output payload description.
+    pub payload_description: String,
+    /// Any warnings generated during execution.
+    pub warnings: Vec<String>,
+    /// Whether fallback was required.
+    pub fallback_used: bool,
+    /// If fallback used, the mathematical rationale.
+    pub fallback_rationale: Option<FallbackRationale>,
+}
+
+/// Mathematical rationale for fallback — required when fallback is forced.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FallbackRationale {
+    /// Root cause: infrastructure barrier, computation saturation, or pipeline drift.
+    pub root_cause: String,
+    /// Mathematical proof of why fallback was necessary.
+    pub proof: String,
+    /// Risk implications of the fallback.
+    pub risk_implications: String,
+    /// Recommended mitigation for future occurrences.
+    pub mitigation: String,
+}
+
+/// Zero-fallback drive configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ZeroFallbackConfig {
+    /// Enable zero-fallback mode.
+    pub enabled: bool,
+    /// Maximum computation time before forcing fallback (ms).
+    /// Default: 300000ms (5 minutes) — allows deep reasoning.
+    pub max_computation_ms: u64,
+    /// Enable fallback causality analysis.
+    pub causality_analysis: bool,
+}
+
+impl Default for ZeroFallbackConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_computation_ms: 300_000,
+            causality_analysis: true,
+        }
+    }
+}
+
+/// Multi-timeframe configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MtfConfig {
+    /// Timeframes to analyze (e.g., ["M5", "M15", "M30", "H1", "H4", "H8", "H12", "D1"]).
+    pub timeframes: Vec<String>,
+    /// Lookback window (candles) for each timeframe.
+    pub lookback_candles: usize,
+    /// Weight per timeframe for consensus.
+    pub timeframe_weights: Vec<(String, f64)>,
+}
+
+impl Default for MtfConfig {
+    fn default() -> Self {
+        Self {
+            timeframes: vec![
+                "M5".to_string(), "M15".to_string(), "M30".to_string(),
+                "H1".to_string(), "H4".to_string(), "H8".to_string(),
+                "H12".to_string(), "D1".to_string(),
+            ],
+            lookback_candles: 100,
+            timeframe_weights: vec![
+                ("M5".to_string(), 0.05),
+                ("M15".to_string(), 0.08),
+                ("M30".to_string(), 0.10),
+                ("H1".to_string(), 0.15),
+                ("H4".to_string(), 0.25),
+                ("H8".to_string(), 0.15),
+                ("H12".to_string(), 0.10),
+                ("D1".to_string(), 0.12),
+            ],
+        }
+    }
+}
+
+/// Agent lifecycle configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentLifecycleConfig {
+    /// Maximum time in Processing state before force-completion (ms).
+    pub max_processing_ms: u64,
+    /// Maximum time in WaitingData state before fallback (ms).
+    pub max_waiting_ms: u64,
+    /// Whether to enable fallback on error.
+    pub enable_fallback: bool,
+    /// Fallback threshold (number of retries before fallback).
+    pub fallback_threshold: usize,
+}
+
+impl Default for AgentLifecycleConfig {
+    fn default() -> Self {
+        Self {
+            max_processing_ms: 60_000,
+            max_waiting_ms: 30_000,
+            enable_fallback: true,
+            fallback_threshold: 3,
+        }
+    }
+}
+
+/// Orchestrator supervisor configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrchestratorConfig {
+    /// Memory health check interval (ms).
+    pub memory_health_check_interval_ms: u64,
+    /// Memory failure threshold before fallback.
+    pub memory_failure_threshold: usize,
+    /// Database lock timeout (ms).
+    pub database_lock_timeout_ms: u64,
+    /// State guard lockout duration after order placement (ms).
+    pub state_guard_lockout_ms: u64,
+}
+
+impl Default for OrchestratorConfig {
+    fn default() -> Self {
+        Self {
+            memory_health_check_interval_ms: 5_000,
+            memory_failure_threshold: 3,
+            database_lock_timeout_ms: 10_000,
+            state_guard_lockout_ms: 60_000,
+        }
+    }
+}
+
 /// Telemetry event for a single step within a layer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepTelemetry {
@@ -322,6 +464,15 @@ pub struct SystemConfig {
     /// Audit mode configuration (used in audit mode).
     #[serde(default)]
     pub audit_config: AuditConfig,
+    /// Task-driven event convergence configuration.
+    #[serde(default)]
+    pub task_convergence: ZeroFallbackConfig,
+    /// Multi-timeframe analysis configuration.
+    #[serde(default)]
+    pub mtf_config: MtfConfig,
+    /// Orchestrator supervisor configuration.
+    #[serde(default)]
+    pub orchestrator_config: OrchestratorConfig,
 }
 
 impl Default for SystemConfig {
@@ -332,6 +483,9 @@ impl Default for SystemConfig {
             system_mode: SystemMode::from_env(),
             latency_config: LatencyConfig::default(),
             audit_config: AuditConfig::default(),
+            task_convergence: ZeroFallbackConfig::default(),
+            mtf_config: MtfConfig::default(),
+            orchestrator_config: OrchestratorConfig::default(),
         }
     }
 }
@@ -421,6 +575,11 @@ pub struct Config {
     pub system_mode: SystemMode,
     pub latency_config: LatencyConfig,
     pub audit_config: AuditConfig,
+    
+    // === Institutional Architecture ===
+    pub task_convergence: ZeroFallbackConfig,
+    pub mtf_config: MtfConfig,
+    pub orchestrator_config: OrchestratorConfig,
 }
 
 impl Default for Config {
@@ -476,6 +635,9 @@ impl Default for Config {
             } else {
                 AuditConfig::disabled()
             },
+            task_convergence: sys.task_convergence.clone(),
+            mtf_config: sys.mtf_config.clone(),
+            orchestrator_config: sys.orchestrator_config.clone(),
         }
     }
 }

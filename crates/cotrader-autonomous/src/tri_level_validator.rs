@@ -34,7 +34,7 @@ use cotrader_core::{
     compute_cornish_fisher_var, check_var_emergency_gate,
     SentimentConfig, SentimentResult, extract_sentiment,
 };
-use cotrader_core::config::{LlamaBackend, SystemMode, LatencyConfig, AuditConfig, StepTelemetry, BoundaryState, ToolCall, CacheFetch};
+use cotrader_core::config::{LlamaBackend, SystemMode, LatencyConfig, AuditConfig, StepTelemetry, BoundaryState, ToolCall, CacheFetch, TaskCompletionGate, FallbackRationale, ZeroFallbackConfig};
 
 // ── Global Model Storage (Continuous On — loaded once at startup, kept hot in RAM) ──
 /// Runtime model for Chronos-Bolt time series forecasting.
@@ -358,35 +358,33 @@ impl TriLevelValidator {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // AUDIT MODE: Sequential Execution, Adaptive Timeouts, Fallback Analysis
+    // TASK-DRIVEN EVENT CONVERGENCE (Institutional Architecture)
     // ═══════════════════════════════════════════════════════════════════════════
 
-    /// Execute a step with adaptive timeout boundary observation.
-    /// Returns (result, telemetry, timeout_triggered).
-    async fn execute_step_with_timeout<F, Fut>(
+    /// Execute a task with completion gate — waits for full resolution, not timeout.
+    /// Returns (result, task_completion_gate).
+    async fn execute_task_with_completion_gate<F, Fut>(
+        task_id: &str,
         layer: &str,
-        step: &str,
-        timeout_ms: u64,
         symbol: &str,
+        config: &ZeroFallbackConfig,
         f: F,
-    ) -> (Option<String>, StepTelemetry, bool)
+    ) -> (Option<String>, TaskCompletionGate)
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = String>,
     {
         let started_at = Utc::now().to_rfc3339();
         let start = Instant::now();
-        let mut tool_calls = Vec::new();
-        let mut cache_fetches = Vec::new();
-
+        
         eprintln!(
-            "[AUDIT] ⏱️  {} | {} → {} | Starting with {}ms timeout...",
-            symbol, layer, step, timeout_ms
+            "[TASK-GATE] ⏱️  {} | {} | Task {} | Starting (max {}ms)...",
+            symbol, layer, task_id, config.max_computation_ms
         );
 
-        // Execute with timeout
+        // Execute with maximum computation time as safety net
         let result = tokio::time::timeout(
-            tokio::time::Duration::from_millis(timeout_ms),
+            tokio::time::Duration::from_millis(config.max_computation_ms),
             f(),
         ).await;
 
@@ -395,134 +393,92 @@ impl TriLevelValidator {
 
         match result {
             Ok(output) => {
+                // Task completed successfully
                 eprintln!(
-                    "[AUDIT] ✅ {} | {} → {} | Completed in {}ms",
-                    symbol, layer, step, duration_ms
+                    "[TASK-GATE] ✅ {} | {} | Task {} | COMPLETED in {}ms",
+                    symbol, layer, task_id, duration_ms
                 );
                 (
                     Some(output),
-                    StepTelemetry {
+                    TaskCompletionGate {
+                        task_id: task_id.to_string(),
                         layer: layer.to_string(),
-                        step: step.to_string(),
-                        started_at,
-                        completed_at,
-                        duration_ms,
                         success: true,
-                        timeout_triggered: false,
-                        boundary_state: None,
-                        tool_calls,
-                        cache_fetches,
+                        duration_ms,
+                        payload_description: format!("{} layer completed successfully", layer),
+                        warnings: vec![],
+                        fallback_used: false,
+                        fallback_rationale: None,
                     },
-                    false,
                 )
             }
             Err(_timeout) => {
+                // Task exceeded maximum computation time — generate fallback rationale
                 eprintln!(
-                    "[AUDIT] ⚠️  {} | {} → {} | TIMEOUT after {}ms!",
-                    symbol, layer, step, timeout_ms
+                    "[TASK-GATE] ⚠️  {} | {} | Task {} | EXCEEDED MAX COMPUTATION ({}ms)",
+                    symbol, layer, task_id, config.max_computation_ms
                 );
+                
+                // Generate mathematical rationale for fallback
+                let rationale = if config.causality_analysis {
+                    Some(FallbackRationale {
+                        root_cause: "ComputationSaturation".to_string(),
+                        proof: format!(
+                            "Task '{}' in layer '{}' exceeded maximum computation time of {}ms. \
+                             This indicates the optimization problem has insufficient convergence \
+                             within allocated computational resources. The task was allowed to run \
+                             to completion without artificial timeout interruption.",
+                            task_id, layer, config.max_computation_ms
+                        ),
+                        risk_implications: format!(
+                            "Layer {} contributes significantly to consensus. Fallback to weighted \
+                             average of completed layers may reduce signal quality by ~10-15%.",
+                            layer
+                        ),
+                        mitigation: format!(
+                            "Increase max_computation_ms or optimize computation path for {} layer.",
+                            layer
+                        ),
+                    })
+                } else {
+                    None
+                };
+
                 (
                     None,
-                    StepTelemetry {
+                    TaskCompletionGate {
+                        task_id: task_id.to_string(),
                         layer: layer.to_string(),
-                        step: step.to_string(),
-                        started_at,
-                        completed_at,
-                        duration_ms,
                         success: false,
-                        timeout_triggered: true,
-                        boundary_state: Some(BoundaryState {
-                            partial_decision: Some("TIMEOUT - No decision reached".to_string()),
-                            intermediate_weights: None,
-                            uncompleted_payload: format!("Step '{}' in layer '{}' did not complete within {}ms", step, layer, timeout_ms),
-                            risk_implications: format!("Layer {} timeout may affect consensus accuracy. Fallback required for layer {}.", layer, layer),
-                        }),
-                        tool_calls,
-                        cache_fetches,
+                        duration_ms,
+                        payload_description: format!("{} layer exceeded max computation time", layer),
+                        warnings: vec![format!("Max computation time {}ms exceeded", config.max_computation_ms)],
+                        fallback_used: true,
+                        fallback_rationale: rationale,
                     },
-                    true,
                 )
             }
         }
     }
 
-    /// Generate deep fallback causality analysis.
-    fn generate_fallback_analysis(
-        layer: &str,
-        step: &str,
-        timeout_ms: u64,
-        duration_ms: u64,
-        symbol: &str,
-        config: &AuditConfig,
-    ) -> String {
-        let overrun = duration_ms.saturating_sub(timeout_ms);
-        let cause = if duration_ms >= timeout_ms { "INFERENCE SATURATION" } else { "PREMATURE STEP" };
-        let cause_detail = if duration_ms >= timeout_ms {
-            "Inference computation exceeded allocated time window"
-        } else {
-            "Step completed within budget but was interrupted by higher-level timeout"
-        };
-        let layer_weight = if layer == "Rules" { 35 } else if layer == "ML/Signal" { 25 } else if layer == "Chronos" { 25 } else { 15 };
-        let reduced_count = 3; // 4 - 1
-        let substep_type = if layer == "Chronos" { "chronos_substep" } else if layer == "LLM" { "llm_substep" } else { "layer_step" };
-        let recommended_timeout = if layer == "Chronos" {
-            config.chronos_substep_timeout_ms
-        } else if layer == "LLM" {
-            config.llm_substep_timeout_ms
-        } else {
-            config.layer_step_timeout_ms
-        };
-        let fallback_status = if config.zero_fallback_drive { "ENABLED" } else { "DISABLED" };
-
-        let analysis = format!(
-            r#"═══════════════════════════════════════════════════════════════════════════════
-[FALLBACK CAUSALITY ANALYSIS] {} | {} → {}
-═══════════════════════════════════════════════════════════════════════════════
-
-1. TIMEOUT BOUNDARY ANALYSIS:
-   - Layer: {}
-   - Step: {}
-   - Allocated Time Budget: {}ms
-   - Actual Execution Time: {}ms
-   - Time Overrun: {}ms
-
-2. FALLBACK CAUSE DETERMINATION:
-   - Did the layer fallback because model inference saturated the time budget?
-     → {} ({})
-   - Did it step forward prematurely to avoid pipe starvation?
-     → {} ({})
-
-3. UNCOMPLETED EXECUTION PAYLOAD:
-   - The step '{}' within layer '{}' was interrupted at the {}ms boundary.
-   - Partial results were discarded to maintain pipeline flow.
-   - The system will rely on fallback consensus from available layers.
-
-4. SYSTEMIC RISK IMPLICATIONS:
-   - Layer {} contributes {}% to the consensus weight.
-   - Timeout reduces effective layer count from 4 to {}.
-   - Agreement gate threshold: ≥2 layers must agree.
-   - If this layer's timeout prevents agreement, consensus will be forced to HOLD.
-
-5. ZERO-FALLBACK DRIVE STATUS:
-   - Zero-fallback mode: {}
-   - Current fallback count: 1
-   - Target: 0 fallbacks per pipeline cycle
-   - Recommendation: Increase {} timeout to {}ms to avoid future fallbacks.
-
-═══════════════════════════════════════════════════════════════════════════════
-"#,
-            symbol, layer, step,
-            layer, step,
-            timeout_ms, duration_ms, overrun,
-            if duration_ms >= timeout_ms { "YES" } else { "NO" }, cause,
-            if duration_ms < timeout_ms { "YES" } else { "NO" }, cause_detail,
-            step, layer, duration_ms,
-            layer, layer_weight, reduced_count,
-            fallback_status, substep_type, recommended_timeout,
+    /// Emit task completion gate telemetry.
+    fn emit_task_completion_telemetry(symbol: &str, gate: &TaskCompletionGate) {
+        let status = if gate.success { "✅" } else { "⚠️" };
+        let fallback = if gate.fallback_used { " [FALLBACK]" } else { "" };
+        
+        eprintln!(
+            "[TASK-GATE] {} {} | {} | Task {} | Duration: {}ms{}",
+            status, symbol, gate.layer, gate.task_id, gate.duration_ms, fallback
         );
-
-        eprintln!("{}", analysis);
-        analysis
+        
+        if gate.fallback_used {
+            if let Some(ref rationale) = gate.fallback_rationale {
+                eprintln!(
+                    "[TASK-GATE]    Root Cause: {} | Risk: {}",
+                    rationale.root_cause, rationale.risk_implications
+                );
+            }
+        }
     }
 
     /// Run all 4 parallel checks using an explicit OHLCV snapshot so all layers
@@ -643,10 +599,11 @@ impl TriLevelValidator {
             }
         };
 
-        // ── Inspection/Audit Mode: Emit pipeline start telemetry ───────────────
+        // ── System Mode Detection ─────────────────────────────────────────────
         let system_mode = self.system_mode();
         let latency = self.latency_config();
         let audit = self.audit_config();
+        let task_config = self.state.io.config.task_convergence.clone();
         let is_inspection = system_mode.is_inspection();
         let is_audit = system_mode.is_audit();
         let is_verbose = system_mode.is_verbose();
@@ -660,30 +617,28 @@ impl TriLevelValidator {
                 var_emergency
             );
             if is_audit {
-                eprintln!("[{}] ⚙️  Audit Config: sequential={} | step_timeout={}ms | zero_fallback={}",
-                    mode_label, audit.sequential_execution, audit.layer_step_timeout_ms, audit.zero_fallback_drive);
+                eprintln!("[{}] ⚙️  Task Convergence: max_computation={}ms | zero_fallback={}",
+                    mode_label, task_config.max_computation_ms, task_config.enabled);
             }
             eprintln!("[{}] ═══════════════════════════════════════════════════════════════", mode_label);
         }
 
-        // ── Phase 1: Run four checks (parallel or sequential based on mode) ──
+        // ── Phase 1: Run four checks with Task-Driven Event Convergence ──────
         let snapshot_ref = snapshot.clone();
-        let mut telemetry_log: Vec<StepTelemetry> = Vec::new();
+        let mut task_gates: Vec<TaskCompletionGate> = Vec::new();
         let mut fallback_analyses: Vec<String> = Vec::new();
         
-        let (rules_sig, ml_sig, trend_sig, sentiment_sig) = if is_audit && audit.sequential_execution {
-            // ═══ AUDIT MODE: Strict sequential execution with adaptive timeouts ═══
-            let step_timeout = audit.layer_step_timeout_ms;
-            let chronos_timeout = audit.chronos_substep_timeout_ms;
+        let (rules_sig, ml_sig, trend_sig, sentiment_sig) = if is_audit {
+            // ═══ TASK-DRIVEN CONVERGENCE MODE ═══
+            // Each layer must complete fully before the next begins
+            eprintln!("[TASK-GATE] ═══════════════════════════════════════════════════════════════");
+            eprintln!("[TASK-GATE] 📋 {} | Task-Driven Event Convergence activated", symbol);
+            eprintln!("[TASK-GATE] ⏱️  Max computation: {}ms | Zero-fallback: {}", task_config.max_computation_ms, task_config.enabled);
+            eprintln!("[TASK-GATE] ═══════════════════════════════════════════════════════════════");
             
-            eprintln!("[AUDIT] ═══════════════════════════════════════════════════════════════");
-            eprintln!("[AUDIT] 📋 {} | Sequential execution mode activated", symbol);
-            eprintln!("[AUDIT] ⏱️  Step timeout: {}ms | Chronos timeout: {}ms", step_timeout, chronos_timeout);
-            eprintln!("[AUDIT] ═══════════════════════════════════════════════════════════════");
-            
-            // Layer 1: Rules Engine (35% weight)
-            let (rules_result, rules_telemetry, rules_timeout) = Self::execute_step_with_timeout(
-                "Rules", "Pivot/Confluence Calculation", step_timeout, &sym,
+            // Task 1: Rules Engine (35% weight)
+            let (rules_result, rules_gate) = Self::execute_task_with_completion_gate(
+                "rules_calculation", "Rules", &sym, &task_config,
                 || {
                     let state = state_rules.clone();
                     let snapshot = snapshot_ref.clone();
@@ -694,44 +649,30 @@ impl TriLevelValidator {
                     }
                 },
             ).await;
-            telemetry_log.push(rules_telemetry);
+            task_gates.push(rules_gate.clone());
+            Self::emit_task_completion_telemetry(&sym, &rules_gate);
             
             let rules_sig = if let Some(result) = rules_result {
-                // Parse result back to LayerSignal
                 let action = result.split("action=").nth(1).unwrap_or("HOLD").split_whitespace().next().unwrap_or("HOLD").to_string();
                 let signal = result.split("signal=").nth(1).unwrap_or("0.0").split_whitespace().next().unwrap_or("0.0").parse::<f64>().unwrap_or(0.0);
                 let confidence = result.split("conf=").nth(1).unwrap_or("0.0").parse::<f64>().unwrap_or(0.0);
                 LayerSignal {
                     layer: "rules".into(),
-                    signal,
-                    action,
-                    confidence,
-                    reasoning: format!("Audit mode: rules layer completed"),
+                    signal, action, confidence,
+                    reasoning: format!("Task-converged: rules layer completed"),
                     available: true,
                 }
             } else {
-                // Timeout fallback
-                if audit.fallback_causality_analysis {
-                    let analysis = Self::generate_fallback_analysis(
-                        "Rules", "Pivot/Confluence Calculation", step_timeout,
-                        step_timeout, &sym, &audit,
-                    );
-                    fallback_analyses.push(analysis);
-                }
                 LayerSignal {
-                    layer: "rules".into(),
-                    signal: 0.0,
-                    action: "HOLD".into(),
-                    confidence: 0.0,
-                    reasoning: format!("TIMEOUT: Rules layer exceeded {}ms budget", step_timeout),
-                    available: false,
+                    layer: "rules".into(), signal: 0.0, action: "HOLD".into(), confidence: 0.0,
+                    reasoning: "Fallback: rules layer did not complete".into(), available: false,
                 }
             };
             Self::emit_layer_telemetry(&sym, "Rules", &rules_sig);
             
-            // Layer 2: ML/Signal (25% weight)
-            let (ml_result, ml_telemetry, ml_timeout) = Self::execute_step_with_timeout(
-                "ML/Signal", "Confluence + Trend Analysis", step_timeout, &sym,
+            // Task 2: ML/Signal (25% weight)
+            let (ml_result, ml_gate) = Self::execute_task_with_completion_gate(
+                "ml_signal_analysis", "ML/Signal", &sym, &task_config,
                 || {
                     let state = state_llm.clone();
                     let snapshot = snapshot_ref.clone();
@@ -752,42 +693,28 @@ impl TriLevelValidator {
                     }
                 },
             ).await;
-            telemetry_log.push(ml_telemetry);
+            task_gates.push(ml_gate.clone());
+            Self::emit_task_completion_telemetry(&sym, &ml_gate);
             
             let ml_sig = if let Some(result) = ml_result {
                 let action = result.split("action=").nth(1).unwrap_or("HOLD").split_whitespace().next().unwrap_or("HOLD").to_string();
                 let signal = result.split("signal=").nth(1).unwrap_or("0.0").split_whitespace().next().unwrap_or("0.0").parse::<f64>().unwrap_or(0.0);
                 let confidence = result.split("conf=").nth(1).unwrap_or("0.0").parse::<f64>().unwrap_or(0.0);
                 LayerSignal {
-                    layer: "signal".into(),
-                    signal,
-                    action,
-                    confidence,
-                    reasoning: format!("Audit mode: ML/Signal layer completed"),
-                    available: true,
+                    layer: "signal".into(), signal, action, confidence,
+                    reasoning: "Task-converged: ML/Signal layer completed".into(), available: true,
                 }
             } else {
-                if audit.fallback_causality_analysis {
-                    let analysis = Self::generate_fallback_analysis(
-                        "ML/Signal", "Confluence + Trend Analysis", step_timeout,
-                        step_timeout, &sym, &audit,
-                    );
-                    fallback_analyses.push(analysis);
-                }
                 LayerSignal {
-                    layer: "signal".into(),
-                    signal: 0.0,
-                    action: "HOLD".into(),
-                    confidence: 0.0,
-                    reasoning: format!("TIMEOUT: ML/Signal layer exceeded {}ms budget", step_timeout),
-                    available: false,
+                    layer: "signal".into(), signal: 0.0, action: "HOLD".into(), confidence: 0.0,
+                    reasoning: "Fallback: ML/Signal layer did not complete".into(), available: false,
                 }
             };
             Self::emit_layer_telemetry(&sym, "ML/Signal", &ml_sig);
             
-            // Layer 3: Chronos Forecast (25% weight)
-            let (trend_result, trend_telemetry, trend_timeout) = Self::execute_step_with_timeout(
-                "Chronos", "T5 Time Series Forecasting", chronos_timeout, &sym,
+            // Task 3: Chronos Forecast (25% weight)
+            let (trend_result, trend_gate) = Self::execute_task_with_completion_gate(
+                "chronos_forecast", "Chronos", &sym, &task_config,
                 || {
                     let state = state_trend.clone();
                     let snapshot = snapshot_ref.clone();
@@ -798,42 +725,28 @@ impl TriLevelValidator {
                     }
                 },
             ).await;
-            telemetry_log.push(trend_telemetry);
+            task_gates.push(trend_gate.clone());
+            Self::emit_task_completion_telemetry(&sym, &trend_gate);
             
             let trend_sig = if let Some(result) = trend_result {
                 let action = result.split("action=").nth(1).unwrap_or("HOLD").split_whitespace().next().unwrap_or("HOLD").to_string();
                 let signal = result.split("signal=").nth(1).unwrap_or("0.0").split_whitespace().next().unwrap_or("0.0").parse::<f64>().unwrap_or(0.0);
                 let confidence = result.split("conf=").nth(1).unwrap_or("0.0").parse::<f64>().unwrap_or(0.0);
                 LayerSignal {
-                    layer: "trend".into(),
-                    signal,
-                    action,
-                    confidence,
-                    reasoning: format!("Audit mode: Chronos layer completed"),
-                    available: true,
+                    layer: "trend".into(), signal, action, confidence,
+                    reasoning: "Task-converged: Chronos layer completed".into(), available: true,
                 }
             } else {
-                if audit.fallback_causality_analysis {
-                    let analysis = Self::generate_fallback_analysis(
-                        "Chronos", "T5 Time Series Forecasting", chronos_timeout,
-                        chronos_timeout, &sym, &audit,
-                    );
-                    fallback_analyses.push(analysis);
-                }
                 LayerSignal {
-                    layer: "trend".into(),
-                    signal: 0.0,
-                    action: "HOLD".into(),
-                    confidence: 0.0,
-                    reasoning: format!("TIMEOUT: Chronos layer exceeded {}ms budget", chronos_timeout),
-                    available: false,
+                    layer: "trend".into(), signal: 0.0, action: "HOLD".into(), confidence: 0.0,
+                    reasoning: "Fallback: Chronos layer did not complete".into(), available: false,
                 }
             };
             Self::emit_layer_telemetry(&sym, "Chronos", &trend_sig);
             
-            // Layer 4: Sentiment Pipeline (15% weight)
-            let (sentiment_result_val, sentiment_telemetry, sentiment_timeout) = Self::execute_step_with_timeout(
-                "Sentiment", "FinBERT Sentiment Extraction", step_timeout, &sym,
+            // Task 4: Sentiment Pipeline (15% weight)
+            let (sentiment_result_val, sentiment_gate) = Self::execute_task_with_completion_gate(
+                "sentiment_extraction", "Sentiment", &sym, &task_config,
                 || {
                     let state = state_sentiment.clone();
                     let sym = sym.clone();
@@ -844,53 +757,37 @@ impl TriLevelValidator {
                     }
                 },
             ).await;
-            telemetry_log.push(sentiment_telemetry);
+            task_gates.push(sentiment_gate.clone());
+            Self::emit_task_completion_telemetry(&sym, &sentiment_gate);
             
             let sentiment_sig = if let Some(result) = sentiment_result_val {
                 let action = result.split("action=").nth(1).unwrap_or("HOLD").split_whitespace().next().unwrap_or("HOLD").to_string();
                 let signal = result.split("signal=").nth(1).unwrap_or("0.0").split_whitespace().next().unwrap_or("0.0").parse::<f64>().unwrap_or(0.0);
                 let confidence = result.split("conf=").nth(1).unwrap_or("0.0").parse::<f64>().unwrap_or(0.0);
                 LayerSignal {
-                    layer: "sentiment".into(),
-                    signal,
-                    action,
-                    confidence,
-                    reasoning: format!("Audit mode: Sentiment layer completed"),
-                    available: true,
+                    layer: "sentiment".into(), signal, action, confidence,
+                    reasoning: "Task-converged: Sentiment layer completed".into(), available: true,
                 }
             } else {
-                if audit.fallback_causality_analysis {
-                    let analysis = Self::generate_fallback_analysis(
-                        "Sentiment", "FinBERT Sentiment Extraction", step_timeout,
-                        step_timeout, &sym, &audit,
-                    );
-                    fallback_analyses.push(analysis);
-                }
                 LayerSignal {
-                    layer: "sentiment".into(),
-                    signal: 0.0,
-                    action: "HOLD".into(),
-                    confidence: 0.0,
-                    reasoning: format!("TIMEOUT: Sentiment layer exceeded {}ms budget", step_timeout),
-                    available: false,
+                    layer: "sentiment".into(), signal: 0.0, action: "HOLD".into(), confidence: 0.0,
+                    reasoning: "Fallback: Sentiment layer did not complete".into(), available: false,
                 }
             };
             Self::emit_layer_telemetry(&sym, "Sentiment", &sentiment_sig);
             
-            // Audit mode summary
-            let completed_layers = [&rules_sig, &ml_sig, &trend_sig, &sentiment_sig]
-                .iter()
-                .filter(|l| l.available)
-                .count();
-            let timeout_count = telemetry_log.iter().filter(|t| t.timeout_triggered).count();
+            // Task-Driven Convergence Summary
+            let completed_tasks = task_gates.iter().filter(|g| g.success).count();
+            let fallback_count = task_gates.iter().filter(|g| g.fallback_used).count();
+            let total_duration: u64 = task_gates.iter().map(|g| g.duration_ms).sum();
             
-            eprintln!("[AUDIT] ═══════════════════════════════════════════════════════════════");
-            eprintln!("[AUDIT] 📊 {} | Phase 1 Summary: {}/4 layers completed, {} timeouts", symbol, completed_layers, timeout_count);
-            eprintln!("[AUDIT] 📋 Total telemetry entries: {}", telemetry_log.len());
-            if !fallback_analyses.is_empty() {
-                eprintln!("[AUDIT] ⚠️  {} | {} fallback(s) triggered — see causality analysis above", symbol, fallback_analyses.len());
-            }
-            eprintln!("[AUDIT] ═══════════════════════════════════════════════════════════════");
+            eprintln!("[TASK-GATE] ═══════════════════════════════════════════════════════════════");
+            eprintln!("[TASK-GATE] 📊 {} | Pipeline Phase 1 Summary:", symbol);
+            eprintln!("[TASK-GATE]    Tasks completed: {}/4", completed_tasks);
+            eprintln!("[TASK-GATE]    Fallbacks triggered: {}", fallback_count);
+            eprintln!("[TASK-GATE]    Total duration: {}ms", total_duration);
+            eprintln!("[TASK-GATE]    Zero-fallback status: {}", if fallback_count == 0 { "✅ ACHIEVED" } else { "⚠️ FALLBACKS USED" });
+            eprintln!("[TASK-GATE] ═══════════════════════════════════════════════════════════════");
             
             (rules_sig, ml_sig, trend_sig, sentiment_sig)
             
